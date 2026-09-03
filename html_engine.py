@@ -317,29 +317,53 @@ def _get_browser():
             pass
     from playwright.sync_api import sync_playwright
     _tls.playwright = sync_playwright().start()
-    # Confirmed directly (live, against the real installed app, across
-    # several reproduction attempts): Playwright's OWN default resolution
-    # for chromium.launch() is unreliable specifically once this app is a
-    # frozen .exe — it can resolve to chrome-headless-shell (a stripped
-    # screenshot-only build with no PDF/print support, so page.pdf()
-    # fails outright) instead of the full chrome.exe the SAME browsers
-    # cache also has, and which apps this picks seems to depend on
-    # something about how the .exe itself was launched, not on anything
-    # this app controls. Rather than call the default resolution AT ALL
-    # and catch/recover from whichever way it goes wrong, look for the
-    # real chrome.exe ourselves FIRST and launch that directly whenever
-    # it's there — deterministic, and sidesteps the unreliable default
-    # path entirely instead of papering over one specific failure mode of
-    # it. Only falls through to the default resolution (dev's own
-    # `python app.py`, or an environment that genuinely never had
-    # `playwright install chromium` run) when no local copy is found.
-    import glob as _glob
-    browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
-    candidates = _glob.glob(os.path.join(browsers_dir, "chromium-*", "chrome-win64", "chrome.exe"))
-    if candidates:
-        _tls.browser = _tls.playwright.chromium.launch(executable_path=candidates[0])
+    # The packaged app used to depend on a SEPARATELY-installed Chromium
+    # (`playwright install chromium`, living outside the app entirely in
+    # %LOCALAPPDATA%\ms-playwright) — confirmed directly, across many
+    # live reproduction attempts against the real installed app (including
+    # a real user's own normal launch, not just automated testing), to be
+    # fundamentally unreliable: Playwright's own default resolution picks
+    # the wrong browser variant (chrome-headless-shell, which has no
+    # PDF/print support at all) in a frozen build, AND — more
+    # fundamentally — that external folder can become entirely invisible
+    # to this app in some launch contexts even though it demonstrably
+    # exists (confirmed independently from outside the process, and
+    # confirmed by BOTH Python's own checks AND Playwright's separate
+    # Node-side check agreeing it "doesn't exist"). Whatever the real
+    # cause, depending on anything outside the app's own installed files
+    # is the actual problem.
+    #
+    # Fix: bundle the real chrome.exe INTO the app itself (see
+    # bundled_browser/ + build.bat's --add-data), read through
+    # engine.BASE the same proven-reliable way templates_html/static
+    # already are, and prefer that over the external cache entirely.
+    # Falls back to the external cache (then Playwright's own default
+    # resolution) only for a dev checkout that never populated
+    # bundled_browser/ locally — see build.bat's own comment for how to
+    # populate it.
+    candidate = None
+    bundled_root = os.path.join(BASE, "bundled_browser")
+    if os.path.isdir(bundled_root):
+        for name in os.listdir(bundled_root):
+            p = os.path.join(bundled_root, name, "chrome-win64", "chrome.exe")
+            if os.path.isfile(p):
+                candidate = p
+                break
+    if candidate:
+        _tls.browser = _tls.playwright.chromium.launch(executable_path=candidate)
     else:
-        _tls.browser = _tls.playwright.chromium.launch()
+        try:
+            _tls.browser = _tls.playwright.chromium.launch()
+        except Exception as e:
+            msg = str(e)
+            if "Executable doesn't exist" not in msg:
+                raise
+            browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
+            m = re.search(r"chromium_headless_shell-(\d+)", msg)
+            if not m:
+                raise
+            fallback = os.path.join(browsers_dir, "chromium-" + m.group(1), "chrome-win64", "chrome.exe")
+            _tls.browser = _tls.playwright.chromium.launch(executable_path=fallback)
     atexit.register(_close_thread_browser, _tls)
     return _tls.browser
 

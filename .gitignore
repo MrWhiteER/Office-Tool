@@ -28,6 +28,13 @@ r2_readonly.json
 # source. See build.bat / installer.iss.
 build/
 dist/
+
+# The actual Chromium browser bundled into the installer for PDF/preview
+# rendering (see html_engine.py's _get_browser()) — copied in by build.bat
+# from this machine's own `playwright install chromium` cache, not source,
+# and far too large (400MB+) for git regardless. installer_output/'s own
+# .exe is the real, shippable artifact; this is just a build-time input.
+bundled_browser/
 _internal/
 installer_output/
 *.spec

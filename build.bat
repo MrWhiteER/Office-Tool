@@ -5,12 +5,29 @@ REM browser needed), built from the same app.py/engine.py/html_engine.py
 REM this project runs in dev with `python app.py`.
 REM
 REM Requires `playwright install chromium` to have been run at least once on
-REM THIS machine already (the .exe uses that shared browser cache rather
-REM than bundling its own copy of Chromium — see html_engine.py's own
-REM comment on PLAYWRIGHT_BROWSERS_PATH for why).
+REM THIS machine already — NOT so the .exe can use that shared cache at
+REM runtime (an earlier design; confirmed unreliable — see html_engine.py's
+REM _get_browser() for the full story) but so build.bat below can copy the
+REM real chrome.exe from it INTO bundled_browser\, which then ships inside
+REM the installer itself. bundled_browser\ is gitignored (400MB+, and a
+REM real build input regenerated here, not source) — this step (re)builds
+REM it from whatever's in %LOCALAPPDATA%\ms-playwright right now.
 where python >nul 2>nul || (echo Python is not installed. Get it from https://python.org & pause & exit /b)
 python -m pip install -r requirements.txt
 python -m pip show pyinstaller >nul 2>nul || python -m pip install pyinstaller
+if not exist bundled_browser\*\chrome-win64\chrome.exe (
+  echo Populating bundled_browser\ from %LOCALAPPDATA%\ms-playwright ...
+  for /d %%D in ("%LOCALAPPDATA%\ms-playwright\chromium-*") do (
+    if exist "%%D\chrome-win64\chrome.exe" (
+      mkdir "bundled_browser\%%~nxD" 2>nul
+      xcopy /e /i /y /q "%%D" "bundled_browser\%%~nxD" >nul
+    )
+  )
+)
+if not exist bundled_browser\*\chrome-win64\chrome.exe (
+  echo No local Chromium install found to bundle — run "playwright install chromium" first.
+  pause & exit /b
+)
 REM --clean (plus deleting any leftover dist\build folders first) — found
 REM the hard way: an incremental PyInstaller build can silently keep a
 REM STALE cached copy of a module even after its source changed, with no
@@ -28,6 +45,7 @@ pyinstaller --name OfficeTool --noconfirm --clean --windowed ^
   --add-data "static;static" ^
   --add-data "VERSION;." ^
   --add-data "r2_readonly.json;." ^
+  --add-data "bundled_browser;bundled_browser" ^
   --collect-all playwright ^
   app.py
 echo.
