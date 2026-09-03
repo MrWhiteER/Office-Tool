@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="{{ doc_page_js }}"></script>
+<style>
+  /* Self-hosted (see html_engine._font_data_uri) instead of a Google Fonts
+     <link> — matches every other HTML doc type in this app. Archivo/bold
+     tracked caps for headings echoes the "ARTEMIS" wordmark's own weight;
+     IBM Plex Sans carries the body. Originally a dark charcoal header/table/
+     total (mirroring the brand switcher's own near-black chip) — swapped to
+     this light-gray-and-amber palette per explicit request for a brighter
+     look; amber stays the one accent color throughout. */
+  @font-face{font-family:'Archivo';src:url({{ archivo_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'IBM Plex Sans';src:url({{ ibmplexsans_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  doc-page:not(:defined){visibility:hidden}
+  body{margin:0;background:#525659;font-family:'IBM Plex Sans',sans-serif;color:#1f2328}
+  .num{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<doc-page size="a4" margin="14mm">
+
+  <div slot="header" style="padding-bottom:10px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:20px;background:#eef0f3;border-radius:10px;padding:14px 20px;">
+      <img src="{{ logo_src }}" alt="{{ brand_label }}" style="height:40px;width:auto;display:block;border-radius:6%;">
+      <div style="text-align:right;">
+        <div style="font-family:'Archivo',sans-serif;font-weight:800;font-size:19px;letter-spacing:2.5px;color:#1f2328;text-transform:uppercase;line-height:1;">Expense Report</div>
+        <div style="height:3px;width:56px;background:#e2952c;margin:8px 0 0 auto;border-radius:2px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div slot="footer" style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid #e5e9ee;padding-top:7px;margin-top:2px;font-size:8.5px;color:#8a919b;letter-spacing:.3px;">
+    <span>{{ brand_label }}</span>
+    <span>Internal Expense Report</span>
+  </div>
+
+  <!-- ===== META GRID ===== -->
+  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:12px;margin:18px 0 18px;">
+    <div style="border:1px solid #e5e9ee;border-radius:6px;padding:12px 16px;">
+      <div style="font-family:'Archivo',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Employee</div>
+      <div style="font-size:14px;font-weight:700;color:#1f2328;margin-top:3px;">{{ employee }}</div>
+      {% if category %}
+      <div style="font-family:'Archivo',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;margin-top:12px;">Category / Reference</div>
+      <div style="font-size:11px;color:#3f454d;margin-top:3px;">{{ category }}</div>
+      {% endif %}
+    </div>
+    <div style="display:flex;flex-direction:column;border:1px solid #e5e9ee;border-radius:6px;overflow:hidden;">
+      <div style="padding:8px 16px;border-bottom:1px solid #e5e9ee;flex:1;">
+        <div style="font-family:'Archivo',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Report No.</div>
+        <div style="font-size:12px;font-weight:700;margin-top:2px;" class="num">{{ report_number }}</div>
+      </div>
+      <div style="padding:8px 16px;border-bottom:1px solid #e5e9ee;flex:1;">
+        <div style="font-family:'Archivo',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Date</div>
+        <div style="font-size:12px;font-weight:700;margin-top:2px;">{{ date }}</div>
+      </div>
+      <div style="padding:8px 16px;flex:1;">
+        <div style="font-family:'Archivo',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Period</div>
+        <div style="font-size:12px;font-weight:700;margin-top:2px;">{{ period_from }} &ndash; {{ period_to }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== LINE ITEMS ===== -->
+  <table style="width:100%;border-collapse:collapse;font-size:10px;">
+    <thead>
+      <tr style="background:#e7e9ec;color:#1f2328;font-family:'Archivo',sans-serif;border-bottom:2px solid #e2952c;">
+        <th style="padding:8px 6px;text-align:center;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:28px;">No</th>
+        <th style="padding:8px 6px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:64px;">Date</th>
+        <th style="padding:8px 6px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:90px;">Product</th>
+        <th style="padding:8px 8px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;">Description</th>
+        <th style="padding:8px 6px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:90px;">Payment Method</th>
+        <th style="padding:8px 6px;text-align:right;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:84px;">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr style="background:{{ '#f7f5f2' if loop.index0 is even else '#ffffff' }};">
+        <td style="padding:7px 6px;text-align:center;color:#8a919b;border-bottom:1px solid #e5e9ee;" class="num">{{ row.no }}</td>
+        <td style="padding:7px 6px;color:#6b7280;border-bottom:1px solid #e5e9ee;" class="num">{{ row.date }}</td>
+        <td style="padding:7px 6px;font-weight:600;color:#1f2328;border-bottom:1px solid #e5e9ee;">{{ row.product }}</td>
+        <td style="padding:7px 8px;color:#3f454d;border-bottom:1px solid #e5e9ee;">{{ row.description }}</td>
+        <td style="padding:7px 6px;color:#6b7280;border-bottom:1px solid #e5e9ee;">{{ row.payment_method }}</td>
+        <td style="padding:7px 8px;text-align:right;font-weight:700;border-bottom:1px solid #e5e9ee;" class="num">{{ row.amount }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- ===== TOTAL ===== -->
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-top:14px;">
+    <div style="flex:1;max-width:320px;">
+      <div style="font-family:'Archivo',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;margin-bottom:4px;">Amount in Words</div>
+      <div style="font-size:10.5px;color:#3f454d;line-height:1.5;">{{ amount_words }}</div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:28px;width:260px;flex-shrink:0;padding:11px 16px;background:#eef0f3;border-left:4px solid #e2952c;border-radius:4px;">
+      <span style="font-family:'Archivo',sans-serif;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#1f2328;">Total</span>
+      <span class="num" style="font-size:16px;font-weight:800;color:#e2952c;">{{ total }}</span>
+    </div>
+  </div>
+
+  <!-- ===== SIGNATURE ===== -->
+  <div style="width:260px;margin:50px 0 0 auto;text-align:center;">
+    <div style="border-bottom:1.5px solid #1f2328;height:38px;margin-bottom:6px;"></div>
+    <div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:10px;letter-spacing:.5px;color:#1f2328;">Employee Signature</div>
+    <div style="font-size:8px;font-style:italic;color:#a3a8ae;line-height:1.5;margin-top:8px;">By signing this document, the employee confirms that the amount above has been received in full and this reimbursement cannot be disputed or reversed thereafter.</div>
+  </div>
+
+</doc-page>
+</body>
+</html>

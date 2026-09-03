@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="{{ doc_page_js }}"></script>
+<style>
+  /* Reuses the exact tokens shipped for the Sololuce Datasheet (CAT) so an
+     Expense Report reads as a sibling document from the same brand family —
+     same self-hosted fonts, same orange/near-black palette, same rounded
+     card language for the Ordering Table. See templates_html/sololuce_datasheet.html. */
+  @font-face{font-family:'Bodoni Moda';src:url({{ bodonimoda_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'Onest';src:url({{ onest_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  doc-page:not(:defined){visibility:hidden}
+  body{margin:0;background:#525659;font-family:'Onest',sans-serif;color:#231f20}
+  .num{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<doc-page size="a4" margin="12mm">
+
+  <div slot="header" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding-bottom:8px;border-bottom:2.5px solid #ec6b2f;margin-bottom:2px;">
+    <img src="{{ logo_src }}" alt="{{ brand_label }}" style="height:46px;width:auto;display:block;border-radius:4%;">
+    <div style="font-family:'Bodoni Moda',serif;font-weight:700;font-size:24px;letter-spacing:.5px;color:#231f20;text-transform:uppercase;">Expense Report</div>
+  </div>
+
+  <div slot="footer" style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid #d6dbe1;padding-top:6px;margin-top:2px;font-size:9px;font-weight:700;color:#231f20;">
+    <span>&copy;All Rights Reserved</span>
+    <span>{{ website }}</span>
+  </div>
+
+  <!-- ===== META ===== -->
+  <div style="display:flex;gap:14px;margin:16px 0 18px;">
+    <div style="flex:1.4;border:1px solid #e5d9cc;border-radius:8px;padding:12px 16px;">
+      <div style="font-size:8px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:#a3a8ae;">Employee</div>
+      <div style="font-family:'Bodoni Moda',serif;font-size:15px;font-weight:700;color:#231f20;margin-top:3px;">{{ employee }}</div>
+      {% if category %}
+      <div style="font-size:8px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:#a3a8ae;margin-top:11px;">Category / Reference</div>
+      <div style="font-size:10.5px;color:#3f454d;margin-top:3px;">{{ category }}</div>
+      {% endif %}
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;border:1px solid #e5d9cc;border-radius:8px;overflow:hidden;">
+      <div style="padding:8px 16px;border-bottom:1px solid #efe6db;flex:1;">
+        <div style="font-size:8px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:#a3a8ae;">Sheet No.</div>
+        <div style="font-size:11.5px;font-weight:700;margin-top:2px;" class="num">{{ report_number }}</div>
+      </div>
+      <div style="padding:8px 16px;border-bottom:1px solid #efe6db;flex:1;">
+        <div style="font-size:8px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:#a3a8ae;">Date</div>
+        <div style="font-size:11.5px;font-weight:700;margin-top:2px;">{{ date }}</div>
+      </div>
+      <div style="padding:8px 16px;flex:1;">
+        <div style="font-size:8px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:#a3a8ae;">Period</div>
+        <div style="font-size:11.5px;font-weight:700;margin-top:2px;">{{ period_from }} &ndash; {{ period_to }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== LINE ITEMS ===== -->
+  <!-- Same rounded-card table language as the Sololuce Datasheet's own
+       Ordering Table (orange header bar, zebra rows, subtle border). -->
+  <div style="border-radius:8px;overflow:hidden;border:1px solid #e5d9cc;">
+    <div style="display:flex;background:#ec6b2f;font-size:9px;">
+      <div style="flex:0 0 30px;padding:7px 6px;color:#fff;font-weight:700;">No</div>
+      <div style="flex:0 0 62px;padding:7px 6px;color:#fff;font-weight:700;">Date</div>
+      <div style="flex:1 1 90px;padding:7px 6px;color:#fff;font-weight:700;">Product</div>
+      <div style="flex:2 1 160px;padding:7px 6px;color:#fff;font-weight:700;">Description</div>
+      <div style="flex:1 1 90px;padding:7px 6px;color:#fff;font-weight:700;">Payment Method</div>
+      <div style="flex:0 0 84px;padding:7px 6px;color:#fff;font-weight:700;text-align:right;">Amount</div>
+    </div>
+    {% for row in rows %}
+    <div style="display:flex;font-size:9px;background:{{ '#f7f5f2' if loop.index0 is even else '#ffffff' }};{% if not loop.last %}border-bottom:1px solid #f0ece6;{% endif %}">
+      <div style="flex:0 0 30px;padding:6px 6px;color:#8a8a8a;" class="num">{{ row.no }}</div>
+      <div style="flex:0 0 62px;padding:6px 6px;color:#5a5a5a;" class="num">{{ row.date }}</div>
+      <div style="flex:1 1 90px;padding:6px 6px;font-weight:700;">{{ row.product }}</div>
+      <div style="flex:2 1 160px;padding:6px 6px;color:#5a5a5a;">{{ row.description }}</div>
+      <div style="flex:1 1 90px;padding:6px 6px;color:#5a5a5a;">{{ row.payment_method }}</div>
+      <div style="flex:0 0 84px;padding:6px 6px;text-align:right;font-weight:700;" class="num">{{ row.amount }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- ===== TOTAL ===== -->
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-top:14px;">
+    <div style="flex:1;max-width:320px;">
+      <div style="font-size:8px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:#a3a8ae;margin-bottom:4px;">Amount in Words</div>
+      <div style="font-size:10.5px;color:#3f454d;line-height:1.5;">{{ amount_words }}</div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:28px;width:250px;flex-shrink:0;padding:10px 16px;border:1.5px solid #ec6b2f;border-radius:8px;">
+      <span style="font-family:'Bodoni Moda',serif;font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:#231f20;">Total</span>
+      <span class="num" style="font-size:15px;font-weight:700;color:#ec6b2f;">{{ total }}</span>
+    </div>
+  </div>
+
+  <!-- ===== SIGNATURE ===== -->
+  <div style="width:250px;margin:50px 0 0 auto;text-align:center;">
+    <div style="border-bottom:1.5px solid #231f20;height:38px;margin-bottom:6px;"></div>
+    <div style="font-family:'Bodoni Moda',serif;font-weight:700;font-size:10px;letter-spacing:.3px;color:#231f20;">Employee Signature</div>
+    <div style="font-size:8px;font-style:italic;color:#a3a8ae;line-height:1.5;margin-top:8px;">By signing this document, the employee confirms that the amount above has been received in full and this reimbursement cannot be disputed or reversed thereafter.</div>
+  </div>
+
+</doc-page>
+</body>
+</html>

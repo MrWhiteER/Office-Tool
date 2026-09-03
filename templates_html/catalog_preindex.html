@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="{{ doc_page_js }}"></script>
+<style>
+  @font-face{font-family:'Onest';src:url({{ onest_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  doc-page:not(:defined){visibility:hidden}
+  body{margin:0;background:#525659;font-family:'Onest',sans-serif;color:#231f20}
+  .num{font-variant-numeric:tabular-nums}
+  /* Each row of 7 photo cards is its own break-inside:avoid unit (never
+     the whole grid) so a category with more products than fit on one page
+     splits cleanly between rows onto a further page — same idiom as the
+     Ordering Table and the old text-list Pre-index, just applied to a row
+     of photos instead of a row of text. doc-page.js paginates by letting
+     the browser's own print engine flow + break normal content; there is
+     no manual per-page chunking here. */
+  .idxrow{break-inside:avoid;page-break-inside:avoid;display:flex;gap:10px;margin-bottom:18px;}
+  .idxcard{flex:1;min-width:0;}
+  /* Slightly taller than a true square (not a hard aspect-ratio:1) — a
+     small deliberate proportion tweak per explicit request, not a bug. */
+  .idxphoto{width:100%;aspect-ratio:1/1.3;border-radius:2px;overflow:hidden;background:#e5e5e5;display:flex;align-items:center;justify-content:center;}
+  .idxname{display:flex;justify-content:space-between;align-items:baseline;gap:6px;margin-top:8px;}
+  /* One category "block" = its own label+color-bar followed by its own
+     grid — stacked vertically rather than repeated as page chrome, so
+     several short categories can share one physical page (doc-page.js
+     just flows this like any other content; a category's block only
+     starts a fresh page on its own if what's already on the page doesn't
+     leave room). The label+bar is glued to its own first grid row
+     (break-after:avoid) so a category header is never stranded alone at
+     the bottom of a page with its products pushed to the next one. */
+  .idxcatblock{display:flex;gap:14px;}
+  .idxcatblock+.idxcatblock{margin-top:26px;padding-top:20px;border-top:1.5px solid #d6d6d6;}
+  .idxcathead{width:190px;flex-shrink:0;break-after:avoid;page-break-after:avoid;}
+</style>
+</head>
+<body>
+
+<doc-page size="a4" margin="12mm">
+
+  <!-- Logo + "{SECTION} INDEX" — same header bar every catalog doc uses,
+       just Onest Bold instead of the datasheet's own Bodoni Moda, matching
+       the cover's bold rounded title treatment. Category info used to live
+       here too (as repeating page chrome, one category per page) — moved
+       into the flowing body below so multiple categories can share a
+       page; a category's own label only appears once now, right above its
+       first row, not re-stamped on every page it happens to span. -->
+  <div slot="header">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding-bottom:8px;border-bottom:2.5px solid #ec6b2f;">
+      <img src="{{ logo_src }}" alt="Sololuce" style="height:46px;width:auto;display:block;border-radius:4%;">
+      <div style="font-family:'Onest',sans-serif;font-weight:800;font-size:27px;letter-spacing:.3px;color:#231f20;text-transform:uppercase;">{{ section_label }} Index</div>
+    </div>
+  </div>
+
+  <div slot="footer" style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid #d6dbe1;padding-top:6px;margin-top:2px;font-size:9px;font-weight:700;color:#231f20;">
+    <span>&copy;All Rights Reserved</span>
+    <span>{{ website }}</span>
+  </div>
+
+  <div style="margin-top:24px;">
+    {% for cat in categories %}
+    <div class="idxcatblock">
+      <div class="idxcathead">
+        <div style="font-family:'Onest',sans-serif;font-weight:800;font-size:15px;line-height:1.3;letter-spacing:.3px;color:#231f20;">{{ '%02d'|format(cat.number) }} {{ cat.label|upper }}</div>
+        <div style="width:64px;height:7px;border-radius:2px;background:{{ cat.tab_color }};margin-top:9px;"></div>
+      </div>
+      <div style="flex:1;min-width:0;">
+        {% for row in cat.rows|batch(7) %}
+        <div class="idxrow">
+          {% for r in row %}
+          <div class="idxcard">
+            <div class="idxphoto">
+              {% if r.main_photo %}<div style="width:{{ r.main_photo_mask }}%;height:{{ r.main_photo_mask }}%;overflow:hidden;"><img src="{{ r.main_photo }}" style="width:100%;height:100%;object-fit:cover;object-position:{{ r.main_photo_x }}% {{ r.main_photo_y }}%;transform:scale({{ r.main_photo_zoom }});"></div>
+              {% else %}<span style="font-size:7px;font-weight:600;letter-spacing:.3px;color:#a3a8ae;text-transform:uppercase;">No Photo</span>{% endif %}
+            </div>
+            <div class="idxname">
+              <span style="font-weight:600;font-size:9px;">{{ r.product_name }}</span>
+              <span class="num" style="font-weight:700;font-size:9px;flex-shrink:0;">{{ r.page_number }}</span>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+</doc-page>
+</body>
+</html>

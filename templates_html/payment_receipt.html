@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="{{ doc_page_js }}"></script>
+<style>
+  /* Ported from the "Company Templates Rebuild" design handoff's
+     Payment Receipt.dc.html — see html_engine.render_payment_receipt_pdf's
+     own comment. Same design tokens as quotation.html/invoice.html. */
+  @font-face{font-family:'Archivo';src:url({{ archivo_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'IBM Plex Sans';src:url({{ ibmplexsans_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  doc-page:not(:defined){visibility:hidden}
+  body{margin:0;background:#525659;font-family:'IBM Plex Sans',sans-serif;color:#1f2328}
+  .num{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<doc-page size="a4" margin="13mm">
+
+  <div slot="header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding-bottom:9px;border-bottom:2.5px solid #33526e;margin-bottom:2px;">
+    <img src="{{ logo_src }}" alt="Artemis Group" style="height:52px;width:auto;display:block;border-radius:3px;">
+    <div style="text-align:right;font-size:10px;line-height:1.55;color:#4b5563;">
+      <div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:12px;color:#1f2328;letter-spacing:.2px;">{{ company.name }}</div>
+      <div>P.O. Box No: {{ company.poBox }}, {{ company.city }}</div>
+      <div>Mob: {{ company.mobile }} &nbsp;&middot;&nbsp; Tel: {{ company.tel }}</div>
+      <div>TRN: {{ company.trn }}</div>
+    </div>
+  </div>
+
+  <div slot="footer" style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid #d6dbe1;padding-top:6px;margin-top:2px;font-size:8.5px;color:#8a919b;letter-spacing:.3px;">
+    <span>{{ company.name }} &nbsp;&middot;&nbsp; TRN {{ company.trn }}</span>
+    <span>This receipt is valid subject to clearance of the payment instrument.</span>
+  </div>
+
+  <!-- ===== TITLE + STATUS ===== -->
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:6px 0 16px;">
+    <div>
+      <div style="font-family:'Archivo',sans-serif;font-weight:900;font-size:33px;letter-spacing:1.5px;color:#1f2328;line-height:1;">PAYMENT RECEIPT</div>
+      <div style="height:4px;width:56px;background:#f5a623;margin-top:8px;border-radius:2px;"></div>
+    </div>
+    {% if show_status %}
+    <span style="display:inline-block;font-family:'Archivo',sans-serif;font-weight:700;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:{{ status_color }};border:1.5px solid {{ status_color }};border-radius:20px;padding:5px 16px;">{{ status }}</span>
+    {% endif %}
+  </div>
+
+  <!-- ===== META GRID ===== -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #d6dbe1;border-radius:5px;overflow:hidden;margin-bottom:18px;">
+    <div style="padding:11px 14px;border-right:1px solid #e5e9ee;">
+      <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Received From</div>
+      <div style="font-size:12.5px;font-weight:600;color:#1f2328;margin-top:3px;">{{ customer_name }}</div>
+      {% if customer_lines %}
+      <div style="font-size:10px;color:#6b7280;margin-top:2px;line-height:1.5;">{% for line in customer_lines %}{{ line }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+      {% endif %}
+      {% if project %}
+      <div style="font-size:10px;color:#6b7280;margin-top:6px;"><span style="color:#8a919b;">Project:</span> {{ project }}</div>
+      {% endif %}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;">
+      <div style="padding:9px 14px;border-bottom:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Receipt No</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ receipt_number }}</div>
+      </div>
+      <div style="padding:9px 14px;border-bottom:1px solid #e5e9ee;border-left:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Date</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ date }}</div>
+      </div>
+      <div style="padding:9px 14px;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Payment Method</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ payment_method }}</div>
+      </div>
+      <div style="padding:9px 14px;border-left:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Reference / Cheque No</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ reference }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== AMOUNT PANEL ===== -->
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:20px;background:#33526e;color:#fff;border-radius:6px;padding:16px 22px;margin-bottom:20px;">
+    <div>
+      <div style="font-size:9px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;color:#c3cfdd;">Amount Received</div>
+      <div style="font-size:12px;color:#dbe3ec;margin-top:4px;max-width:340px;line-height:1.4;">{{ amount_words }}</div>
+    </div>
+    <div class="num" style="font-family:'Archivo',sans-serif;font-weight:900;font-size:30px;letter-spacing:.5px;white-space:nowrap;">{{ total }}</div>
+  </div>
+
+  <!-- ===== ALLOCATION TABLE ===== -->
+  <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;margin-bottom:6px;">Applied To</div>
+  <table style="width:100%;border-collapse:collapse;font-size:10px;">
+    <thead>
+      <tr style="background:#33526e;color:#fff;font-family:'Archivo',sans-serif;">
+        <th style="padding:8px 8px;text-align:left;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;">Invoice No</th>
+        <th style="padding:8px 8px;text-align:center;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:90px;">Invoice Date</th>
+        <th style="padding:8px 8px;text-align:right;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:110px;">Invoice Amount</th>
+        <th style="padding:8px 8px;text-align:right;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:110px;">Amount Applied</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in allocations %}
+      <tr style="{{ row.rowStyle }}">
+        <td style="padding:8px 8px;text-align:left;font-weight:500;color:#1f2328;border-bottom:1px solid #e5e9ee;">{{ row.inv }}</td>
+        <td style="padding:8px 8px;text-align:center;color:#6b7280;border-bottom:1px solid #e5e9ee;">{{ row.date }}</td>
+        <td style="padding:8px 8px;text-align:right;color:#6b7280;border-bottom:1px solid #e5e9ee;" class="num">{{ row.invAmount }}</td>
+        <td style="padding:8px 8px;text-align:right;font-weight:600;border-bottom:1px solid #e5e9ee;" class="num">{{ row.applied }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+    <div style="display:flex;gap:26px;font-size:10.5px;">
+      <span style="color:#8a919b;">Outstanding Balance</span>
+      <span class="num" style="font-weight:700;color:#1f2328;">{{ outstanding_balance }}</span>
+    </div>
+  </div>
+
+  <!-- ===== SIGNATURES ===== -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:38px;">
+    <div style="text-align:center;">
+      <div style="border-bottom:1.5px solid #1f2328;height:38px;margin-bottom:6px;"></div>
+      <div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:10px;letter-spacing:.5px;color:#1f2328;">Received By</div>
+      <div style="font-size:9px;color:#8a919b;margin-top:2px;">{{ company.name }}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="border-bottom:1.5px solid #1f2328;height:38px;margin-bottom:6px;"></div>
+      <div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:10px;letter-spacing:.5px;color:#1f2328;">Paid By</div>
+      <div style="font-size:9px;color:#8a919b;margin-top:2px;">{{ customer_name }}</div>
+    </div>
+  </div>
+
+</doc-page>
+</body>
+</html>

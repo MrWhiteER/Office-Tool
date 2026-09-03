@@ -1,0 +1,1358 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="{{ doc_page_js }}"></script>
+<style>
+  /* Self-hosted (see html_engine._font_data_uri) instead of a Google Fonts
+     <link> — that per-render network fetch was the single biggest cost in
+     generating this document, and also meant no internet meant no fonts. */
+  @font-face{font-family:'Bodoni Moda';src:url({{ bodonimoda_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'Onest';src:url({{ onest_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'Neuropol';src:url({{ neuropol_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'Gotham Black';src:url({{ gothamblack_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  /* Body copy font — everything except Product Name (stays Neuropol) and
+     the Category label (stays 'Gotham Black', a distinct heavier face used
+     nowhere else). Two weights of the same family so every existing
+     font-weight:700 in this template (spec labels, bold code-halves in the
+     Ordering Table, etc.) keeps landing on a real bold face instead of a
+     synthetic/faux-bold of the book weight. */
+  @font-face{font-family:'Gotham';src:url({{ gothambook_src }}) format('woff2');font-weight:400;font-style:normal;font-display:swap}
+  @font-face{font-family:'Gotham';src:url({{ gothambold_src }}) format('woff2');font-weight:700;font-style:normal;font-display:swap}
+  doc-page:not(:defined){visibility:hidden}
+  body{margin:0;background:#525659;font-family:'Gotham',sans-serif;color:#231f20}
+  /* Grid column basis reduced 15% (41 * 0.85 = 34.85, rounded) so each
+     badge itself renders 15% smaller — auto-fit just packs more of them
+     into the same row width. */
+  .badge{width:100%;aspect-ratio:1;}
+  .badge img{width:100%;height:100%;object-fit:contain;display:block;}
+</style>
+</head>
+<body>
+
+<!-- Margin standardized to 0.5in (12.7mm) — the conventional "Narrow"
+     margin preset (same value Word's own Narrow layout uses) rather than an
+     arbitrary shrink, per explicit request for "standard size narrow".
+     Keep engine.stamp_catalogue_page_numbers' own _PAGE_MARGIN_PT constant
+     (used to right-align the Full Catalog Builder's stamped page number
+     against this same content edge) in sync if this ever changes again. -->
+{% macro photo_cell(src, mask, x, y, zoom, empty_label, placeholder, anchor_x=100, anchor_y=100) %}
+<!-- anchor_x/anchor_y (0/50/100, defaults matching the old hardcoded
+     bottom-right every call site here used before this was configurable)
+     decide WHERE the mask box sits within this cell whenever Mask Size is
+     under 100% — a completely different question from x/y above (which
+     pan the PHOTO *inside* the mask once it's already positioned). Same
+     0/50/100 convention as photo pan, converted to the 3 discrete
+     flex-start/center/flex-end keywords flexbox actually offers (there's
+     no continuous position for "where a smaller box sits inside a bigger
+     one" the way translate() gives x/y for the photo-inside-mask case —
+     3 stops per axis is genuinely all there is here). justify-content
+     reads anchor_x (this div's main axis, horizontal, default row flow)
+     and align-items reads anchor_y (the cross axis, vertical) — same
+     axis mapping the Adjust modal's own #photoadjust-frame uses via
+     applyPhotoAdjustFrameAlign in app.py, so the modal preview and this
+     real render can never disagree about which button means what. -->
+{% set jc = 'flex-start' if anchor_x <= 0 else ('flex-end' if anchor_x >= 100 else 'center') %}
+{% set ai = 'flex-start' if anchor_y <= 0 else ('flex-end' if anchor_y >= 100 else 'center') %}
+<!-- object-fit:contain, every photo slot (Main Product Photo/Application
+     Photo, further down, now match — see their own comments; this used to
+     be diagram/extra-only, widened per explicit request to apply "these
+     settings" — never-crop — to every placeholder picture, not just the
+     line-art ones). cover crops to fill the frame's own aspect ratio
+     BEFORE zoom is even applied, so content could stay hidden at EVERY
+     zoom level with no way to reveal it — confirmed directly: a real
+     dimension diagram's "H" and "Ø" callouts stayed clipped at this
+     macro's own zoom floor under cover. contain fits the WHOLE image
+     inside its own box at zoom:100% (with letterboxing filling the rest
+     of the frame, not a crop), so nothing is ever permanently hidden —
+     zooming IN past 100% is still an explicit, reversible, user-chosen
+     crop-in from a fully-visible starting point, the "masking only"
+     contract every photo slot now keeps.
+     Position is a translate(), not object-position — object-position
+     only re-anchors WHICH already-fully-visible part of a contain-fit
+     image sits in its letterbox gap, it does nothing useful once
+     transform:scale() is layered on top (scale zooms symmetrically from
+     the box's own center regardless of object-position, so dragging a
+     zoomed-in diagram barely moved it — a real bug found via live drag
+     testing after the cover→contain switch above). translate(tx%,ty%)
+     scale(zoom), in that order, instead moves the ALREADY-scaled image by
+     a fixed % of the frame. The inline tx/ty below (Jinja-computed,
+     tx=(50-x)*(zoom-1)) is only ever a FALLBACK now — it's exactly right
+     when the photo's own aspect ratio happens to match this box's (no
+     letterbox gap at zoom=1, so there's genuinely nothing to pan until
+     the photo's rendered size actually overflows the box), but it goes
+     quietly wrong whenever the photo's shape DOESN'T match the box's: a
+     wide reference photo in a squarer zone still contain-fits with real
+     empty gap top/bottom even at zoom=1, and this % formula has no way to
+     know that gap exists — it can only reach the zoom-created overflow,
+     never the aspect-mismatch one, no matter how the user drags. The
+     data-pan-x/y/zoom attributes below feed the real fix: a <script> near
+     the end of <body> re-measures each photo's actual rendered box size
+     and its own natural pixel size once loaded, and overwrites this
+     transform with one that can reach BOTH kinds of slack — see that
+     script's own comment (and computePhotoOffset's twin in app.py's
+     Adjust modal, kept in sync by hand, same reasoning as
+     applyPhotoAdjustFrameAlign/anchor_x/anchor_y already being two
+     copies) for the full derivation. Kept as a real fallback rather than
+     deleted, in case the script ever fails to run for a given photo —
+     x=0/100 still lands flush with the frame's edge, never short (blank
+     gap) and never past it (crop), same "never crop" guarantee either
+     way, just without the letterbox-gap range this formula can't reach.
+
+     The dashed border/gray tint/label text below only render when this
+     slot's own `placeholder` checkbox (app.py's CAT_IMG[slot].placeholder,
+     see its own comment) is on — a per-slot toggle the user controls
+     directly, defaulting to on, same in the live preview and the real
+     generated PDF alike (no separate preview/generate distinction — this
+     app is WYSIWYG everywhere else, so this stays that way too). Either
+     way this outer div keeps the exact same width/height, so turning a
+     placeholder off never shifts anything else on the page — only the
+     border/background/text are conditional, not the footprint. -->
+<div style="width:100%;height:100%;border-radius:2px;overflow:hidden;display:flex;{% if src %}align-items:{{ ai }};justify-content:{{ jc }};background:transparent;{% elif placeholder %}align-items:center;justify-content:center;background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
+  {% if src %}<div style="width:{{ mask }}%;height:{{ mask }}%;overflow:hidden;"><img src="{{ src }}" data-pan-x="{{ x }}" data-pan-y="{{ y }}" data-pan-zoom="{{ zoom }}" style="width:100%;height:100%;object-fit:contain;transform:translate({{ '%.4f'|format((50 - x) * (zoom - 1)) }}%, {{ '%.4f'|format((50 - y) * (zoom - 1)) }}%) scale({{ zoom }});"></div>
+  {% elif placeholder %}<span style="font-size:8px;font-weight:600;letter-spacing:.3px;color:#a3a8ae;text-transform:uppercase;text-align:center;padding:0 4px;">{{ empty_label }}</span>{% endif %}
+</div>
+{% endmacro %}
+
+<!-- Wraps photo_cell with an optional caption ABOVE the box — Dimension
+     Diagram + the 3 Extra Photo zones only (per explicit request), same
+     bold/size/font as the Finish Colors heading further up ("font-
+     weight:700;font-size:11.5px", no color of its own — inherits the
+     page's own #231f20 same as Finish Colors does). Caption text is now
+     the ONLY job `caption` does — it no longer doubles as the box's own
+     empty-state placeholder text the way a typed label used to (that text
+     is always just the fixed grid-position name now, see each call site).
+     "no caption typed -> no space at all", not just an invisible/collapsed
+     line — the caption div (and its margin-bottom gap) below is only
+     emitted into the DOM at all when caption is truthy, so an unused
+     caption costs nothing, per explicit "we need to save space" request.
+     flex column + flex:1/min-height:0 on the photo_cell wrapper
+     is what lets the box itself still fill 100% of whatever's left after
+     an optional caption line, exactly like it fills 100% of its cell when
+     there's no caption at all.
+     reserve_caption (new) — every one of this macro's 4 call sites sits
+     side by side with exactly one sibling in the same flex row
+     (Top Left/Top Right, Bottom Left/Dimension Diagram), both stretched to
+     the row's own full height. With the "no caption -> no space" rule
+     applied per-cell independently, a row where only ONE sibling has a
+     typed caption pushes just THAT box's top down by the caption line's
+     own height while the other box's top stays flush with the row's top —
+     both boxes still end at the same bottom (both are flex:1 filling
+     downward to the shared row bottom), but their TOPS visibly stop lining
+     up — confirmed as a real reported bug ("top right is not aligned with
+     top left") on a real draft with a caption typed on Top Left only.
+     reserve_caption is computed per ROW (true when EITHER sibling has a
+     caption, false when neither does — see each call site) and passed to
+     BOTH siblings alike: whichever cell has no caption of its own still
+     renders an invisible (visibility:hidden) same-size line so both boxes'
+     tops stay flush, while a row where NEITHER sibling has a caption keeps
+     costing zero space exactly as before — the space-saving contract only
+     ever applied to a row with no captions in it at all to begin with. -->
+{% macro photo_cell_captioned(src, mask, x, y, zoom, empty_label, placeholder, caption, anchor_x=100, anchor_y=100, reserve_caption=false) %}
+<div style="display:flex;flex-direction:column;height:100%;min-height:0;">
+  <!-- margin-bottom history: 6px -> 3px -> 2.55px -> 0, then line-height
+       1.25 -> 1 on top of that (chasing the tightest possible gap — see
+       git history on this line for that whole progression; the old
+       comment explaining line-height:1's own leftover-leading fix is kept
+       below for the record). Both reverted back to exactly Finish Colors'
+       own margin-bottom:6px + unset line-height (see that div's own
+       style, same font-weight/font-size too) per explicit request that
+       every "Optional caption above photo" text use the SAME gap to its
+       own box as Finish Colors uses to its color swatches — consistent
+       spacing language across every bold micro-heading on the page, not
+       a caption-specific tight squeeze anymore. Un-setting line-height
+       (not just changing the margin number) matters here: line-height is
+       what the old comment's own "leftover leading" issue traced back to,
+       so matching Finish Colors' gap for real means matching BOTH
+       properties it relies on, not just copying the 6px number onto a
+       still-tight line-height:1 box (which would visually undershoot
+       Finish Colors' own real gap, not match it). margin-top deliberately
+       NOT touched — the request was specifically about the gap TO the
+       photo below, not the gap above the caption itself, which is a
+       separate, unrelated concern (this row's own position relative to
+       whatever precedes it) already tuned elsewhere. -->
+  {% if caption %}<div style="font-weight:700;font-size:11.5px;margin-bottom:6px;white-space:normal;word-break:normal;flex-shrink:0;">{{ caption }}</div>
+  {% elif reserve_caption %}<div style="font-weight:700;font-size:11.5px;margin-bottom:6px;flex-shrink:0;visibility:hidden;" aria-hidden="true">&nbsp;</div>{% endif %}
+  <div style="flex:1;min-height:0;">{{ photo_cell(src, mask, x, y, zoom, empty_label, placeholder, anchor_x, anchor_y) }}</div>
+</div>
+{% endmacro %}
+
+<doc-page size="a4" margin="0.5in">
+
+  <!-- Logo/product-name/category sized 20% up from the original
+       51px/26px/14px, then the logo alone brought back down 5% from that
+       61px (61*0.95=57.95, rounded to 58) per a later explicit request —
+       name/category stay at their +20% size.
+       The orange rule lives on its own row below the logo/title row,
+       spanning the SAME width as the header's own content area — no extra
+       side inset — so its two ends line up exactly with the left/right
+       edges of the actual page content below (photo boxes, badges,
+       Ordering Table) and the footer's own rule, per explicit request that
+       both rules always align with the data's edges, not some arbitrary
+       narrower width. padding-bottom 8px->5px was one of a set of
+       coordinated trims to fit a normal-length product's Ordering Table
+       onto page 1 (see the two-column body's own comment further down).
+       A later attempt at "give the logo more breathing room from the
+       rule below it" (padding-bottom back to 8px, then a 58px->50px
+       logo shrink to pull the rule up too) was explicitly reverted —
+       disregard that history; back to the page-1-fit values here.
+       Two independent levers on this element, two different jobs:
+       margin-top positions the header (logo/text/rule) itself, on its
+       own, relative to its ORIGINAL unmodified position — an iterative
+       chain of requests landed it at 0.3% of the A4 page height lower
+       (841.9pt * 0.003 ≈ 2.53pt), each new "N higher/lower" request
+       replacing the last rather than stacking (a "2cm lower than
+       CURRENT" reading was tried once and explicitly reverted, "wrong,
+       very wrong" — the "than the original default" reading is the
+       correct one whenever this phrasing recurs). margin, specifically,
+       not padding-top — an inline (or stylesheet-class) padding-top
+       override on THIS element, even one computing to the exact same
+       value as its unmodified default, was confirmed by direct, repeated
+       testing to make Chromium's print pagination mispaginate this
+       document, reproducibly regressing a real one-page datasheet to
+       two pages purely from touching that property here, independent of
+       value. No such issue with margin-top.
+       padding-bottom controls something else entirely: doc-page.js's
+       hdr-space spacer (which reserves room below the header for ALL
+       body content — the two-column section AND the Ordering Table,
+       everything after it in document flow) is sized from this
+       element's own offsetHeight, which margin-top never changes —
+       confirmed directly, body content's absolute page position was
+       IDENTICAL at two very different margin-top values. So margin-top
+       moves the header alone; padding-bottom is the only lever that
+       moves where body content starts. The two are independently tuned:
+       the GAP between the rule and body content is a separate, explicit
+       target (currently ~0.3% of page height ≈ 2.53pt, tuned in an
+       earlier request) from where the header itself sits.
+       Both values were shifted together for "move the whole document
+       higher (except the footer) by 0.2%": margin-top reduced by
+       0.2%*841.9 ≈ 1.68pt (moves the header up by that amount) AND
+       padding-bottom reduced by 1.68 / ~1.2755 ≈ 1.32pt (the established
+       padding-to-body-position ratio from direct measurement — NOT 1:1
+       — moves body content, and therefore everything that follows it in
+       flow, up by that same 1.68pt too) — chosen specifically so the
+       rule-to-body GAP stayed exactly what it was before that request,
+       and only the whole assembly's absolute position on the page
+       shifted. Re-verify page count whenever either value changes; a
+       downward shift on margin-top or growth on padding-bottom has cost
+       the one-page fit before at surprisingly small magnitudes.
+       margin-top's history: first set to -12.93pt to match the header's
+       own gap from the true TOP page edge to the footer's gap from the
+       true BOTTOM edge (23.07pt at the time — see the footer's own
+       margin-bottom comment). Since padding-top here is fixed at the
+       page's own 36pt margin (touching it breaks pagination, see above)
+       and margin-top is purely additive to that, matching a target
+       SMALLER than 36pt necessarily means a negative margin-top —
+       23.07 - 36 = -12.93pt. That, combined with padding-bottom already
+       sitting at its own floor (0 — CSS padding can't go negative),
+       left the header-to-data gap at 13.50pt (~1.6%), the closest a
+       requested exact 1% (8.42pt) could get without moving margin-top
+       and giving up the edge-gap match.
+       A direct follow-up request then asked for the header-to-data gap
+       at exactly 1.2% (841.9pt * 0.012 ≈ 10.10pt) instead — WITH
+       padding-bottom unable to move any further (already at 0), the
+       only remaining lever is margin-top itself, so this time the
+       trade-off was made the other way: margin-top moved from -12.93pt
+       to -9.53pt (a +3.4pt nudge, matching the 13.50 -> 10.10pt gap
+       reduction 1:1, confirmed by direct measurement) to hit 1.2%
+       exactly, at the cost of the header's own top-edge gap no longer
+       matching the footer's (now ~26.5pt vs. the footer's unchanged
+       23.07pt). If the edge-gap match matters again later, recompute
+       margin-top as (footer's current edge-gap) - 36, same formula as
+       before — just know it will pull the header-to-data gap back up
+       to ~13.5pt again when it does, the same coupling in reverse. -->
+  <div slot="header" style="margin-top:-9.53pt;padding-bottom:0pt;">
+    <!-- align-items:flex-end (was center): per explicit request, the logo
+         and the product-name/category text now share one bottom edge —
+         anchored from the bottom, not centered against each other. With
+         center alignment the shorter text block floated with visible
+         daylight above the orange rule while the taller logo sat right
+         near it (logo bottom measured 3.75pt above the rule, text bottom
+         12.1pt above it — an 8.4pt mismatch); flex-end pins both to the
+         logo's own bottom edge instead, closing that gap. -->
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-bottom:5px;">
+      <img src="{{ logo_src }}" alt="Sololuce" style="height:58px;width:auto;display:block;border-radius:4%;">
+      <div style="display:flex;align-items:baseline;gap:12px;">
+        <!-- font-size:16.7px, not 17px — the two were already textually
+             identical at 17px/17px and still rendered visibly different
+             physical sizes: Product Name (Neuropol) printed noticeably
+             taller than Category (Gotham Black) at that same declared
+             number. Neuropol is a variable font (@font-face's own
+             font-weight:100 900 range) with an optical-size axis, so its
+             glyphs don't scale as a flat multiple of declared px the way
+             Category's font does — going purely by the ratio measured at
+             17px (23.7pt tall vs Category's 12.75pt) overshot badly when
+             tried directly, so this value is instead the result of
+             actually re-rendering the real template and measuring Product
+             Name's printed height against Category's at several candidate
+             sizes until they matched (confirmed both by exact point
+             measurement — both print at ~12.75pt tall now — and a
+             side-by-side visual crop). If this ever needs retuning again,
+             re-measure the same way rather than computing a ratio from a
+             single data point; this font's px-to-printed-height
+             relationship is not linear across its own optical-size range.
+             Everything else (spacing, uppercase) untouched, only size —
+             color changed separately below.
+
+             color:#ec6b2f (was #231f20, near-black) to match Category's
+             own orange, per explicit request. A follow-up "make it bold
+             too" request was tried (-webkit-text-stroke, since
+             font-weight does nothing at all on this particular font —
+             confirmed directly, rendering this element at 100, 700, and
+             900 produced pixel-identical output every time, so the
+             embedded Neuropol woff2 has no real weight axis behind the
+             font-weight:100 900 range its own @font-face declares) but
+             reverted right after on explicit "stop, don't make it bold" —
+             color only, plain weight:700 (a no-op on this font, kept only
+             for semantic correctness/in case the font file is ever
+             swapped for one that does support it). -->
+        <div style="font-family:'Neuropol',sans-serif;font-weight:700;font-size:16.7px;letter-spacing:.5px;color:#ec6b2f;text-transform:uppercase;">{{ product_name }}</div>
+        {% if series %}
+        <div style="width:1.5px;align-self:stretch;background:#c7c7c7;"></div>
+        <div style="font-family:'Gotham Black',sans-serif;font-weight:700;font-size:17px;color:#ec6b2f;white-space:nowrap;">{{ series }}</div>
+        {% endif %}
+      </div>
+    </div>
+    <div style="height:2.5px;background:#ec6b2f;margin:0 0 2px;"></div>
+  </div>
+
+  <!-- Website (www. stripped — see html_engine._strip_www) truly centered on
+       the page via absolute positioning + translateX(-50%), not a flex
+       third — that way it's dead-center regardless of how wide the
+       copyright text on the left is. Right side stays empty on purpose,
+       reserved for the Full Catalog Builder's own running page number
+       (engine.stamp_catalogue_page_numbers, stamped later, right-aligned to
+       match that same margin).
+       Structured the same way as the header now: a dedicated line div
+       (own row, full content width, matching the header/body's edges —
+       see that comment above) followed by a SEPARATE content div, rather
+       than a border+padding on one combined div. Two benefits, not just
+       visual symmetry: the line's width is controlled independently of the
+       text's own box, and `position:relative` (needed so the centered
+       website span has something to anchor to) now lives on this INNER
+       content div instead of the OUTER slot="footer" div itself — the
+       outer div is what doc-page.js's shadow-DOM rule pins to the true
+       bottom of the page via `position:fixed` (see the earlier fix's own
+       history: putting position:relative directly on the outer slotted div
+       silently overrode that and broke the pinning), so keeping it clean
+       of any `position` declaration here is deliberate, not an oversight.
+       margin-bottom:-13.62pt: per explicit request, the whole footer
+       (rule + copyright/website line, as one unit) moved lower — margin,
+       not padding, mirroring the header's own margin-top lever exactly
+       (same fixed-position mechanism, just anchored bottom:0 instead of
+       top:0, so NEGATIVE margin-bottom moves it down the way NEGATIVE
+       margin-top moved the header up). padding-bottom is what doc-
+       page.js's own ftr-space spacer measures via offsetHeight to keep
+       body content from running under the footer, so touching THAT
+       risks the same pagination misbehavior padding-top caused on the
+       header — margin only moves this element's own visual position,
+       leaving that reserved space untouched.
+       13.62pt, not the originally-requested 2%/16.84pt: capped lower by
+       a hard constraint discovered and confirmed by direct calculation
+       — engine.py's stamp_catalogue_page_numbers stamps the bound-
+       catalog page number onto this footer's own bottom-right corner
+       AFTER this template renders, at a position hardcoded independent
+       of this CSS (see that function's own comment). That stamp box
+       needs a tested-safe 22pt of height (a shorter one was tried once
+       and confirmed to silently fail to fit 9pt text) sitting BELOW
+       wherever this footer's own text ends up, while also staying on
+       the physical page. The full 2% shift left only 13.45pt of room
+       there — not enough. 13.62pt (~1.6% of page height) is the shift
+       that still leaves the stamp its full 22pt, plus a small 0.5pt
+       safety margin on both sides (from the footer's own text, and from
+       the true page edge) rather than an exact knife-edge fit. See
+       engine.py's own _PAGE_MARGIN_PT / stamp_catalogue_page_numbers
+       comments — its vertical stamp position was updated to match this
+       exact value; the two must move together if either changes again. -->
+  <div slot="footer" style="margin-bottom:-13.62pt;">
+    <div style="height:1px;background:#ec6b2f;margin:0 0 6px;"></div>
+    <div style="position:relative;font-size:9px;font-weight:700;color:#231f20;">
+      <span>&copy;All Rights Reserved</span>
+      <span style="position:absolute;left:50%;top:0;transform:translateX(-50%);">{{ website }}</span>
+    </div>
+  </div>
+
+  <!-- ===== TWO-COLUMN BODY ===== -->
+  <!-- Gap between the left (photo/description/application photo) and right
+       (badges/specs/finish colors/diagram) halves: 26px originally, +15%
+       to 30px, then +60% again on top of THAT per a later explicit request
+       (30 * 1.6 = 48). Top margin trimmed 14px->8px, then ->0px here, as
+       part of a general vertical-spacing pass (every margin/padding on
+       this page nudged down a bit, margins/photo sizes untouched) aimed at
+       fitting a normal-length product's whole datasheet on one page
+       instead of spilling the Ordering Table onto a mostly-empty second
+       page. The 0px here specifically was measured, not guessed: with a
+       real AQUA-shaped datasheet (10 badges, 11 specs, a ~6-line
+       description, both photos filled), the LEFT column (main photo +
+       description + application photo, all downstream of this margin) was
+       the taller of the two — trimming margins on the RIGHT side alone
+       (spec-row padding, etc.) had zero effect since the row's total
+       height was already being set by the LEFT column via the flex row's
+       default stretch + both columns' own margin-top:auto bottom-photo
+       trick. This margin, plus the description's own line-height/margin
+       below, are the two levers that actually move the LEFT column's
+       height. Together they closed a ~2-4pt gap confirmed by direct fitz
+       measurement against the real render (table needed ~236pt, page had
+       ~234-239pt free depending on which trim was live) — small, so this
+       is expected to keep working for most real products; a datasheet
+       with meaningfully MORE content (a much longer description, more
+       specs, more badges wrapping to a 3rd row) can still legitimately
+       need the second page again. That's not a bug — break-inside:avoid
+       on the Ordering Table (below) still guarantees it always moves
+       there as one whole, uncut block, same safety net as before this
+       pass, it just no longer needs to for a normal-sized product.
+
+       margin-top -23.7pt: cuts the visible gap between the header's own
+       orange rule and this, the first real body content, in half — per
+       explicit request ("why is there so much gap between the header and
+       the data, cut it by 50%"). That gap is NOT this div's own margin
+       (it was already 0px above) — it's doc-page.js's own hdr-space
+       spacer (see that file's own comment on .hdr-space), which reserves
+       page-margin(36pt, the same 0.5in used on all 4 sides) TWICE: once
+       as the header slot's own padding-top (insetting the logo from the
+       true page edge) and again additively in `.hdr-space { height:
+       max(page-margin, hdr-h+page-margin) }` (insetting body content
+       from the header). Measured directly via Playwright
+       (getBoundingClientRect on the header's rule vs. doc-page's own
+       shadow-root .hdr-space element, print media): 63.2px / 47.4pt of
+       real empty space, confirmed on both page 1 and every continuation
+       page alike (this reserved band repeats on every printed page via
+       the header's own native-table thead trick, not something
+       recomputed per page).
+       Neither of the header slot's own two documented levers reaches
+       this: padding-bottom (the ONLY thing that grows hdr-h, per that
+       div's own giant comment above) is already at its floor, 0 — can't
+       go lower. padding-top is fixed at page-margin by doc-page.js's own
+       global stylesheet (shared by every doc type this app has) and is
+       explicitly documented there as unsafe to override directly —
+       confirmed by direct repeated testing to reproducibly mispaginate
+       Chromium's print output independent of value (see the header
+       slot's own comment, "no such issue with margin-top" by contrast).
+       So rather than touch either of those, this pulls the first BODY
+       element up into the reserved space instead — same "negative margin
+       nudges a fixed-position/reserved-space element without touching
+       the property print pagination is sensitive to" trick the header
+       (margin-top) and footer (margin-bottom) already use one section up
+       and two sections down, just aimed at normal in-flow content this
+       time instead of a position:fixed slot, so it carries none of that
+       padding-top pagination risk. -23.7pt is exactly half the measured
+       47.4pt gap (23.7pt of clearance remains between the rule and body
+       content) — re-measure with the same Playwright approach if this
+       ever needs revisiting, rather than eyeballing a screenshot; the
+       true page-content DPI, page.emulate_media('print') ordering, and
+       shadow-root piercing needed to measure this exactly are easy to
+       get subtly wrong by hand. -->
+  <!-- Fourth follow-up: "the RSPT should be live linked with the
+       Application Photo" — tried converting this whole two-column body
+       from flex to CSS Grid (two explicit rows, so row 2's shared track
+       height would be max(Application Photo's height, RSPT's own need)
+       by the grid engine's own construction, not by hoping one side
+       happens to be taller). It measured as a PERFECT 0.0px match via
+       Playwright's page.evaluate()/getBoundingClientRect — but that
+       measures the live DOM, not the actual PDF. Checked the real
+       generated PDF directly too this time (rendered it, then read the
+       actual pixels with PyMuPDF/fitz — same technique as every other
+       pixel-exact check on this page, just finally pointed at the real
+       output instead of a pre-PDF DOM snapshot) and the grid version was
+       NOT aligned there at all — Dimension Diagram ran well past
+       Application Photo's real bottom in the actual PDF despite the
+       DOM measurement insisting they matched exactly. Confirmed directly
+       that this is a Chromium print/PDF-export-specific quirk, not a
+       geometry or data bug: the exact same real captured data, rendered
+       through the exact same render_datasheet_pdf/page.pdf() pipeline,
+       disagreed with itself depending on whether it was measured before
+       or via the actual rasterized PDF — CSS Grid's per-row
+       align-items:stretch apparently doesn't carry through Chromium's
+       print-fragmentation pass the way it does on-screen. Reverted the
+       grid entirely rather than ship something that only "works" in a
+       DOM snapshot nobody actually looks at.
+       Back to flexbox (the SAME align-items:stretch-on-a-flex-row
+       mechanism already used and pixel-confirmed correct elsewhere on
+       this page) — LEFT and RIGHT are one shared flex row again, each
+       its own flex column.
+       Still wasn't quite 0 on the real product even after reverting —
+       measured an 11-12pt real gap (Dimension Diagram's own bottom past
+       Application Photo's), confirmed via the PDF's own vector text/rect
+       positions (page.search_for + get_drawings — exact, unit-ambiguity-
+       free, unlike raster-pixel-scanning a rendered PNG at an arbitrary
+       DPI, which is how the wrong "159px renders as 283px!" alarm
+       happened before realizing raster px at 170dpi and CSS px at 96dpi
+       are just different units, not a bug). Spent real effort chasing
+       this as a spacer/block flex-grow ratio problem before realizing
+       that ratio can't be the lever at all: the spacer and this block
+       are the ONLY two growable items left in the right column, so
+       together they always consume exactly the column's own leftover
+       space no matter how that's split between them — the block's own
+       BOTTOM edge lands at the column's bottom either way. The real
+       cause: for this real product, the right column's own natural
+       content (9 badges + 11 specs + note + 3 finish colors + this
+       block's own 273px floor) is ~12pt TALLER than the left column's
+       (main photo + description + Application Photo) — so align-items:
+       stretch makes RIGHT the driving/taller side here, not LEFT the way
+       every earlier product tested happened to have it. Application
+       Photo, fixed at margin-top:6px per the previous follow-up (no
+       longer flexible), simply doesn't reach a column bottom that's now
+       being set by the OTHER side.
+       Application Photo's own aspect-ratio:16/9 means it can never grow
+       to close a gap like this without distorting — so the fix instead
+       mirrors RSPT's own spacer trick onto the LEFT column: an invisible
+       flex:1 0 0 spacer between Description and Application Photo (see
+       that div's own comment just below) that stays at exactly 0 height
+       whenever LEFT is the driving side (the common case, gap stays
+       exactly 6px, satisfying the earlier "fixed gap" request untouched)
+       and only grows when RIGHT drives instead, pushing Application
+       Photo down to genuinely meet RSPT's own bottom rather than falling
+       short of it. Both sides now have the identical "spacer absorbs
+       whatever this side didn't need to grow into" shape — whichever
+       column is naturally taller, the OTHER column's own last real
+       element still lands exactly on the shared bottom edge. Re-verified
+       the same way (real PDF vector positions, not DOM) after adding
+       this spacer — gap closed to 0. -->
+  <!-- Note: the spacer div immediately after Description below is what
+       actually protects the "fixed 6px gap" promise from the previous
+       follow-up while still guaranteeing this alignment — see its own
+       comment for how. -->
+  <div style="display:flex;gap:48px;margin-top:-23.7pt;">
+
+    <!-- LEFT: photo, description, lifestyle photo. -->
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
+      <div style="width:100%;aspect-ratio:1/1;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center;{% if main_photo %}background:#e5e5e5;{% elif main_photo_placeholder %}background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
+        <!-- object-fit:contain + translate/scale, not cover + object-position
+             — see photo_cell's own comment above for the full reasoning
+             (this slot and Application Photo below now match every other
+             photo placeholder, per explicit request to apply that fix
+             everywhere, not just the diagram/extra zones it started on).
+             {% raw %}{% elif main_photo_placeholder %}{% endraw %} on the
+             border/tint/label — this slot's own placeholder checkbox
+             (app.py's CAT_IMG.main.placeholder), same per-slot on/off rule
+             as photo_cell's own macro above, see its comment for the full
+             reasoning. -->
+        {% if main_photo %}<div style="width:{{ main_photo_mask }}%;height:{{ main_photo_mask }}%;overflow:hidden;"><img src="{{ main_photo }}" data-pan-x="{{ main_photo_x }}" data-pan-y="{{ main_photo_y }}" data-pan-zoom="{{ main_photo_zoom }}" style="width:100%;height:100%;object-fit:contain;transform:translate({{ '%.4f'|format((50 - main_photo_x) * (main_photo_zoom - 1)) }}%, {{ '%.4f'|format((50 - main_photo_y) * (main_photo_zoom - 1)) }}%) scale({{ main_photo_zoom }});"></div>
+        {% elif main_photo_placeholder %}<span style="font-size:9px;font-weight:600;letter-spacing:.4px;color:#a3a8ae;text-transform:uppercase;">Main Product Photo</span>{% endif %}
+      </div>
+      {% if description %}
+      <!-- line-height 1.65->1.5, margin-top 8px->6px: the other lever that
+           actually reduces the LEFT column's height (see the two-column
+           body's own comment above) — self-scaling with however much
+           description text a given product has, unlike a flat one-time
+           trim elsewhere on the page. Still comfortably readable at 1.5. -->
+      <div style="font-size:10.5px;line-height:1.5;color:#231f20;text-align:justify;margin-top:6px;">{{ description }}</div>
+      {% endif %}
+      <!-- margin-top:6px: Application Photo sits a fixed gap below
+           Description, same 6px Description itself sits below Main
+           Product Photo — per explicit, direct comparison against this
+           exact page ("the gap which is mentioned should be the same"):
+           a spacer briefly lived here (see git history on this line)
+           that grew whenever RSPT needed Application Photo to reach a
+           little further down to stay lined up with it — technically
+           correct for that one goal, but it made this gap visibly bigger
+           than the Main-Photo-to-Description gap right above it on the
+           same page, which reads as inconsistent even though each gap
+           was individually "correct" for its own reason. Removed — this
+           gap is unconditionally 6px now, full stop, matching its
+           sibling above exactly, on every product. Application Photo's
+           own bottom is therefore fixed purely by its own content (this
+           gap + its own aspect-ratio-driven height), independent of
+           whatever RSPT on the right needs — see RSPT's own comment
+           further down for what that means for the two staying lined up
+           (RSPT still reaches down to match on every product tested so
+           far, since the right column's own content has not yet
+           out-grown the left's, but that's no longer a structural
+           guarantee the way it briefly was with this spacer in place). -->
+      <div id=app-photo-box style="width:100%;aspect-ratio:16/9;border-radius:2px;overflow:hidden;margin-top:6px;flex-shrink:0;display:flex;{% if lifestyle_photo %}align-items:flex-end;justify-content:flex-start;background:transparent;{% elif lifestyle_photo_placeholder %}align-items:center;justify-content:center;background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
+        {% if lifestyle_photo %}<div style="width:{{ lifestyle_photo_mask }}%;height:{{ lifestyle_photo_mask }}%;overflow:hidden;"><img src="{{ lifestyle_photo }}" data-pan-x="{{ lifestyle_photo_x }}" data-pan-y="{{ lifestyle_photo_y }}" data-pan-zoom="{{ lifestyle_photo_zoom }}" style="width:100%;height:100%;object-fit:contain;transform:translate({{ '%.4f'|format((50 - lifestyle_photo_x) * (lifestyle_photo_zoom - 1)) }}%, {{ '%.4f'|format((50 - lifestyle_photo_y) * (lifestyle_photo_zoom - 1)) }}%) scale({{ lifestyle_photo_zoom }});"></div>
+        {% elif lifestyle_photo_placeholder %}<span style="font-size:9px;font-weight:600;letter-spacing:.4px;color:#a3a8ae;text-transform:uppercase;">Application Photo</span>{% endif %}
+      </div>
+    </div>
+
+    <!-- RIGHT: badges, specs, note, finish colors, dimension diagram. -->
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
+
+      {% if badges %}
+      <!-- Grid (not flex-wrap) so a full row of badges stretches edge-to-edge
+           to match the Technical Specifications divider lines below it —
+           auto-fit computes how many 43px+ columns fit, then 1fr grows them
+           to fill the remainder; a trailing partial row just sits at the
+           left, same as the last line of wrapped text. -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(27px,1fr));gap:8px;margin-bottom:10px;">
+        {% for b in badges %}
+        <div class="badge"><img src="{{ b.src }}" alt="{{ b.label }}"></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if specs %}
+      <div style="font-weight:700;font-size:12.5px;margin-bottom:6px;">Technical Specifications</div>
+      <div class="spec-list">
+        {% for s in specs %}
+        <!-- Grid row (was position:relative + an absolutely-positioned
+             value column pinned to left:60%) so the value still starts at
+             a fixed 60%-from-left point regardless of label width, but the
+             row's own height now comes from its tallest cell like any
+             normal in-flow content. The old absolute positioning took the
+             value out of flow entirely, so the row's height was set by the
+             label alone — a value that wrapped to 2+ lines (e.g. Driver's
+             "Remote 24Vdc ON/Off / 220-240V 50-60Hz") just overflowed
+             straight through the row's own border-bottom into the row
+             below it instead of pushing that border down to clear it. -->
+        <div style="display:grid;grid-template-columns:60% 40%;align-items:start;padding:2px 0;border-bottom:1px solid #d6d6d6;font-size:10px;">
+          <span class="spec-label" style="color:#231f20;font-weight:400;white-space:nowrap;">{{ s.label }}</span>
+          <!-- Each \n-separated line (see the multi-value Technical Specs
+               feature) renders as its own block so it can wrap
+               independently; a single-value spec is just one line here,
+               same as always. -->
+          <div style="font-weight:400;text-align:left;min-width:0;">
+            {% for line in s.value.split('\n') %}
+            <div style="white-space:normal;word-break:normal;line-height:1.3;">{{ line }}</div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if note %}
+      <div style="font-size:9px;font-style:italic;color:#3f454d;line-height:1.5;margin-top:8px;">{{ note }}</div>
+      {% endif %}
+
+      {% if finish_colors %}
+      <div style="font-weight:700;font-size:11.5px;margin-top:10px;margin-bottom:6px;">Finish Color{% if finish_colors|length>1 %}s{% endif %}</div>
+      <div style="display:flex;gap:2px;flex-wrap:wrap;">
+        {% for c in finish_colors %}
+        <div style="width:28px;text-align:center;">
+          <div style="width:22px;height:22px;margin:0 auto;border:1px solid #231f20;border-radius:2px;background:{{ c.hex }};"></div>
+          {% if c.label %}<div style="font-weight:700;font-size:7px;line-height:1.3;margin-top:3px;white-space:normal;word-break:break-word;">{{ c.label }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <!-- Was one single Dimension Diagram box — now a 2x2 grid of 4 zones,
+           since the real catalogue sometimes has more than one thing to
+           show here (optional accessories, a second angle, etc). Grid
+           auto-places its children row-major (top-left, top-right,
+           bottom-left, bottom-right), so the diagram macro call is
+           deliberately last.
+           Each zone's own EMPTY-state placeholder text is always its fixed
+           grid position ('Top Left' / 'Top Right' / 'Bottom Left' /
+           'Dimension Diagram') — a typed label no longer overrides that
+           text the way it briefly did; it's a separate, optional CAPTION
+           printed above the box instead (see photo_cell_captioned's own
+           comment), on or off, whether or not that zone has a photo, per
+           a later explicit "same as Finish Colors, save space when empty"
+           request.
+           The top row (Top Left + Top Right) only renders when at least
+           one of them is actually in use (a photo, or its "Show" checkbox
+           — see extra_top_row_active in html_engine.py) — with neither,
+           it's just two empty dashed boxes eating vertical space nothing
+           else in the sheet gets back, so per explicit request the row is
+           skipped entirely and the grid collapses to a single row (height
+           halved to match one row's old share of the 220px block) holding
+           just Bottom Left + the Dimension Diagram.
+           Merge (extra_top_merged) replaces Top Left + Top Right with ONE
+           zone spanning both columns — using Top Left's own photo/zoom/
+           pan/mask — for a panoramic shot too wide/short for either
+           square-ish zone alone; Top Right's own upload, if it has one, is
+           simply not placed in the grid while this is on. grid-column:1/3
+           on a plain wrapper (not the photo_cell macro itself, which
+           doesn't know about grid placement) is enough — a grid item with
+           no explicit height defaults to align-self:stretch, so it still
+           fills the row's real height same as any other cell here. -->
+      <!-- margin-top: auto->10px (both this grid and the collapsed one
+           below it), per explicit request. This grid used to anchor to
+           the BOTTOM of the right column (margin-top:auto in a flex
+           column pushes a child to consume all remaining space above it),
+           matching the Application Photo's own bottom-anchor on the left
+           column — deliberate, so the two columns' last elements stay
+           level with each other regardless of how much Technical Specs/
+           Note content sits above. But on a product with comparatively
+           little of that content, the leftover space (and so this gap)
+           could grow very large — confirmed directly on a real product
+           whose Finish Colors sat far above an otherwise-empty column,
+           reading as a stray gap rather than intentional alignment. Fixed
+           10px instead — same "standard" close-follow spacing every other
+           section on this page already uses between itself and whatever
+           precedes it (Finish Colors' own margin-top is 10px too) — always
+           a small, predictable gap now, at the cost of the bottom-
+           alignment guarantee: a sparse product's photo grid now sits
+           right under Finish Colors instead of flush with the page
+           bottom, with empty space below it instead of above.
+
+           Follow-up: bottom alignment came back as an explicit request
+           ("RSPT bottom left and right are not being aligned with the
+           bottom side of Application Photo") — confirmed directly via
+           Playwright measurement on a real product (9 badges/11 specs/3
+           finish colors): the grid's bottom edge sat 353px short of
+           Application Photo's own bottom, identical whether Top Left/Top
+           Right were merged or not (merge was the user's own guess at the
+           cause; measured and ruled out — this block's total height never
+           changes with merge state). Asked directly how to close a gap
+           that size: margin-top:auto's own old flaw (a giant empty gap
+           ABOVE the grid on a light product) or grow the photos themselves
+           to fill it — user chose growing, Top Left/Top Right only, not
+           Bottom Left/Dimension Diagram.
+           Fixed height (220px) -> flex:1 0 220px: this item now GROWS to
+           consume whatever space is actually left in the column (min
+           220px, same visual floor as before on a well-filled product) —
+           it's the only flex-grow child among this column's siblings
+           (badges/specs/note/finish colors all keep their natural size),
+           so 100% of the column's leftover space lands here, and since
+           align-items:stretch already matches this column's height to the
+           LEFT column's (Application Photo's own margin-top:auto anchor),
+           this reaches exactly Application Photo's bottom edge, zero gap
+           either side.
+           grid-template-rows 1fr 1fr -> 1fr 106px: only the TOP row is
+           1fr now, so 100% of that grown extra height flows into Top
+           Left/Top Right specifically — the BOTTOM row (Bottom Left,
+           Dimension Diagram) stays fixed at 106px, the exact height one
+           row already was in the old 220px/1fr-1fr split (220-8 gap)/2),
+           so those two zones look identically sized to before, on every
+           product, regardless of how much the top row ends up growing.
+
+           Second follow-up: unbounded growth turned out to have its own
+           real bug, caught directly on this same real product (a wide
+           accessories icon-strip photo, ~9.6:1) — growing Top Left/Top
+           Right's BOX taller doesn't make a wide photo's own visible
+           content any bigger (object-fit:contain can only ever letterbox
+           a mismatched aspect ratio, never crop it — the app's own
+           never-crop rule elsewhere rules cover out here too), so at
+           573px tall the real photo just floated in a thin strip at the
+           top with ~400px of dead white space below it before Bottom
+           Left/Dimension Diagram even started — visibly broken, worse
+           than the misalignment this was fixing. Asked directly; user
+           chose capping the growth over the other options (re-centering
+           the photo in the tall box, only growing empty placeholders, or
+           reverting to gap-above).
+           max-height:334px added to this item (220px top row cap once
+           the 106px bottom row + 8px gap are subtracted back out — same
+           220px the whole block's total height used to be, reused rather
+           than inventing a new number) — bounds Top Left/Top Right's own
+           growth to something a real photo can still plausibly fill
+           without much letterboxing, on top of the existing 220px floor.
+           The invisible spacer right before this block (flex:1 0 0, no
+           max) is what makes CSS Flexbox's own length-resolving algorithm
+           put any leftover space THIS block can't absorb (because it hit
+           max-height) into a gap ABOVE the block instead of doing nothing
+           with it — flexbox freezes an over-flexed item at its max and
+           reassigns its unused growth to whichever sibling is still
+           unfrozen, which is exactly this spacer and nothing else, per
+           spec, with no extra JS/Python math needed to compute the split.
+           (A real, subtler misunderstanding lived here briefly: tuning
+           the spacer-vs-block flex-grow RATIO — tried 9999:1 at one
+           point — turned out to change NOTHING about where this block's
+           own bottom edge lands, only how the leftover splits BETWEEN
+           spacer and block internally. The two of them together always
+           consume exactly "whatever's left in the column," full stop,
+           regardless of ratio — so if the block's bottom is short of
+           Application Photo's, the ratio was never the lever; see the
+           two-column body's own "live linked" follow-up further down
+           for what the real lever turned out to be — this block was
+           already sitting at its true, correct position the whole
+           time.) Net effect: this block grows up to its cap first
+           (still helps a normally-filled product reach the bottom with no
+           gap at all), and only a genuinely sparse product like this one
+           falls back to a small-ish bounded gap above it, same shape as
+           the original trade-off but now capped instead of unbounded.
+
+           Third follow-up, two explicit asks landed together:
+           1) "when top left and top right are merged make the box and
+              mask size 50% narrow" — grid-column:1/3 (spanning both
+              columns, ~568px) -> grid-column:2 (just the RIGHT column,
+              same slot Top Right's own unmerged cell already sits in,
+              ~280px — exactly half) — per direct follow-up, right-aligned
+              specifically, not centered or left. Nothing needed on the
+              mask itself: it's defined as width:{{mask}}%;height:{{mask}}%
+              of whatever box it's given (see photo_cell), so narrowing the
+              box already narrows the visible masked photo area with it,
+              same %, smaller absolute size. NOTE: this also made the
+              merged case's real footprint identical (one grid column,
+              natural row height) to the plain unmerged single-cell
+              shape — see openPhotoAdjust's own comment (app.py) for the
+              matching modal-side aspect-ratio simplification this enabled.
+           2) "the bottom 2 boxes bigger by 50% bigger" — Bottom Left +
+              Dimension Diagram's own row height, 106px -> 159px (106*1.5),
+              in BOTH branches below (this one and the collapsed one-row
+              fallback further down — same 2 zones, same treatment either
+              way). Top Left/Top Right's own natural/max heights are
+              untouched (106/220 respectively) — this ask was scoped to
+              the bottom row only. The whole block's own min/max (which
+              exist purely to derive the top row's flexible share, see the
+              follow-up above) were recomputed from the same formula with
+              the new bottom-row number swapped in: min-height 220 ->
+              106(top's own natural, unchanged) + 159(new bottom) +
+              8(gap) = 273; max-height 334 -> 220(top's own cap,
+              unchanged) + 159 + 8 = 387. -->
+      <!-- grid -> flex (this internal 2x2 layout, not just the outer two-
+           column body): found the SAME Chromium print/PDF-export grid bug
+           here too, pixel-confirmed on the real generated PDF — the
+           "fixed" 159px bottom row rendered at ~283px instead (Dimension
+           Diagram measured 283px tall in the real PDF, not 159), even
+           though nothing here was ever changed to a percentage or stretch
+           value; a plain literal `159px` grid track apparently isn't
+           reliable in this app's print pipeline either. Converted the
+           whole thing to flexbox (flex-direction:column outer, each row
+           its own flex-direction:row) — flexbox is what's already
+           pixel-verified reliable in real PDF output elsewhere on this
+           page (the outer two-column body just reverted to it for the
+           exact same reason, see that comment). Each photo_cell_captioned
+           call now sits inside its own flex:1 wrapper div (grid auto-
+           stretched each macro's own root div directly; flex needs an
+           explicit flex:1 on something, and the macro's own root div
+           isn't it) — same 8px gaps, same merge-and-right-align (an
+           invisible flex:1 spacer first, exactly mirroring grid-column:2
+           for a 2-slot row), same 159px fixed bottom row (now via
+           height:159px + flex-shrink:0 on that row's own flex container,
+           not a grid track). -->
+      <!-- Fifth follow-up: Application Photo's gap is unconditionally
+           fixed now (see that div's own comment) — it no longer stretches
+           to help this side reach it, so this side has to do 100% of the
+           adapting on its own, in EITHER direction. Replaced the old
+           spacer+capped-block trick (which only ever grew, up to a cap)
+           with true bidirectional flex on both rows: each row gets its
+           OWN independent flex-grow AND flex-shrink, deliberately
+           lopsided so one specific row absorbs a size change first,
+           the same "make one sibling win a proportional split" idea as
+           the merged-narrowing/right-align fix above, just applied to
+           height instead of width, and now cutting both ways instead of
+           only growing.
+           Top Left/Top Right: flex-grow:9999 (same reasoning as ever —
+           whenever this whole block needs to be TALLER than its natural
+           106+8+159, this row absorbs essentially all of that first, up
+           to its own existing 220px cap) but now ALSO flex-shrink:1 (can
+           still give up a little if the block ever needs to be shorter
+           than even Bottom Left/Dimension Diagram's own floor allows,
+           an extreme edge case, not the common one).
+           Bottom Left/Dimension Diagram: the reverse — flex-shrink:9999
+           (per explicit request, "reduce the size of Bottom Left and
+           [Dimension Diagram] much as need to be aligned with the
+           Application Photo" — whenever the block needs to be SHORTER
+           than natural, which is exactly what happens now that
+           Application Photo can't stretch to meet it, this row gives up
+           essentially all of that first, below its own 159px "50%
+           bigger" default, with no floor of its own — genuinely as much
+           as needed) but flex-grow:1 still (keeps its normal 159px
+           whenever the block is growing instead, same as before — this
+           ask was specifically about shrinking, not about undoing the
+           earlier "50% bigger" default for the common case).
+           The whole block itself: flex:1 1 auto (was 1 0 273px, a
+           grow-only floor) — auto basis means its own natural size is
+           just whatever its two rows' own defaults add up to (273px, same
+           number as before), but shrink:1 now lets the WHOLE thing
+           genuinely get smaller, not just redistribute internally. No
+           more spacer, no more max-height on this outer block — the cap
+           that used to live here (387px) is now directly on the top
+           row alone (220px, its own actual limit, not a derived
+           block-level number), and the "how much of this column's own
+           real leftover/deficit goes to which row" question is fully
+           answered by the flex-grow/flex-shrink pairs above, letting
+           align-items:stretch on the outer two-column row (which is what
+           actually decides whether this whole block needs to grow or
+           shrink, by comparing this column's own natural height against
+           Application Photo's now-fixed one) drive both directions
+           through the exact same mechanism instead of two different ones. -->
+      {% if extra_top_row_active %}
+      <div style="width:100%;flex:1 1 auto;min-height:0;margin-top:10px;display:flex;flex-direction:column;gap:8px;">
+        <!-- id + data-autosize: support for autoSizeTopRowToPicture() near
+             </body> — explicit request: when Top Left+Top Right are merged
+             into one wide zone AND the user has typed a real photo in it,
+             an optional checkbox lets the box's own HEIGHT follow that
+             photo's real aspect ratio (at the row's own fixed width)
+             instead of always claiming its full flex-grow:9999 share —
+             the whole point being that a naturally SHORT/wide panoramic
+             photo (exactly the shape merging exists for) no longer has to
+             sit in a box taller than it needs, and the space that frees up
+             flows down to Bottom Left/Bottom Right via the exact same
+             flex-grow mechanism already driving this column (see this
+             block's own multi-part comment above and #rspt-bottom-row's
+             own for that history) — the row's own flex gets overridden to
+             an explicit height only when the checkbox is on, a photo is
+             present, and it's actually merged; every other case is
+             untouched, still the original flex-grow:9999 share. -->
+        <!-- data-autosize only ever set when BOTH the checkbox AND merge
+             are on — gated together here rather than left to the JS to
+             sort out, since the unmerged branch renders TWO photos in this
+             same row; querying "the merged photo" only makes sense once
+             extra_top_merged has actually collapsed it down to one. -->
+        <div id=rspt-top-row data-autosize="{{ '1' if (extra_top_autosize and extra_top_merged) else '' }}" data-autosize-h="{{ extra_top_autosize_h if (extra_top_autosize_h and extra_top_merged) else '' }}" style="flex-grow:9999;flex-shrink:1;flex-basis:106px;max-height:220px;min-height:0;display:flex;gap:8px;">
+          {% if extra_top_merged %}
+          <!-- Both text sources for this merged zone — the caption ABOVE
+               the box (extra_photo_1_label) and the empty-state text
+               INSIDE it (empty_label, only ever shown while there's no
+               photo yet) — used to fall back to the fixed 'Top Left + Top
+               Right' name whenever the user hadn't typed a caption of
+               their own, specifically so a merged zone with a real photo
+               in it wasn't left completely unlabeled. Reverted per a
+               later, more sweeping explicit request ("I don't want the
+               text to be shown automatically… only if the text was put by
+               the user"): NO automatic text anywhere on this page anymore,
+               merged zones included — extra_photo_1_label passed straight
+               through with no `or` fallback, and '' for empty_label, same
+               "optional text, purely user-typed" contract every other
+               zone on this page already has (see photo_cell_captioned's
+               own comment). A merged zone with a photo and no typed
+               caption is now a plain unlabeled box, same as any other
+               zone in the same state — accepted as the correct trade-off
+               this time, superseding the "needs SOME label" reasoning
+               that used to live here.
+
+               The box itself: originally built 50%-narrower and right-
+               aligned (an empty aria-hidden spacer div eating the left
+               half) per an earlier explicit request — reverted per a later
+               explicit correction (an annotated screenshot marking the
+               FULL row width, left edge to right edge, as where the merged
+               box should be): merging is meant to combine Top Left's and
+               Top Right's own space into one wide zone, not shrink into
+               half of it. Just this one div now — sole flex child of a
+               `display:flex` row, so `flex:1` alone already fills the
+               entire row width, no explicit 100%/spacer needed. -->
+          <div style="flex:1;min-width:0;">{{ photo_cell_captioned(extra_photo_1, extra_photo_1_mask, extra_photo_1_x, extra_photo_1_y, extra_photo_1_zoom, '', extra_photo_1_placeholder, extra_photo_1_label, extra_photo_1_mask_anchor_x, extra_photo_1_mask_anchor_y) }}</div>
+          {% else %}
+          <!-- reserve_caption computed per-ROW (either sibling having a
+               caption reserves the same line for BOTH) — see
+               photo_cell_captioned's own comment for the full "why": without
+               this, typing a caption on just one of Top Left/Top Right
+               pushes only that box's top down, leaving the two boxes'
+               bottoms aligned but their tops visibly mismatched.
+               empty_label passed as '' (was 'Top Left'/'Top Right') per
+               explicit request — the fixed position name used to print
+               automatically inside an empty placeholder box regardless of
+               anything the user did; now that text is genuinely optional,
+               using the SAME typed caption field this macro already has
+               (extra_photo_1_label/extra_photo_2_label — the "Optional
+               caption above photo" field in each zone's gear-icon
+               popover) as the only source of any text at all: type one,
+               it shows (above the box, same as it always has, whether or
+               not a photo is present yet); leave it blank, nothing shows,
+               empty zone stays a plain unlabeled dashed box. The MERGED
+               case above USED to keep its own 'Top Left + Top Right'
+               fallback for a real, different reason (a merged zone with a
+               real photo needs SOME way to say it's the combined zone) —
+               that too was later removed per a further, more sweeping
+               explicit request; see that div's own comment for the
+               current state and the full history. -->
+          {% set top_row_reserve = extra_photo_1_label or extra_photo_2_label %}
+          <div style="flex:1;min-width:0;">{{ photo_cell_captioned(extra_photo_1, extra_photo_1_mask, extra_photo_1_x, extra_photo_1_y, extra_photo_1_zoom, '', extra_photo_1_placeholder, extra_photo_1_label, extra_photo_1_mask_anchor_x, extra_photo_1_mask_anchor_y, reserve_caption=top_row_reserve) }}</div>
+          <div style="flex:1;min-width:0;">{{ photo_cell_captioned(extra_photo_2, extra_photo_2_mask, extra_photo_2_x, extra_photo_2_y, extra_photo_2_zoom, '', extra_photo_2_placeholder, extra_photo_2_label, extra_photo_2_mask_anchor_x, extra_photo_2_mask_anchor_y, reserve_caption=top_row_reserve) }}</div>
+          {% endif %}
+        </div>
+        <!-- Same merge pattern as the top row above (see that div's own
+             comment for the full "why", including the full-width-not-
+             narrowed correction) — Bottom Left + Dimension Diagram this
+             time, master content is Bottom Left's own photo/zoom/pan/mask.
+             Same per-row reserve_caption treatment too when NOT merged —
+             Bottom Left and Dimension Diagram are just as much side-by-side
+             stretched siblings as Top Left/Top Right are, so a caption
+             typed on only one of them would hit the identical top-edge
+             misalignment without this. id=rspt-bottom-row stays on the
+             outer div regardless of merge state — the JS alignment fix
+             below (window.__panReady's alignRsptBottomRow) needs it
+             either way, merged single-cell row or not. -->
+        <div id=rspt-bottom-row style="flex-grow:1;flex-shrink:9999;flex-basis:159px;min-height:0;display:flex;gap:8px;">
+          {% if extra_bottom_merged %}
+          <!-- No automatic fallback text here either, same reversal as
+               Top Left/Top Right's own merged case above (see that div's
+               own comment for the full "why" — a later, more sweeping
+               explicit request superseded the earlier "merged zone needs
+               SOME label" reasoning: NO text anywhere on this page unless
+               the user actually typed it, merged zones included). -->
+          <div style="flex:1;min-width:0;">{{ photo_cell_captioned(extra_photo_3, extra_photo_3_mask, extra_photo_3_x, extra_photo_3_y, extra_photo_3_zoom, '', extra_photo_3_placeholder, extra_photo_3_label, extra_photo_3_mask_anchor_x, extra_photo_3_mask_anchor_y) }}</div>
+          {% else %}
+          <!-- empty_label passed as '' (was 'Bottom Left'/'Bottom Right')
+               — same "optional text, only shows if the user typed it"
+               request as Top Left/Top Right above; see that pair's own
+               comment for the full "why". -->
+          {% set bottom_row_reserve = extra_photo_3_label or dimension_diagram_label %}
+          <div style="flex:1;min-width:0;">{{ photo_cell_captioned(extra_photo_3, extra_photo_3_mask, extra_photo_3_x, extra_photo_3_y, extra_photo_3_zoom, '', extra_photo_3_placeholder, extra_photo_3_label, extra_photo_3_mask_anchor_x, extra_photo_3_mask_anchor_y, reserve_caption=bottom_row_reserve) }}</div>
+          <!-- dimension_diagram/dimension_diagram_* stay the internal
+               field/variable names throughout (html_engine.py's context,
+               this template, app.py's CAT_IMG.diagram) — only the user-
+               facing NAME changed, to 'Bottom Right', per explicit
+               request. Renaming the actual data field would mean a
+               migration for every already-saved draft. -->
+          <div style="flex:1;min-width:0;">{{ photo_cell_captioned(dimension_diagram, dimension_diagram_mask, dimension_diagram_x, dimension_diagram_y, dimension_diagram_zoom, '', dimension_diagram_placeholder, dimension_diagram_label, dimension_diagram_mask_anchor_x, dimension_diagram_mask_anchor_y, reserve_caption=bottom_row_reserve) }}</div>
+          {% endif %}
+        </div>
+      </div>
+      {% else %}
+      <div id=rspt-bottom-row style="width:100%;flex:1 1 159px;min-height:0;margin-top:10px;display:flex;gap:8px;">
+        {% if extra_bottom_merged %}
+        <div style="flex:1;min-width:0;">{{ photo_cell_captioned(extra_photo_3, extra_photo_3_mask, extra_photo_3_x, extra_photo_3_y, extra_photo_3_zoom, '', extra_photo_3_placeholder, extra_photo_3_label, extra_photo_3_mask_anchor_x, extra_photo_3_mask_anchor_y) }}</div>
+        {% else %}
+        {% set bottom_row_reserve_collapsed = extra_photo_3_label or dimension_diagram_label %}
+        <div style="flex:1;min-width:0;">{{ photo_cell_captioned(extra_photo_3, extra_photo_3_mask, extra_photo_3_x, extra_photo_3_y, extra_photo_3_zoom, '', extra_photo_3_placeholder, extra_photo_3_label, extra_photo_3_mask_anchor_x, extra_photo_3_mask_anchor_y, reserve_caption=bottom_row_reserve_collapsed) }}</div>
+        <div style="flex:1;min-width:0;">{{ photo_cell_captioned(dimension_diagram, dimension_diagram_mask, dimension_diagram_x, dimension_diagram_y, dimension_diagram_zoom, '', dimension_diagram_placeholder, dimension_diagram_label, dimension_diagram_mask_anchor_x, dimension_diagram_mask_anchor_y, reserve_caption=bottom_row_reserve_collapsed) }}</div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+
+  <!-- ===== ORDERING CODE + TABLE ===== -->
+  <!-- Wrapped as one break-inside:avoid unit so a table that doesn't fit in
+       the remaining space on the current page moves to the next page whole
+       — together with its Ordering Code Example line above it — instead of
+       splitting mid-table with the header row stranded on the prior page. -->
+  <div style="break-inside:avoid;page-break-inside:avoid;">
+  {% if ordering_code_example %}
+  <!-- margin-top 6px->3px: one of a small set of coordinated trims (see
+       the two-column body's own comment above) aimed at fitting a normal-
+       length product's Ordering Table onto page 1. Only matters once the
+       rest of those trims already got the table onto page 1 — a top
+       margin on whatever lands as the very FIRST thing on a fresh page
+       gets collapsed away by the browser's own print pagination
+       regardless of its value, so this alone never moved the needle back
+       when the table was still landing on page 2. -->
+  <div style="font-weight:700;font-size:11px;margin-top:3px;">Ordering Code Example: {{ ordering_code_example }}</div>
+  {% endif %}
+
+  {% if ordering_table and ordering_table.labels %}
+  <!-- Rendered as genuine rows (each a full-width flex div), not
+       independent per-column stacks — a column with fewer values than
+       another just gets blank cells for its remaining rows, but every
+       row's zebra stripe and cell height stay in sync across every
+       column, since both are properties of the shared row div rather
+       than something each column tracks on its own. The whole block is
+       one rounded card (8px, deliberately subtle) so the orange header
+       reads as a single continuous bar rather than square-cornered. -->
+  <div style="margin-top:2px;border-radius:8px;overflow:hidden;border:1px solid #e5d9cc;">
+    <!-- Header font bumped +2px (9->11) and its own box padding +3%
+         (7px/6px -> 7.2px/6.2px) per explicit request — already font-
+         weight:700 (bold) from before. No more ellipsis-truncation anywhere
+         in this table (header or body cells) per explicit "never an
+         unfinished sentence" request — a label/value that doesn't fit its
+         column now wraps onto a second line (whole words, not mid-word)
+         instead of being cut off with "…". The row/cell just grows taller
+         to fit, same as any other wrapped text. -->
+    <!-- ONE grid spanning the header row AND every body row — not a
+         separate `display:grid` per row (that was tried and broke:
+         `minmax(min-content, Nfr)` resolves min-content from whatever
+         content that ONE grid instance actually holds, so a row with
+         blank early cells — completely normal here, most rows only fill
+         in a few columns — computed narrower tracks than the header or a
+         fuller row, and every column after the first gap landed at a
+         different x-position per row: values visibly sitting under the
+         wrong header). A single shared grid has exactly one set of column
+         tracks, sized from the actual weight of every cell in that column
+         across the WHOLE table (header included), so every row is
+         guaranteed to line up under the header no matter which of its own
+         cells are blank. Tracks are plain percentages of the table's own
+         width (see col_template's own comment in html_engine.py — grid
+         `fr` and `ch` units were both tried and, unlike a percentage,
+         both turned out to resolve print output slightly differently
+         than what the exact same CSS measured on screen, enough to
+         overflow or misplace a column in the PDF specifically), so the
+         table can neither overflow the page margin nor come up short — by
+         construction the percentages always sum to exactly 100%.
+         word-break/overflow-wrap both stay at their default (normal) —
+         deliberately no "break anywhere" fallback: a label is only ever
+         allowed to wrap at an actual word boundary, never split a word in
+         two, so col_weights' own floor (html_engine.py) is what has to
+         guarantee every column is wide enough for its own longest word,
+         not a CSS escape hatch bailing it out after the fact. -->
+    <!-- Horizontal padding is 6.2px on EVERY cell in this table, header or
+         data — kept as one literal shared number rather than "close
+         enough" values (data cells used to be 6px, a 0.2px drift from the
+         header) so the left/right indentation is provably identical for
+         every header and every value, not just visually similar. Only the
+         VERTICAL padding differs (5.5px header / 3px data), which is a
+         row-height rhythm choice, not indentation.
+         min-width:0 on every cell below (header AND data) overrides the
+         grid item's default "auto" minimum size (the same min-width:auto
+         trap flex items have). Without it, a cell refuses to shrink below
+         its own text's min-content width, so a manually-dragged-narrow
+         column doesn't actually make its box narrower — the text keeps
+         its old width and bleeds past the padded edge into the next
+         column, which then paints its own opaque background on top and
+         hides it. With min-width:0 the box always equals the real track
+         width, so shrinking a column shrinks the actual text-wrapping
+         width too — a multi-word label/value wraps onto a new line
+         instead of overflowing, same word-break:normal whole-words-only
+         rule as always. Applied to data cells too (not just headers) once
+         the column-width algorithm itself was fixed (html_engine.py's
+         build_ordering_table — see its own comments) to stop under-sizing
+         columns in the first place; before that fix this was deliberately
+         header-only so a too-narrow auto-computed column wouldn't
+         silently reflow existing data. -->
+    <div style="display:grid;grid-template-columns:{{ ordering_table.col_template }};">
+      {% for label in ordering_table.labels %}
+      <div style="background:#ec6b2f;padding:5.5px 6.2px;color:#fff;font-weight:700;font-size:11px;white-space:normal;word-break:normal;line-height:1.25;min-width:0;">{{ label.text }}</div>
+      {% endfor %}
+      <!-- CCT/Beam Angle (see build_ordering_table's own merge_col_idxs
+           comment) print as ONE cell spanning every data row instead of
+           one value per row — explicitly positioned (grid-column +
+           grid-row) rather than left to normal top-to-bottom auto-flow,
+           into the exact column each one's header already claims. Placed
+           here, before the per-row loop below, but DOM order doesn't
+           matter for where a positioned grid item lands — only its own
+           grid-column/grid-row do — CSS Grid places every explicitly-
+           positioned item first regardless of source order, then
+           auto-flows everything else around whatever's already claimed;
+           that's what makes the per-row loop below correctly skip these
+           columns for every row without needing its own explicit
+           coordinates (see that loop's own comment). No internal divider
+           between the items listed inside one of these cells — the
+           earlier idea in discussion was "hide the lines between boxes",
+           but a real spanning cell needs no lines to hide: there's only
+           ever one box here to begin with. -->
+      {% for m in ordering_table.merged %}
+      <!-- justify-content:flex-start (top-aligned), not center — per
+           explicit request: the values start right under the header,
+           same top edge every data row's own first line already sits at,
+           rather than floating vertically centered in the middle of the
+           whole spanned area. -->
+      <div style="grid-column:{{ m.col }};grid-row:2 / span {{ ordering_table.rows|length }};background:#fbfaf8;font-size:9px;padding:6px 6.2px;min-width:0;display:flex;flex-direction:column;justify-content:flex-start;gap:5px;{% if m.col < ordering_table.labels|length %}border-right:1px solid #f0ece6;{% endif %}">
+        {% for opt in m.options %}
+        <div>
+          <div style="font-weight:700;white-space:normal;word-break:normal;line-height:1.3;">{{ opt.first|safe }}</div>
+          {% for line in opt.rest %}<div style="color:#5a5a5a;white-space:normal;word-break:normal;line-height:1.3;">{{ line|safe }}</div>{% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+      {% for row in ordering_table.rows %}
+      {% set row_bg = '#f7f5f2' if loop.index0 is even else '#ffffff' %}
+      {% set row_last = loop.last %}
+      {% for cell in row %}
+      <!-- min-height (data cells only, never the header row above) is the
+           "Align Rows" button's own doing — see build_ordering_table's own
+           align_rows param and _ord_row_min_height_pt's docstring
+           (html_engine.py) for why this is a MINIMUM, not a fixed height:
+           a short row pads up to it, a row that genuinely needs more
+           (a 3-line cell somewhere in it) still grows past it — CSS
+           min-height only ever raises a floor, never lowers a ceiling, so
+           no cell's own content is ever compressed or hidden by this.
+           border-right reads cell.col_index against the table's REAL
+           column count, not loop.last within this row's own cell list —
+           a row's list now skips merged columns entirely (see
+           build_ordering_table), so "last item in this shortened list"
+           and "last column in the table" are no longer always the same
+           cell. -->
+      <div style="background:{{ row_bg }};font-size:9px;padding:3px 6.2px;min-width:0;{% if ordering_table.row_min_height_pt %}min-height:{{ '%.2f'|format(ordering_table.row_min_height_pt) }}pt;{% endif %}{% if not row_last %}border-bottom:1px solid #f0ece6;{% endif %}{% if cell.col_index < ordering_table.labels|length - 1 %}border-right:1px solid #f0ece6;{% endif %}">
+        <!-- A column like Cut Out/Lumen has no bold code of its own (see
+             build_ordering_table's bold_flags) — its one value used to sit
+             on the cell's FIRST line, one line higher than the grey value
+             line every code-bearing column (Model No., Size, Options...)
+             shows on its SECOND line, so scanning across a row the numbers
+             didn't line up, and the value read in the default dark text
+             color instead of the same grey as every other column's value.
+             Per explicit request ("make that size number and the cutout
+             number... in the same line... for all over the crafting table
+             except CCT and Beam Angle"): a bold-less cell renders an
+             invisible spacer line first (same line-height, reserves the
+             row it would have taken) so its value always lands on line 2,
+             styled with the exact color+weight the grey value line uses
+             everywhere else — not a separate "first line" style. The
+             CCT/Beam Angle merged block above is explicitly exempted and
+             keeps its own untouched layout.
+             Two independent conditions gate this, not one:
+             - cell.first/cell.rest empty -> nothing at all renders (an
+               empty Cut Out/Lumen cell costs zero height, same as before
+               this whole alignment feature existed).
+             - cell.align_spacer (build_ordering_table's own row_needs_
+               second_line) -> the blank spacer line only renders when
+               SOME bold cell in this same row genuinely shows a 2-line
+               code+description, i.e. there's an actual taller sibling to
+               align against. A real product found live left every bold
+               column (Model No., Size, CCT...) blank and only ever filled
+               Power/Lumen — no cell in any of its rows was ever 2 lines to
+               begin with, so the first cut of this fix (spacer whenever the
+               cell had a value, full stop) reserved a dead line on all 6
+               rows for nothing to align against, enough extra height to
+               push the whole Ordering Table onto a second page. The grey
+               color+weight below still always applies whenever there's a
+               value, regardless of align_spacer — only the SPACER (and the
+               space it costs) is conditional, not the color-consistency
+               half of the original request. -->
+        {% if cell.bold %}
+        <div style="font-weight:700;white-space:normal;word-break:normal;line-height:1.3;">{{ cell.first|safe }}</div>
+        {% if cell.rest %}<div style="color:#5a5a5a;font-weight:400;white-space:normal;word-break:normal;line-height:1.3;">{{ cell.rest|join(' ')|safe }}</div>{% endif %}
+        {% elif cell.first or cell.rest %}
+        {% if cell.align_spacer %}<div style="visibility:hidden;line-height:1.3;">&nbsp;</div>{% endif %}
+        <div style="color:#5a5a5a;font-weight:400;white-space:normal;word-break:normal;line-height:1.3;">{{ ([cell.first] + cell.rest)|join(' ')|safe }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  </div>
+
+</doc-page>
+<!-- Real photo-pan fix — see photo_cell macro's own comment (above) for
+     the full "why" (the Jinja-computed inline transform on each photo
+     <img> only covers the zoom-created-overflow case, and quietly can't
+     reach a letterbox gap from an aspect-ratio mismatch between the photo
+     and its mask). This re-measures every pannable photo's REAL rendered
+     box size and its own natural pixel size once actually loaded, then
+     overwrites the transform with one that can reach both kinds of
+     slack. window.__panReady is a Promise html_engine.py's render_pdf
+     explicitly awaits (page.evaluate) before calling page.pdf() — same
+     reasoning as its existing document.fonts.ready wait: if the PDF gets
+     printed before this runs, every photo keeps whatever the Jinja
+     fallback transform put on it instead of the corrected one. Guarded
+     with `|| Promise.resolve()` there since render_pdf is shared by every
+     doc type, most of which never define this at all.
+     computePhotoOffset here is a byte-for-byte twin of the same-named
+     function in app.py's Adjust Photo modal (renderPhotoAdjustPreview) —
+     two copies kept in sync by hand rather than one shared module, same
+     reasoning as applyPhotoAdjustFrameAlign/anchor_x/anchor_y already
+     being two copies: there's no bundler bridging this Jinja template and
+     app.py's own embedded <script>, and this is what "the modal preview
+     must never disagree with the real PDF" (WYSIWYG parity, this app's
+     standing design rule) means in practice for something that now needs
+     the browser's own measured layout, not just a static CSS formula. -->
+<script>
+(function(){
+  function computePhotoOffset(boxW,boxH,natW,natH,x,y,zoom){
+    if(!boxW||!boxH||!natW||!natH)return{tx:0,ty:0};
+    // No safety-margin factor — removed, twin of app.py's own
+    // photoPanConsts (see that copy's comment for the full "why": it
+    // never actually fixed the thing it was added for, while causing a
+    // real, confirmed regression of its own — a flush position like
+    // Align Top no longer actually reaching the mask's true edge).
+    var s0=Math.min(boxW/natW,boxH/natH);
+    var rW=natW*s0,rH=natH*s0;
+    return{tx:(50-x)*((zoom*rW/boxW)-1),ty:(50-y)*((zoom*rH/boxH)-1)}}
+  function applyOne(img){
+    var box=img.parentElement;
+    var rect=box.getBoundingClientRect();
+    var x=parseFloat(img.dataset.panX),y=parseFloat(img.dataset.panY),zoom=parseFloat(img.dataset.panZoom);
+    var off=computePhotoOffset(rect.width,rect.height,img.naturalWidth,img.naturalHeight,x,y,zoom);
+    img.style.transform='translate('+off.tx.toFixed(4)+'%,'+off.ty.toFixed(4)+'%) scale('+zoom+')'}
+  function applyAll(){
+    var imgs=document.querySelectorAll('img[data-pan-x]');
+    var pending=[];
+    for(var i=0;i<imgs.length;i++){
+      (function(img){
+        if(img.complete&&img.naturalWidth){applyOne(img)}
+        else{pending.push(new Promise(function(res){img.onload=function(){applyOne(img);res()};img.onerror=res}))}
+      })(imgs[i])}
+    return Promise.all(pending)}
+  // RSPT-bottom-row / Application-Photo alignment — the CSS-only attempt
+  // (asymmetric flex-grow:1;flex-shrink:9999 on #rspt-bottom-row vs the
+  // top row's flex-grow:9999;flex-shrink:1, see that div's own comment)
+  // measured as having ZERO effect on the real generated PDF: verified via
+  // the PDF's own native vector coordinates (not page.evaluate/DOM, which
+  // this exact class of cross-column question has already been proven to
+  // misreport for this app's print pipeline — see the two-column body's
+  // own comment for the CSS Grid case that first surfaced that). Root
+  // cause: align-items:stretch only ever hands the RIGHT column a height
+  // equal to its OWN children's natural combined size whenever RIGHT is
+  // the naturally taller/dominant side (true for real products measured
+  // so far) — there is no leftover slack left for any flex-shrink value
+  // to ever engage on, no matter how large. Fixing this for real requires
+  // knowing Application Photo's real rendered bottom edge (a value that
+  // lives in the OTHER column) at layout time — a genuinely cross-column,
+  // measured-not-computed value, exactly the kind of thing this file
+  // already has an established pattern for (see this script's own opening
+  // comment above computePhotoOffset). This reuses that same pattern:
+  // measure both real boxes' post-layout rects, compute the exact pixel
+  // height #rspt-bottom-row needs so its OWN bottom edge lands flush on
+  // #app-photo-box's real bottom edge, then set that height directly,
+  // overriding the flex-basis/grow/shrink CSS above (left in place as the
+  // pre-JS/no-JS fallback shape, same reasoning as photo_cell's own
+  // Jinja-computed transform being kept as a fallback under
+  // computePhotoOffset). Explicit "reduce ... as much as needed" request —
+  // this only ever SHRINKS the row (clamped to its own current/natural
+  // height as an upper bound, and to MIN as a lower one) and never grows
+  // it, so a product where RIGHT is already the shorter column is left
+  // untouched rather than being stretched taller than its own CSS gives
+  // it. Bottom Left/Dimension Diagram's photo pan must be re-applied
+  // after the resize — computePhotoOffset's tx/ty are box-size-relative
+  // percentages, so a stale pre-resize box height would leave a real
+  // (if usually small) pan error on exactly the two photos this touches.
+  // Top-row auto-size-to-picture — explicit request: an OPTIONAL checkbox
+  // (extra_photo_1_autosize, only meaningful once Top Left+Top Right are
+  // merged into one wide zone and it has a real photo) lets that box's
+  // own height follow the photo's real aspect ratio at the row's fixed
+  // width, instead of always claiming this row's full flex-grow:9999
+  // share (up to its own 220px ceiling) regardless of what the photo
+  // actually needs. The whole motivating case: a naturally short/wide
+  // panoramic photo — exactly the shape merging exists for in the first
+  // place — sitting in a box taller than the photo needs just wastes
+  // vertical space that Bottom Left/Bottom Right could otherwise use.
+  // Runs BEFORE alignRsptBottomRow (chained below) on purpose: shrinking
+  // this row's own explicit height changes how much leftover space is
+  // available in the shared flex column for #rspt-bottom-row's own
+  // flex-grow:1 to claim BEFORE that function does its own (separate,
+  // shrink-only) fine-tuning against Application Photo's bottom edge —
+  // sequencing them the other way around would have alignRsptBottomRow
+  // measuring a bottom row that hasn't grown into the freed space yet.
+  // Symmetric (can shrink OR grow the row, clamped to this row's own
+  // existing 40px floor/220px ceiling) unlike alignRsptBottomRow's
+  // shrink-only contract — there's no "never grow past its current size"
+  // reason here since a taller-than-average merged photo legitimately
+  // needs more of this row's own space, same as any fixed-aspect-ratio
+  // box elsewhere on this page (Application Photo's own 16/9 box, for
+  // instance) would.
+  function autoSizeTopRowToPicture(){
+    var topRow=document.getElementById('rspt-top-row');
+    if(!topRow||!topRow.dataset.autosize)return;
+    var img=topRow.querySelector('img[data-pan-x]');
+    if(!img||!img.naturalWidth||!img.naturalHeight)return;
+    var rowW=topRow.getBoundingClientRect().width;
+    if(!rowW)return;
+    var pictureH=rowW*(img.naturalHeight/img.naturalWidth);
+    // Add the caption line's own real rendered height on top of the
+    // picture's own needed height — reported directly as "too much gap
+    // everywhere" and confirmed against a real draft: without this, the
+    // row's total height was computed from the PICTURE's aspect ratio
+    // alone, but photo_cell_captioned (see that macro's own comment)
+    // stacks an optional caption line ABOVE the photo_cell inside the
+    // SAME column, so the caption ate into that same height budget,
+    // squeezing the actual photo shorter than its own aspect ratio calls
+    // for — a real top/bottom letterbox gap exactly the caption's own
+    // height tall (measured: 59.23px row vs a 47.73px-tall photo, an
+    // 11.5px gap — exactly this caption's own font-size:11.5px;
+    // line-height:1). photo_cell_captioned's own DOM shape (column div ->
+    // [optional caption div, then the flex:1 photo_cell wrapper]) is
+    // walked directly here rather than duplicating a caption-presence
+    // flag in JS — if there's a 2nd-from-last... i.e. more than one child,
+    // the first one is the caption, whatever its real height turns out to
+    // be once actually laid out (never a guessed/assumed constant).
+    var photoWrapper=img.parentElement.parentElement.parentElement; // mask div -> photo_cell's own box div -> photo_cell_captioned's flex:1 wrapper
+    var column=photoWrapper&&photoWrapper.parentElement; // photo_cell_captioned's own outer column div
+    var captionH=(column&&column.children.length>1)?column.children[0].getBoundingClientRect().height:0;
+    var desired=pictureH+captionH;
+    var MIN=40,MAX=220; // same ceiling this row's own CSS max-height already uses
+    // Manual override (app.py's own "Custom height" number input next to
+    // the Auto-size checkbox) wins outright over the computed value when
+    // present — see html_engine.py's extra_top_autosize_h comment for the
+    // full "why": auto-size can only ever match the PICTURE FILE's own
+    // outer pixel dimensions, with no way to know whether real content
+    // fills that file edge to edge or sits inside a wide margin, so this
+    // is the direct lever for a user to compensate when it doesn't.
+    if(topRow.dataset.autosizeH){
+      var override=parseFloat(topRow.dataset.autosizeH);
+      if(!isNaN(override)&&override>0)desired=override}
+    if(desired<MIN)desired=MIN;
+    if(desired>MAX)desired=MAX;
+    topRow.style.flex='0 0 '+desired+'px';
+    topRow.style.maxHeight='none';
+    topRow.style.height=desired+'px';
+    applyOne(img);
+  }
+  function alignRsptBottomRow(){
+    var appPhoto=document.getElementById('app-photo-box');
+    var bottomRow=document.getElementById('rspt-bottom-row');
+    if(!appPhoto||!bottomRow)return;
+    var currentH=bottomRow.getBoundingClientRect().height;
+    var appBottom=appPhoto.getBoundingClientRect().bottom;
+    var rowTop=bottomRow.getBoundingClientRect().top;
+    var desired=appBottom-rowTop;
+    var MIN=40; // safety floor so an extreme product can never collapse this row to nothing
+    if(desired<MIN)desired=MIN;
+    if(desired>currentH)desired=currentH; // never grow past its own CSS-driven size — shrink-only, per the explicit request
+    if(Math.abs(desired-currentH)<0.5)return; // already aligned within sub-pixel noise — nothing to do
+    bottomRow.style.flex='0 0 '+desired+'px';
+    bottomRow.style.height=desired+'px';
+    var imgs=bottomRow.querySelectorAll('img[data-pan-x]');
+    for(var i=0;i<imgs.length;i++){applyOne(imgs[i])}
+  }
+  window.__panReady=applyAll().then(autoSizeTopRowToPicture).then(alignRsptBottomRow)})();
+</script>
+</body>
+</html>

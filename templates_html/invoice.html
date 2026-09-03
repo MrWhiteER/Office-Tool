@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="{{ doc_page_js }}"></script>
+<style>
+  /* Same design tokens as quotation.html — see that file's own comment on
+     why fonts are self-hosted data URIs instead of a Google Fonts <link>. */
+  @font-face{font-family:'Archivo';src:url({{ archivo_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'IBM Plex Sans';src:url({{ ibmplexsans_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  doc-page:not(:defined){visibility:hidden}
+  body{margin:0;background:#525659;font-family:'IBM Plex Sans',sans-serif;color:#1f2328}
+  .num{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<doc-page size="a4" margin="13mm">
+
+  <div slot="header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding-bottom:9px;border-bottom:2.5px solid #33526e;margin-bottom:2px;">
+    <img src="{{ logo_src }}" alt="Artemis Group" style="height:52px;width:auto;display:block;border-radius:3px;">
+    <div style="text-align:right;font-size:10px;line-height:1.55;color:#4b5563;">
+      <div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:12px;color:#1f2328;letter-spacing:.2px;">{{ company.name }}</div>
+      <div>P.O. Box No: {{ company.poBox }}, {{ company.city }}</div>
+      <div>Mob: {{ company.mobile }} &nbsp;&middot;&nbsp; Tel: {{ company.tel }}</div>
+      <div>TRN: {{ company.trn }}</div>
+    </div>
+  </div>
+
+  <div slot="footer" style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid #d6dbe1;padding-top:6px;margin-top:2px;font-size:8.5px;color:#8a919b;letter-spacing:.3px;">
+    <span>{{ company.name }} &nbsp;&middot;&nbsp; TRN {{ company.trn }}</span>
+    <span>Thank you for your business.</span>
+  </div>
+
+  <!-- ===== TITLE ===== -->
+  <div style="margin:6px 0 16px;">
+    <div style="font-family:'Archivo',sans-serif;font-weight:900;font-size:33px;letter-spacing:1.5px;color:#1f2328;line-height:1;">TAX INVOICE</div>
+    <div style="height:4px;width:56px;background:#f5a623;margin-top:8px;border-radius:2px;"></div>
+  </div>
+
+  <!-- ===== META GRID ===== -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #d6dbe1;border-radius:5px;overflow:hidden;margin-bottom:18px;">
+    <div style="padding:11px 14px;border-right:1px solid #e5e9ee;">
+      <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Bill To</div>
+      <div style="font-size:12.5px;font-weight:600;color:#1f2328;margin-top:3px;">{{ customer_name }}</div>
+      {% if customer_lines %}
+      <div style="font-size:10px;color:#6b7280;margin-top:2px;line-height:1.5;">{% for line in customer_lines %}{{ line }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+      {% endif %}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;">
+      <div style="padding:9px 14px;border-bottom:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Date</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ date }}</div>
+      </div>
+      <div style="padding:9px 14px;border-bottom:1px solid #e5e9ee;border-left:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">INV Number</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ inv_number }}</div>
+      </div>
+      <div style="padding:9px 14px;border-bottom:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">QTN Number</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ qtn_number }}</div>
+      </div>
+      <div style="padding:9px 14px;border-bottom:1px solid #e5e9ee;border-left:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">LPO Number</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ lpo_number }}</div>
+      </div>
+      <div style="padding:9px 14px;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Project</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ project }}</div>
+      </div>
+      <div style="padding:9px 14px;border-left:1px solid #e5e9ee;">
+        <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;">Type</div>
+        <div style="font-size:11.5px;font-weight:600;margin-top:3px;">{{ type_ }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== LINE ITEMS ===== -->
+  <table style="width:100%;border-collapse:collapse;font-size:10px;">
+    <thead>
+      <tr style="background:#33526e;color:#fff;font-family:'Archivo',sans-serif;">
+        <th style="padding:8px 6px;text-align:center;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:26px;">No</th>
+        <th style="padding:8px 4px;text-align:center;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:50px;">Photo</th>
+        <th style="padding:8px 8px;text-align:left;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;">Item Description</th>
+        <th style="padding:8px 4px;text-align:center;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:32px;">Unit</th>
+        <th style="padding:8px 4px;text-align:center;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:30px;">Qty</th>
+        <th style="padding:8px 6px;text-align:right;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:58px;">Price</th>
+        {% if vat_col_visible %}<th style="padding:8px 6px;text-align:right;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:50px;">{{ vat_col_label }}</th>{% endif %}
+        <th style="padding:8px 6px;text-align:right;font-weight:600;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:64px;">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in items %}
+      <tr style="{{ row.rowStyle }}">
+        <td style="padding:7px 6px;text-align:center;color:#8a919b;border-bottom:1px solid #e5e9ee;">{{ row.no }}</td>
+        <td style="padding:7px 6px;border-bottom:1px solid #e5e9ee;">
+          {% if row.photoUrl %}
+          <img src="{{ row.photoUrl }}" style="width:44px;height:44px;margin:0 auto;display:block;object-fit:cover;border:1px solid #d6dbe1;border-radius:3px;">
+          {% else %}
+          <div style="width:44px;height:44px;margin:0 auto;border:1px solid #d6dbe1;border-radius:3px;background:repeating-linear-gradient(45deg,#f1f4f7,#f1f4f7 4px,#e7ecf1 4px,#e7ecf1 8px);"></div>
+          {% endif %}
+        </td>
+        <td style="padding:7px 8px;text-align:left;font-weight:500;color:#1f2328;border-bottom:1px solid #e5e9ee;white-space:pre-line;">{{ row.desc }}</td>
+        <td style="padding:7px 6px;text-align:center;color:#6b7280;border-bottom:1px solid #e5e9ee;">{{ row.unit }}</td>
+        <td style="padding:7px 6px;text-align:center;border-bottom:1px solid #e5e9ee;" class="num">{{ row.qty }}</td>
+        <td style="padding:7px 8px;text-align:right;border-bottom:1px solid #e5e9ee;" class="num">{{ row.price }}</td>
+        {% if vat_col_visible %}<td style="padding:7px 8px;text-align:right;color:#6b7280;border-bottom:1px solid #e5e9ee;" class="num">{{ row.vat }}</td>{% endif %}
+        <td style="padding:7px 8px;text-align:right;font-weight:600;border-bottom:1px solid #e5e9ee;" class="num">{{ row.amount }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- ===== TOTALS + WORDS ===== -->
+  <div style="display:flex;justify-content:space-between;gap:24px;margin-top:16px;align-items:flex-start;">
+    <div style="flex:1;max-width:340px;">
+      <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;margin-bottom:4px;">Amount in Words</div>
+      <div style="font-size:11px;font-weight:500;color:#1f2328;line-height:1.5;border:1px solid #d6dbe1;border-radius:5px;padding:10px 12px;background:#f8fafb;min-height:16px;">{{ amount_words }}</div>
+    </div>
+    <div style="width:250px;flex-shrink:0;">
+      <div style="display:flex;justify-content:space-between;padding:6px 12px;font-size:10.5px;color:#6b7280;">
+        <span>Subtotal</span><span class="num" style="color:#1f2328;font-weight:500;">{{ subtotal }}</span>
+      </div>
+      {% if discount_visible %}
+      <div style="display:flex;justify-content:space-between;padding:6px 12px;font-size:10.5px;color:#6b7280;">
+        <span>Discount</span><span class="num" style="color:#1f2328;font-weight:500;">{{ discount_amount }}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:6px 12px;font-size:10.5px;color:#6b7280;">
+        <span>Price After Discount</span><span class="num" style="color:#1f2328;font-weight:500;">{{ price_after_discount }}</span>
+      </div>
+      {% endif %}
+      {% if vat_visible %}
+      <div style="display:flex;justify-content:space-between;padding:6px 12px;font-size:10.5px;color:#6b7280;border-bottom:1px solid #d6dbe1;">
+        <span>{{ vat_label }}</span><span class="num" style="color:#1f2328;font-weight:500;">{{ vat_amount }}</span>
+      </div>
+      {% endif %}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;margin-top:6px;background:#33526e;color:#fff;border-radius:5px;font-family:'Archivo',sans-serif;">
+        <span style="font-size:11px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;">Total Amount</span>
+        <span class="num" style="font-size:15px;font-weight:800;">{{ total }}</span>
+      </div>
+      <div style="text-align:right;font-size:8.5px;color:#8a919b;margin-top:4px;">All amounts in AED</div>
+    </div>
+  </div>
+
+  <!-- ===== BANK INFO + SIGNATURE ===== -->
+  <div style="display:flex;justify-content:space-between;gap:28px;margin-top:26px;align-items:flex-end;">
+    <div style="flex:1;">
+      <div style="font-size:8px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#8a919b;margin-bottom:6px;">{{ bank.heading }}</div>
+      <div style="border-left:3px solid #33526e;background:#f8fafb;padding:10px 14px;font-size:10px;line-height:1.7;color:#3f454d;border-radius:0 5px 5px 0;">
+        <div><strong style="color:#1f2328;">Account Name:</strong> {{ bank.account_name }}</div>
+        <div><strong style="color:#1f2328;">Account No:</strong> {{ bank.account_no }}</div>
+        <div><strong style="color:#1f2328;">IBAN:</strong> {{ bank.iban }}</div>
+        <div><strong style="color:#1f2328;">Bank Name:</strong> {{ bank.bank_name }}</div>
+        <div><strong style="color:#1f2328;">Branch:</strong> {{ bank.branch }}</div>
+        <div><strong style="color:#1f2328;">Swift Code:</strong> {{ bank.swift_code }}</div>
+      </div>
+    </div>
+    <div style="width:220px;flex-shrink:0;text-align:center;">
+      <div style="border-bottom:1.5px solid #1f2328;height:38px;margin-bottom:6px;"></div>
+      <div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:10px;letter-spacing:.5px;color:#1f2328;">Authorized Signature</div>
+      <div style="font-size:9px;color:#8a919b;margin-top:2px;">{{ company.name }}</div>
+    </div>
+  </div>
+
+</doc-page>
+</body>
+</html>

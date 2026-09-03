@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="{{ doc_page_js }}"></script>
+<style>
+  /* IBM Plex Sans carries headings here, Archivo carries body/data — the
+     inverse pairing from expense_artemis.html (Archivo headings / IBM Plex
+     body) so the two stay visually distinct even where either brand's red
+     or dark tones might otherwise read similarly. */
+  @font-face{font-family:'Archivo';src:url({{ archivo_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  @font-face{font-family:'IBM Plex Sans';src:url({{ ibmplexsans_src }}) format('woff2');font-weight:100 900;font-display:swap}
+  doc-page:not(:defined){visibility:hidden}
+  body{margin:0;background:#525659;font-family:'Archivo',sans-serif;color:#111111}
+  .num{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<doc-page size="a4" margin="14mm">
+
+  <div slot="header" style="padding-bottom:10px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:20px;">
+      <img src="{{ logo_src }}" alt="{{ brand_label }}" style="height:38px;width:auto;display:block;">
+      <div style="font-family:'IBM Plex Sans',sans-serif;font-weight:800;font-size:20px;letter-spacing:1.5px;color:#111111;text-transform:uppercase;">Expense Report</div>
+    </div>
+    <!-- Angled two-tone rule, echoing the logo's own slanted "A" stroke —
+         a clean chevron rather than a straight line, without overdoing it. -->
+    <div style="display:flex;gap:5px;margin-top:11px;">
+      <div style="height:5px;flex:1;background:#111111;clip-path:polygon(0 0,100% 0,calc(100% - 16px) 100%,0 100%);"></div>
+      <div style="height:5px;width:78px;background:#e2231a;clip-path:polygon(16px 0,100% 0,100% 100%,0 100%);"></div>
+    </div>
+  </div>
+
+  <div slot="footer" style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid #e8e8e8;padding-top:7px;margin-top:2px;font-size:8.5px;color:#8a8a8a;letter-spacing:.3px;">
+    <span>{{ brand_label }}</span>
+    <span>Internal Expense Report</span>
+  </div>
+
+  <!-- ===== META GRID ===== -->
+  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:12px;margin:18px 0 18px;">
+    <div style="border:1px solid #e8e8e8;border-radius:2px;padding:12px 16px;">
+      <div style="font-family:'IBM Plex Sans',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#9a9a9a;">Employee</div>
+      <div style="font-size:14px;font-weight:700;color:#111111;margin-top:3px;">{{ employee }}</div>
+      {% if category %}
+      <div style="font-family:'IBM Plex Sans',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#9a9a9a;margin-top:12px;">Category / Reference</div>
+      <div style="font-size:11px;color:#3a3a3a;margin-top:3px;">{{ category }}</div>
+      {% endif %}
+    </div>
+    <div style="display:flex;flex-direction:column;border:1px solid #e8e8e8;border-radius:2px;overflow:hidden;">
+      <div style="padding:8px 16px;border-bottom:1px solid #e8e8e8;border-left:3px solid #e2231a;flex:1;">
+        <div style="font-family:'IBM Plex Sans',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#9a9a9a;">Report No.</div>
+        <div style="font-size:12px;font-weight:700;margin-top:2px;" class="num">{{ report_number }}</div>
+      </div>
+      <div style="padding:8px 16px;border-bottom:1px solid #e8e8e8;border-left:3px solid #e2231a;flex:1;">
+        <div style="font-family:'IBM Plex Sans',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#9a9a9a;">Date</div>
+        <div style="font-size:12px;font-weight:700;margin-top:2px;">{{ date }}</div>
+      </div>
+      <div style="padding:8px 16px;border-left:3px solid #e2231a;flex:1;">
+        <div style="font-family:'IBM Plex Sans',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#9a9a9a;">Period</div>
+        <div style="font-size:12px;font-weight:700;margin-top:2px;">{{ period_from }} &ndash; {{ period_to }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== LINE ITEMS ===== -->
+  <table style="width:100%;border-collapse:collapse;font-size:10px;">
+    <thead>
+      <tr style="background:#e2231a;color:#fff;font-family:'IBM Plex Sans',sans-serif;">
+        <th style="padding:8px 6px;text-align:center;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:28px;">No</th>
+        <th style="padding:8px 6px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:64px;">Date</th>
+        <th style="padding:8px 6px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:90px;">Product</th>
+        <th style="padding:8px 8px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;">Description</th>
+        <th style="padding:8px 6px;text-align:left;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:90px;">Payment Method</th>
+        <th style="padding:8px 6px;text-align:right;font-weight:700;font-size:8.5px;letter-spacing:.6px;text-transform:uppercase;width:84px;">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr style="background:{{ '#fbf2f1' if loop.index0 is even else '#ffffff' }};">
+        <td style="padding:7px 6px;text-align:center;color:#9a9a9a;border-bottom:1px solid #eee;" class="num">{{ row.no }}</td>
+        <td style="padding:7px 6px;color:#5a5a5a;border-bottom:1px solid #eee;" class="num">{{ row.date }}</td>
+        <td style="padding:7px 6px;font-weight:700;color:#111111;border-bottom:1px solid #eee;">{{ row.product }}</td>
+        <td style="padding:7px 8px;color:#3a3a3a;border-bottom:1px solid #eee;">{{ row.description }}</td>
+        <td style="padding:7px 6px;color:#5a5a5a;border-bottom:1px solid #eee;">{{ row.payment_method }}</td>
+        <td style="padding:7px 8px;text-align:right;font-weight:700;border-bottom:1px solid #eee;" class="num">{{ row.amount }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- ===== TOTAL ===== -->
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-top:14px;">
+    <div style="flex:1;max-width:320px;">
+      <div style="font-family:'IBM Plex Sans',sans-serif;font-size:8px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#9a9a9a;margin-bottom:4px;">Amount in Words</div>
+      <div style="font-size:10.5px;color:#3a3a3a;line-height:1.5;">{{ amount_words }}</div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:28px;width:260px;flex-shrink:0;padding:11px 16px;background:#111111;">
+      <span style="font-family:'IBM Plex Sans',sans-serif;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#fff;">Total</span>
+      <span class="num" style="font-size:16px;font-weight:800;color:#ff4136;">{{ total }}</span>
+    </div>
+  </div>
+
+  <!-- ===== SIGNATURE ===== -->
+  <div style="width:260px;margin:50px 0 0 auto;text-align:center;">
+    <div style="border-bottom:1.5px solid #111111;height:38px;margin-bottom:6px;"></div>
+    <div style="font-family:'IBM Plex Sans',sans-serif;font-weight:700;font-size:10px;letter-spacing:.5px;color:#111111;">Employee Signature</div>
+    <div style="font-size:8px;font-style:italic;color:#9a9a9a;line-height:1.5;margin-top:8px;">By signing this document, the employee confirms that the amount above has been received in full and this reimbursement cannot be disputed or reversed thereafter.</div>
+  </div>
+
+</doc-page>
+</body>
+</html>
