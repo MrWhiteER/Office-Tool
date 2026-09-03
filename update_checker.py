@@ -29,6 +29,7 @@ import threading
 import time
 import urllib.request
 
+import engine
 from version import APP_VERSION
 
 GITHUB_REPO = "MrWhiteER/Office-Tool"
@@ -83,10 +84,25 @@ def check_for_update(timeout=6):
 
 def download_and_launch_installer(download_url, on_progress=None):
     """
-    Downloads the release's Setup.exe to a fresh temp folder and launches
-    it, non-silently — the same install wizard the user already ran once,
-    so "Next, Next, Install" upgrades in place (same AppId as the current
-    install — see installer.iss) without wiping config.json/drafts/etc.
+    Downloads the release's Setup.exe to a fresh temp folder and runs it
+    SILENTLY (/VERYSILENT /SUPPRESSMSGBOXES /NORESTART) — no wizard, no
+    "Welcome to Setup" screen, nothing that reads as "installing new
+    software"; it just replaces the files and relaunches (see
+    installer.iss's [Run] — skipifsilent was removed specifically so a
+    silent run still reopens the app afterward on its own). Same AppId as
+    the current install (installer.iss) means this is always an in-place
+    upgrade, never a fresh install, so config.json/drafts/etc. survive
+    exactly as before.
+
+    /DIR= pins the target explicitly to THIS running instance's own
+    folder (engine.DATA_BASE) rather than trusting Inno Setup's registry
+    lookup alone — matters if this is ever a portable copy rather than a
+    real tracked installation (AppId-based upgrade-detection only works
+    for a real install; without /DIR a portable copy's "update" would
+    silently install a SEPARATE fresh copy to the default location
+    instead of updating the one actually running, which is a much worse
+    version of "feels like new software").
+
     Caller is expected to exit this app shortly after this returns so the
     installer isn't blocked trying to close a running instance of it.
     """
@@ -105,7 +121,10 @@ def download_and_launch_installer(download_url, on_progress=None):
                 done += len(chunk)
                 if on_progress and total:
                     on_progress(done, total)
-    subprocess.Popen([dest], close_fds=True)
+    subprocess.Popen(
+        [dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=" + engine.DATA_BASE],
+        close_fds=True,
+    )
     return dest
 
 

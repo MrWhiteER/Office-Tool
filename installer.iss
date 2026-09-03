@@ -50,6 +50,7 @@ OutputBaseFilename=OfficeTool-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; Update installs run just as smoothly as a first install — same wizard,
 ; same "Next, Next, Install" — Inno Setup handles "already installed at
@@ -75,4 +76,10 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall skipifsilent
+; No skipifsilent — the in-app auto-updater (update_checker.py) runs this
+; installer with /VERYSILENT so an update never shows the wizard at all,
+; and expects the app to relaunch itself afterward automatically rather
+; than leaving the user to go find and reopen it themselves. A normal
+; interactive install still shows this as a "Launch now" checkbox on the
+; wizard's finish page either way (postinstall's own purpose).
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall

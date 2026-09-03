@@ -21,7 +21,8 @@ REM pre-fix cached version) — always building clean is the only way to be
 REM sure what's actually in the .exe matches what's actually in source.
 rmdir /s /q build 2>nul
 rmdir /s /q dist 2>nul
-pyinstaller --name OfficeTool --noconfirm --clean ^
+pyinstaller --name OfficeTool --noconfirm --clean --windowed ^
+  --icon "icon.ico" ^
   --add-data "templates_html;templates_html" ^
   --add-data "templates;templates" ^
   --add-data "static;static" ^

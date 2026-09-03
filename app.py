@@ -4,7 +4,7 @@ Run:  python app.py   then open the browser link it prints.
 Because it runs on your own PC it can read your documents folder and save
 Excel + PDF files there. The on-screen preview is the generated PDF.
 """
-import os, io, re, json, glob, shutil, datetime, traceback, base64, mimetypes, uuid, colorsys, random, threading, queue, time
+import os, io, re, sys, json, glob, shutil, datetime, traceback, base64, mimetypes, uuid, colorsys, random, threading, queue, time
 from flask import Flask, request, jsonify, send_file, Response, session
 from openpyxl import load_workbook
 import engine
@@ -4658,18 +4658,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
  <div class=main>
   <div class=bar>
     <h1 id=title>Menu</h1>
-    <div style="display:flex;gap:8px">
-      <!-- Update Center — everyone (not admin-only, per explicit request),
-           always visible regardless of whether an update is actually
-           available (unlike the rail's own pulsing n-update button, which
-           only appears once one's found — this is the always-there entry
-           point to check status and change update preferences). -->
+    <div id=bar-admin-update-group style="display:none;gap:8px">
+      <!-- Update Center + Admin Tools — scoped to the Settings tab only
+           (per explicit request; an earlier version of this made them
+           global/always-visible, then that was reversed): this whole
+           group is toggled by view() alongside the settings panel itself,
+           default hidden since the app boots into Menu, not Settings. -->
       <button type=button class=btn onclick=openUpdateCenter()>Update</button>
-      <!-- Global quick-access to Admin Tools (Settings' admin sub-page) —
-           lives in the top bar itself (present on every screen, per
-           explicit request) rather than buried in a Settings card. Hidden
-           by default; only ever shown for role==='admin', see
-           applyAccessRestrictions(). -->
+      <!-- Admin Tools (Settings' admin sub-page) — within the group above,
+           still additionally gated to role==='admin' by
+           applyAccessRestrictions(), so a non-admin viewing Settings sees
+           only the Update button. -->
       <button type=button class=btn id=admin-tools-btn style="display:none" onclick=openAdminTools()>Admin Tools</button>
     </div>
   </div>
@@ -6086,6 +6085,10 @@ function view(v){
   const isDoc=DOC_VIEW_LIST.includes(v);
   $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');
   $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
+  // Update/Admin Tools buttons: only make sense while looking at Settings
+  // (Admin Tools opens Settings' own admin sub-page; Update Center is
+  // reachable from the same corner) — see bar-admin-update-group.
+  $('bar-admin-update-group').style.display=(v=='settings')?'flex':'none';
   DOC_VIEW_LIST.forEach(dv=>$('n-'+dv).classList.toggle('on',v===dv));
   if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients')loadClientsView();if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}}
 // The one way to open a document screen — every rail button and Menu tile
@@ -13430,7 +13433,11 @@ function applyAccessRestrictions(){
   // left the admin sub-page showing.
   $('admin-tools-btn').style.display=CURRENT_ROLE==='admin'?'':'none';
   showSettingsMainPanel();
-  $('logoutlabel').textContent='Sign out ('+CURRENT_USER+')'}
+  // Label stays plain "Sign out" — a long username used to get appended
+  // inline here and overflow the rail's fixed width. The username still
+  // shows, just as a hover tooltip on the button itself instead.
+  $('logoutlabel').textContent='Sign out';
+  $('n-logout').title='Sign out ('+CURRENT_USER+')'}
 async function doLogin(ev){
   ev.preventDefault();
   const btn=$('login-submit'),err=$('login-error');
@@ -13563,6 +13570,26 @@ checkLogin();
 accounts.refresh_from_cloud()
 
 if __name__ == "__main__":
+    # The packaged .exe is now built --windowed (no console subsystem at
+    # all, see build.bat) — a real desktop app shouldn't pop a black
+    # terminal behind it for every regular user. But an admin who
+    # deliberately "Run as administrator"s it presumably wants to see
+    # what's happening (errors, print() diagnostics) — so allocate a
+    # console ourselves, on demand, only in that one case. A --windowed
+    # exe genuinely has no console to attach to by default; AllocConsole()
+    # creates one and we repoint stdout/stderr/stdin at it. Skipped
+    # entirely in dev (`python app.py`) — that already has a real terminal.
+    if getattr(sys, "frozen", False):
+        try:
+            import ctypes
+            if ctypes.windll.shell32.IsUserAnAdmin():
+                ctypes.windll.kernel32.AllocConsole()
+                sys.stdout = open("CONOUT$", "w")
+                sys.stderr = open("CONOUT$", "w")
+                sys.stdin = open("CONIN$", "r")
+                print("Office Tool — running elevated, console enabled.\n")
+        except Exception:
+            pass  # never let console setup itself be the reason the app fails to start
     port = int(os.environ.get("PORT", 5000))
     url = f"http://127.0.0.1:{port}"
     try:
