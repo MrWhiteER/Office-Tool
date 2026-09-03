@@ -54,7 +54,7 @@ def check_for_update(timeout=6):
     that as "no update", not as a hard failure.
     """
     if "YOUR_GITHUB_USERNAME" in GITHUB_REPO:
-        return {"available": False, "error": "GITHUB_REPO not configured yet"}
+        return {"available": False, "current": APP_VERSION, "error": "GITHUB_REPO not configured yet"}
     try:
         req = urllib.request.Request(_API_URL, headers=_HEADERS)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -77,7 +77,7 @@ def check_for_update(timeout=6):
             "page_url": data.get("html_url", ""),
         }
     except Exception as e:
-        return {"available": False, "error": str(e)}
+        return {"available": False, "current": APP_VERSION, "error": str(e)}
 
 
 def download_and_launch_installer(download_url, on_progress=None):

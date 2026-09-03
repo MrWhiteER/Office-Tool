@@ -16,6 +16,7 @@ pyinstaller --name OfficeTool --noconfirm ^
   --add-data "templates;templates" ^
   --add-data "static;static" ^
   --add-data "VERSION;." ^
+  --add-data "r2_readonly.json;." ^
   --collect-all playwright ^
   app.py
 echo.

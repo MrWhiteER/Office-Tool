@@ -5,13 +5,16 @@ Because it runs on your own PC it can read your documents folder and save
 Excel + PDF files there. The on-screen preview is the generated PDF.
 """
 import os, io, re, json, glob, shutil, datetime, traceback, base64, mimetypes, uuid, colorsys, random, threading, queue, time
-from flask import Flask, request, jsonify, send_file, Response
+from flask import Flask, request, jsonify, send_file, Response, session
 from openpyxl import load_workbook
 import engine
 import html_engine
 import pdf_extract
 import catalog_builder
 import update_checker
+import accounts
+import photo_store
+import scanner
 from version import APP_VERSION
 
 # static_folder is explicit (not Flask's own __name__-relative default) so
@@ -19,6 +22,149 @@ from version import APP_VERSION
 # .exe, whose __file__/root_path point somewhere temporary — see engine.BASE.
 app = Flask(__name__, static_folder=os.path.join(engine.BASE, "static"))
 CONFIG = os.path.join(engine.DATA_BASE, "config.json")
+
+# A random secret_key would invalidate every session (force re-login) on
+# every single app restart, which is needlessly annoying for daily use —
+# persist it once per install instead, same DATA_BASE as everything else
+# this app writes at runtime (see engine.py's BASE/DATA_BASE split).
+_SECRET_KEY_PATH = os.path.join(engine.DATA_BASE, "secret_key.txt")
+try:
+    with open(_SECRET_KEY_PATH, "r", encoding="utf-8") as _f:
+        app.secret_key = _f.read().strip()
+    if not app.secret_key:
+        raise ValueError
+except Exception:
+    app.secret_key = os.urandom(32).hex()
+    try:
+        with open(_SECRET_KEY_PATH, "w", encoding="utf-8") as _f:
+            _f.write(app.secret_key)
+    except Exception:
+        pass  # worst case: sessions won't survive a restart, not fatal
+
+# "Remember me for 30 days" checkbox on login — see /api/login's own
+# comment on session.permanent for how this pairs with it.
+app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
+
+# Endpoints reachable with no session at all: the SPA shell itself (so the
+# login screen has something to render into), static assets, login itself,
+# and update-checking (harmless to expose, and the update banner should
+# still work pre-login).
+_PUBLIC_PATHS = {"/", "/api/login", "/api/current-user", "/api/check-update"}
+# Tool-block enforcement: which URL prefixes are hard-blocked server-side
+# for each blockable view (see accounts.py's BLOCKABLE_TOOLS). This list is
+# deliberately narrow — audited call-site by call-site — because this
+# app's API is NOT cleanly separated by screen: e.g. /api/config,
+# /api/index, /api/clients (GET/POST), /api/submissions (POST), and
+# /api/units all get called during ordinary document editing (auto-filling
+# the next doc number, company/project autocomplete, the inline "save as
+# client" button, auto-creating a submission record when a DO/INV
+# generates, the line-item unit picker) — blocking those would break core
+# document generation for a restricted user, not just hide a screen. Only
+# endpoints confirmed exclusive to one view's own bulk/delete/export
+# actions are blocked here; "settings" isn't hard-blocked at all for the
+# same reason (its endpoints are shared with inline saves elsewhere, e.g.
+# Full Catalog Builder's own output-folder field uses /api/settings too).
+# So: brand_lock and this list are real security boundaries; every
+# blocked_tools entry (including "settings") ALSO hides its rail nav
+# button in the UI (see applyAccessRestrictions()) — for "settings" that
+# UI hide is the only restriction, a convenience rather than a hard wall.
+_TOOL_PREFIXES = {
+    "clients": ("/api/clients-import", "/api/clients-delete", "/api/clients-export"),
+    "submissions": ("/api/submissions-delete", "/api/submissions-link-scanned-do", "/api/submissions-build-submittal",
+                     "/submission-lpo", "/submission-submittal", "/api/browse-scanned-do", "/open-scanned-do"),
+    "statement": ("/api/finance",),
+    "alldocs": ("/api/alldocs-clone", "/api/alldocs-delete", "/api/alldocs-move"),
+}
+
+@app.before_request
+def _require_login():
+    path = request.path
+    if path in _PUBLIC_PATHS or path.startswith("/static/"):
+        return
+    user = session.get("user")
+    if not user:
+        return jsonify({"error": "Not logged in."}), 401
+    if path.startswith("/api/accounts") and session.get("role") != "admin":
+        return jsonify({"error": "Admin access required."}), 403
+    # Cloudflare/R2 settings are admin-only to even SEE, not just change
+    # (explicit request) — non-admins get zero fields, silently using the
+    # bundled read-only key instead (see photo_store.py's two-tier
+    # comment). /api/photostore-list and -fetch stay open to everyone —
+    # read-only browsing (the cloud photo gallery picker — see
+    # openCloudPhotoPicker()) is a different thing from managing the
+    # connection itself.
+    _PHOTOSTORE_ADMIN_ONLY = ("/api/photostore-upload", "/api/photostore-delete", "/api/photostore-config")
+    if any(path.startswith(p) for p in _PHOTOSTORE_ADMIN_ONLY) and session.get("role") != "admin":
+        return jsonify({"error": "Admin access required."}), 403
+    for tool, prefixes in _TOOL_PREFIXES.items():
+        if tool in (session.get("blocked_tools") or []) and any(path.startswith(p) for p in prefixes):
+            return jsonify({"error": "You don't have access to this."}), 403
+
+@app.post("/api/login")
+def api_login():
+    data = request.json or {}
+    u = accounts.verify_login(data.get("username", ""), data.get("password", ""))
+    if not u:
+        return jsonify({"ok": False, "error": "Wrong username or password."}), 401
+    session.clear()
+    session["user"] = u["username"]
+    session["role"] = u["role"]
+    session["brand_lock"] = u["brand_lock"]
+    session["blocked_tools"] = u["blocked_tools"]
+    # "Remember me" checkbox (defaults checked): permanent=True gives the
+    # cookie a real expiry (PERMANENT_SESSION_LIFETIME, set below to 30
+    # days) so it survives closing/reopening the app; unchecked makes it a
+    # plain session cookie most browsers/WebView2 drop once the window closes.
+    session.permanent = bool(data.get("remember", True))
+    # A brand-locked user always operates in their locked brand, regardless
+    # of whatever brand this install was last left on.
+    if u["brand_lock"]:
+        cfg = load_cfg(); cfg["brand"] = u["brand_lock"]; save_cfg(cfg)
+    return jsonify({"ok": True, **u})
+
+@app.post("/api/logout")
+def api_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+@app.get("/api/current-user")
+def api_current_user():
+    if not session.get("user"):
+        return jsonify({"logged_in": False})
+    return jsonify({"logged_in": True, "username": session["user"], "role": session["role"],
+                     "brand_lock": session.get("brand_lock"), "blocked_tools": session.get("blocked_tools") or []})
+
+# ---- Admin-only user management (Settings > Users) — see accounts.py ----
+@app.get("/api/accounts")
+def api_accounts_list():
+    return jsonify({"users": accounts.list_users(), "brands": list(engine.BRANDS.keys()),
+                     "blockable_tools": list(accounts.BLOCKABLE_TOOLS)})
+
+@app.post("/api/accounts-save")
+def api_accounts_save():
+    data = request.json or {}
+    try:
+        u = accounts.upsert_user(data.get("username", ""), data.get("role", "user"),
+                                  data.get("brand_lock") or None, data.get("blocked_tools") or [],
+                                  password=data.get("password") or None)
+        return jsonify({"ok": True, "user": u})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.post("/api/accounts-delete")
+def api_accounts_delete():
+    data = request.json or {}
+    if data.get("username", "").strip().lower() == session.get("user", "").strip().lower():
+        return jsonify({"ok": False, "error": "You can't delete your own account while logged in."}), 400
+    try:
+        accounts.delete_user(data.get("username", ""))
+        return jsonify({"ok": True})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.post("/api/accounts-publish")
+def api_accounts_publish():
+    return jsonify(accounts.publish_to_cloud())
 
 SETTINGS_FIELDS = ("inv_folder", "do_folder", "qtn2_folder", "pi_folder", "rv_folder", "cn_folder",
                     "scanned_do_folder", "product_photos_folder", "datasheets_folder", "templates_folder",
@@ -434,6 +580,8 @@ def load_cfg():
     return c
 def save_cfg(c):
     with open(CONFIG, "w", encoding="utf-8") as f: json.dump(c, f, indent=2, ensure_ascii=False)
+
+photo_store.configure(load_cfg, save_cfg)
 
 def _assign_series_color(cfg, label):
     """Deterministically assigns (and persists into cfg) a distinct color for
@@ -869,6 +1017,9 @@ def api_set_brand():
     code = (request.json or {}).get("brand", "").strip().upper()
     if code not in engine.BRANDS:
         return jsonify({"error": "Unknown brand."}), 400
+    lock = session.get("brand_lock")
+    if lock and code != lock:
+        return jsonify({"error": "Your account is restricted to " + engine.BRANDS.get(lock, lock) + "."}), 403
     cfg = load_cfg(); cfg["brand"] = code; save_cfg(cfg)
     return jsonify({"brand": code})
 
@@ -2156,6 +2307,25 @@ def api_add_unit():
 def api_check_update():
     return jsonify(update_checker.check_for_update())
 
+# Update Center prefs (Settings top bar, everyone — not admin-only) —
+# whether the app checks for updates automatically on launch, and whether
+# a found update installs itself without the usual double-click confirm.
+# Defaults match the app's original behavior (always checks, never
+# auto-installs) so nothing changes for anyone until they opt in.
+@app.get("/api/update-prefs")
+def api_update_prefs():
+    cfg = load_cfg()
+    prefs = cfg.get("update_prefs") or {}
+    return jsonify({"check_on_start": prefs.get("check_on_start", True), "auto_update": prefs.get("auto_update", False)})
+
+@app.post("/api/update-prefs")
+def api_update_prefs_save():
+    data = request.json or {}
+    cfg = load_cfg()
+    cfg["update_prefs"] = {"check_on_start": bool(data.get("check_on_start", True)), "auto_update": bool(data.get("auto_update", False))}
+    save_cfg(cfg)
+    return jsonify({"ok": True})
+
 # Downloads the newer installer and launches it, then this process exits
 # itself shortly after (so the installer isn't stuck trying to close a
 # still-running instance of the app it's about to replace). The installer
@@ -2247,6 +2417,135 @@ def api_match_photo():
     folder = brand_settings().get("product_photos_folder", "")
     photo = engine.match_product_photo(desc, folder)
     return jsonify({"photo": photo})
+
+# ---------------------------------------------------------------- Shared Product Photos (Cloudflare R2)
+# See photo_store.py's own top-of-file comment for the full picture. Every
+# call here operates against the CURRENTLY ACTIVE brand's product_photos_folder
+# (brand_settings()) — same folder /api/match-photo already reads, so a
+# synced-down photo is picked up with zero other changes.
+@app.get("/api/photostore-config")
+def api_photostore_config():
+    return jsonify(photo_store.get_public_config())
+
+@app.post("/api/photostore-config")
+def api_photostore_config_save():
+    """Saves the one Cloudflare key both places: this machine's own
+    config.json (used directly here) AND the bundled r2_readonly.json
+    (ships to everyone else on the next rebuild+GUPDATE) — see
+    photo_store.py's own comment on why there's no separate read-only
+    tier anymore. The bundle half is best-effort: it only ever succeeds
+    from the admin's own dev checkout (a frozen .exe can't write into
+    itself), so a failure there is reported back but doesn't fail the
+    whole save — the local (this-machine) key is still saved either way."""
+    data = request.json or {}
+    photo_store.save_config(data.get("account_id", ""), data.get("access_key_id", ""),
+                             data.get("secret_access_key", ""), data.get("bucket", ""))
+    bundled = True
+    bundle_error = None
+    try:
+        # Mirror the just-saved config's OWN resolved values (not the raw
+        # request body) — guarantees the bundle always matches exactly,
+        # secret included, even when the submitted secret was blank
+        # ("keep existing") and the bundle file itself had never been
+        # seeded with a real one yet (see get_resolved_admin_config()).
+        resolved = photo_store.get_resolved_admin_config()
+        photo_store.save_readonly_config(resolved.get("account_id", ""), resolved.get("access_key_id", ""),
+                                          resolved.get("secret_access_key", ""), resolved.get("bucket", ""))
+    except Exception as e:
+        bundled = False
+        bundle_error = str(e)
+    return jsonify({"ok": True, "bundled": bundled, "bundle_error": bundle_error})
+
+@app.get("/api/photostore-status")
+def api_photostore_status():
+    if not photo_store.is_configured():
+        return jsonify({"configured": False})
+    try:
+        usage = photo_store.get_usage()
+        return jsonify({"configured": True, **usage})
+    except Exception as e:
+        return jsonify({"configured": True, "error": str(e)}), 502
+
+@app.get("/api/photostore-list")
+def api_photostore_list():
+    try:
+        return jsonify({"photos": photo_store.list_photos()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+@app.get("/api/photostore-fetch")
+def api_photostore_fetch():
+    """Streams one photo's bytes straight from R2 — used both as the
+    gallery grid's <img src> (thumbnails, browser-cached) and, on click,
+    the source the picker draws to a canvas to produce the same kind of
+    data: URI a local file upload would (see pickCatImage() vs
+    openCloudPhotoPicker() in the page script — CAT_IMG[slot].src is
+    always a self-contained data URI either way, zero special-casing
+    needed anywhere downstream in PDF/xlsx generation)."""
+    key = request.args.get("key", "")
+    if not key:
+        return jsonify({"error": "Missing key."}), 400
+    try:
+        data, content_type = photo_store.get_photo_bytes(key)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+    resp = Response(data, mimetype=content_type)
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    return resp
+
+@app.post("/api/photostore-upload")
+def api_photostore_upload():
+    """Accepts either loose files or a whole folder (the frontend sends
+    each File's webkitRelativePath as its filename when uploading a
+    folder — see uploadPhotosToStore()) — so a key here may contain "/"
+    for the folder structure, which R2/S3 stores natively as a prefix."""
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"ok": False, "error": "No files."}), 400
+    try:
+        running_usage = photo_store.get_usage()  # one listing for this whole batch, not one per file
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    uploaded, errors = [], []
+    for f in files:
+        raw_name = (f.filename or "").replace("\\", "/")
+        # Sanitize: this becomes both an R2 key AND a path under
+        # DATA_BASE (the temp file below) — strip any leading slashes and
+        # drop ".."/"." segments so it can never escape either.
+        parts = [p for p in raw_name.split("/") if p not in ("", ".", "..")]
+        if not parts:
+            continue
+        key = "/".join(parts)
+        tmp_path = os.path.join(engine.DATA_BASE, "_photostore_tmp_" + uuid.uuid4().hex + "_" + parts[-1])
+        try:
+            f.save(tmp_path)
+            photo_store.upload_photo(tmp_path, key, running_usage=running_usage)
+            uploaded.append(key)
+        except Exception as e:
+            errors.append(key + ": " + str(e))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    return jsonify({"ok": not errors, "uploaded": uploaded, "errors": errors})
+
+@app.post("/api/photostore-delete")
+def api_photostore_delete():
+    data = request.json or {}
+    name = data.get("filename", "")
+    if not name:
+        return jsonify({"ok": False, "error": "Missing filename."}), 400
+    try:
+        photo_store.delete_photo(name)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+@app.post("/api/photostore-sync")
+def api_photostore_sync():
+    folder = brand_settings().get("product_photos_folder", "")
+    if not folder:
+        return jsonify({"ok": False, "error": "Set a Product Pictures folder in Settings first."}), 400
+    return jsonify(photo_store.sync_down(folder))
 
 @app.get("/api/match-datasheets")
 def api_match_datasheets():
@@ -3363,6 +3662,57 @@ def open_scanned_do():
         return jsonify({"ok": False, "error": f"Could not open that file: {e}"})
     return jsonify({"ok": True})
 
+# ---------------------------------------------------------------- Scan Now (WIA scanner)
+# Replaces "scan externally with the scanner's own software, then Browse to
+# find the file" with one in-app action — see scanner.py's own top-of-file
+# comment for the full flow. Every route here is submissions-gated (same
+# blocked_tools prefix as the rest of the scanned-DO flow), not admin-only.
+@app.get("/api/scanner-list")
+def api_scanner_list():
+    return jsonify({"scanners": scanner.list_scanners()})
+
+@app.post("/api/scanner-scan-page")
+def api_scanner_scan_page():
+    data = request.json or {}
+    try:
+        result = scanner.scan_one_page(device_id=data.get("device_id") or None, session_id=data.get("session_id"))
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+@app.post("/api/scanner-remove-last-page")
+def api_scanner_remove_last_page():
+    data = request.json or {}
+    return jsonify(scanner.remove_last_page(data.get("session_id", "")))
+
+@app.post("/api/scanner-cancel")
+def api_scanner_cancel():
+    data = request.json or {}
+    scanner.cancel_session(data.get("session_id", ""))
+    return jsonify({"ok": True})
+
+@app.post("/api/scanner-finalize")
+def api_scanner_finalize():
+    """Combines the session's captured pages into one PDF, named after the
+    submission it's for, saved straight into the Scanned Delivery Orders
+    folder — same {rel, name} shape /api/browse-scanned-do already
+    returns, so the frontend's existing submissions-link-scanned-do call
+    needs no changes at all."""
+    data = request.json or {}
+    folder = brand_settings().get("scanned_do_folder", "")
+    if not folder:
+        return jsonify({"ok": False, "error": "Set your Scanned Delivery Orders folder first (see Settings)."}), 400
+    brand = current_brand()
+    _subs, sub = _find_submission(data.get("submission_id", ""), brand)
+    filename = scanner.build_scan_filename(brand, sub.get("do_number") if sub else "", sub.get("company") if sub else "")
+    try:
+        path = scanner.finalize_session(data.get("session_id", ""), folder, filename)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "rel": os.path.basename(path), "name": os.path.basename(path)})
+
 @app.get("/preview")
 def preview():
     rel = request.args.get("f", "")
@@ -4217,7 +4567,42 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 @keyframes updatePulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:.7}}
 .fmupdatever{font-size:12px;color:var(--muted);padding:0 12px 6px}
 .fmupdatenotes{font-size:12px;color:var(--ink);padding:0 12px 10px;max-height:140px;overflow-y:auto;white-space:pre-wrap;line-height:1.4}
+.loginoverlay{position:fixed;inset:0;z-index:500;display:flex;align-items:center;justify-content:center;background:var(--brand-dark);background-image:radial-gradient(circle at 30% 20%,rgba(226,149,44,.14),transparent 55%)}
+.loginoverlay.hide{display:none}
+.loginbox{width:320px;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-xl);padding:28px 26px;animation:brandOpen .25s cubic-bezier(.24,.9,.32,1.24)}
+.loginbox h1{margin:0 0 2px;font-size:19px;color:var(--ink)}
+.loginbulb{width:36px;height:36px;border-radius:50%;margin:0 auto 14px;background:radial-gradient(circle at 38% 32%,#ffe6b3,var(--amber) 58%,var(--amber2));box-shadow:0 0 16px rgba(226,149,44,.55)}
+.usercard{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:11px;border:1px solid var(--line);margin-bottom:6px}
+.usercard b{font-size:13px;flex:1}
+.userbadge{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--tint);color:var(--muted)}
+.userbadge.admin{background:var(--brand-dark);color:#fff}
+.usertoolchip{font-size:11px;display:flex;align-items:center;gap:6px}
+.cloudphototile{cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:6px;text-align:center;transition:border-color .15s,transform .15s;background:var(--card-bg)}
+.cloudphototile:hover{border-color:var(--brand-dark);transform:translateY(-2px)}
+.cloudphototile img{width:100%;aspect-ratio:1;object-fit:contain;background:#fff;border-radius:6px;display:block;margin-bottom:5px}
+.cloudphototile span{display:block;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scanpagetile{position:relative;width:64px;height:84px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fff}
+.scanpagetile img{width:100%;height:100%;object-fit:cover}
+.scanpagetile span{position:absolute;bottom:2px;right:3px;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 4px;border-radius:3px}
 </style></head><body>
+<!-- Shown until /api/current-user confirms a session (or a login succeeds)
+     — see checkLogin()/bootApp() near the bottom of the page script. The
+     rest of the app (.app below) still renders behind it so nothing has
+     to wait on login just to exist in the DOM, but every /api/* call
+     401s server-side until logged in (see app.py's before_request), so
+     nothing real can happen while this is up. -->
+<div class=loginoverlay id=loginoverlay>
+  <form class=loginbox onsubmit="return doLogin(event)">
+    <div class=loginbulb></div>
+    <h1>Office Tool</h1>
+    <p class=muted style="margin:0 0 18px;font-size:13px">Sign in to continue</p>
+    <div class=f><label>Username</label><input id=login-username autocomplete=username autofocus></div>
+    <div class=f><label>Password</label><input id=login-password type=password autocomplete=current-password></div>
+    <label class=dvcheck style="text-transform:none;font-size:12.5px;margin:2px 0 10px"><input type=checkbox id=login-remember checked> Remember me on this PC for 30 days</label>
+    <p id=login-error class="muted hide" style="color:#e0464f;font-size:12.5px;margin:2px 0 10px"></p>
+    <button class="btn dark" style="width:100%" type=submit id=login-submit>Sign In</button>
+  </form>
+</div>
 <div class=app>
  <div class=watermark id=watermark></div>
  <!-- Deliberately a sibling of .rail, not a child: the rail scrolls
@@ -4264,10 +4649,28 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
      </span>
      <span class=navlabel>Update</span>
    </button>
+   <button class=nav id=n-logout onclick="doLogout()" title="Sign out">
+     <svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+     <span class=navlabel id=logoutlabel>Sign out</span>
+   </button>
  </div>
  <div class=main>
   <div class=bar>
     <h1 id=title>Menu</h1>
+    <div style="display:flex;gap:8px">
+      <!-- Update Center — everyone (not admin-only, per explicit request),
+           always visible regardless of whether an update is actually
+           available (unlike the rail's own pulsing n-update button, which
+           only appears once one's found — this is the always-there entry
+           point to check status and change update preferences). -->
+      <button type=button class=btn onclick=openUpdateCenter()>Update</button>
+      <!-- Global quick-access to Admin Tools (Settings' admin sub-page) —
+           lives in the top bar itself (present on every screen, per
+           explicit request) rather than buried in a Settings card. Hidden
+           by default; only ever shown for role==='admin', see
+           applyAccessRestrictions(). -->
+      <button type=button class=btn id=admin-tools-btn style="display:none" onclick=openAdminTools()>Admin Tools</button>
+    </div>
   </div>
 
   <!-- MENU (home/landing view — first thing shown on launch) -->
@@ -4286,14 +4689,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     </div>
     <div class=fmtitle>Records</div>
     <div class=launchergrid>
-      <button class=launchertile onclick="launcherGo('all')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span>All Docs</span></button>
-      <button class=launchertile onclick="launcherGo('submissions')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span>Submissions</span></button>
-      <button class=launchertile onclick="launcherGo('statement')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=20 x2=12 y2=10 /><line x1=18 y1=20 x2=18 y2=4 /><line x1=6 y1=20 x2=6 y2=16 /></svg></span><span>Statement</span></button>
-      <button class=launchertile onclick="launcherGo('clients')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=8 r=4 /><path d="M4 21a8 8 0 0 1 16 0"/></svg></span><span>Clients</span></button>
+      <button class=launchertile id=t-all onclick="launcherGo('all')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span>All Docs</span></button>
+      <button class=launchertile id=t-submissions onclick="launcherGo('submissions')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span>Submissions</span></button>
+      <button class=launchertile id=t-statement onclick="launcherGo('statement')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=20 x2=12 y2=10 /><line x1=18 y1=20 x2=18 y2=4 /><line x1=6 y1=20 x2=6 y2=16 /></svg></span><span>Statement</span></button>
+      <button class=launchertile id=t-clients onclick="launcherGo('clients')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=8 r=4 /><path d="M4 21a8 8 0 0 1 16 0"/></svg></span><span>Clients</span></button>
     </div>
-    <div class=fmtitle>System</div>
+    <div class=fmtitle id=t-settings-title>System</div>
     <div class=launchergrid>
-      <button class=launchertile onclick="launcherGo('settings')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=3 /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></span><span>Settings</span></button>
+      <button class=launchertile id=t-settings onclick="launcherGo('settings')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=3 /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></span><span>Settings</span></button>
     </div>
   </div>
 
@@ -4556,6 +4959,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
         <div id=cat-badges-rows></div>
         </div>
       </div>
+
 
       <div class="clientmodal hide" id=catbadgesmodal>
         <div class=clientmodalbox style="max-width:460px">
@@ -4916,6 +5320,12 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 
   <!-- SETTINGS -->
   <div id=v-settings class=hide style="padding:24px;max-width:640px;margin:0 auto">
+   <!-- Two nested sub-pages within Settings itself (not a separate rail
+        item) — per explicit request: Admin lives INSIDE Settings, as its
+        own page you go into and back out of, appearing only when logged
+        in as an admin. showSettingsAdminPanel()/showSettingsMainPanel()
+        just toggle which of these two is visible; both stay in the DOM. -->
+   <div id=settings-main-panel>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
       <span id=set-bulb></span>
       <h2 style="margin:0;font-size:16px">Settings — <span id=set-brandname>Artemis Lightings</span></h2>
@@ -4935,6 +5345,20 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div class=card><div class=ch>Product catalog</div><div class=cb>
       <div class=f><label>Product Pictures</label><div class=setrow><input id=set-product_photos_folder placeholder="Folder of product PNGs"><button class=btn onclick="browseSetting('product_photos_folder')">Choose…</button></div></div>
       <div class=f><label>Datasheets</label><div class=setrow><input id=set-datasheets_folder placeholder="Folder of product datasheet PDFs"><button class=btn onclick="browseSetting('datasheets_folder')">Choose…</button></div></div>
+    </div></div>
+    <!-- Free shared photo library (Cloudflare R2 — see photo_store.py).
+         No credential fields here at all, by explicit request — the
+         connection itself is entirely admin-managed (Admin Tools):
+         admins get their own read/write key there, everyone else
+         automatically uses a read-only key baked into the app itself
+         (photo_store.py's own comment on the two credential tiers). Sync
+         just downloads into the Product Pictures folder above, so
+         /api/match-photo (used everywhere a line item shows a photo)
+         needs zero changes to pick synced photos up. -->
+    <div class=card><div class=ch>Shared Product Photos (Cloud)</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 8px">Free shared photo library, synced from the cloud into the Product Pictures folder above — every install sees the same photos without a paid server. Connection is set up by your admin; nothing to configure here.</p>
+      <div id=photostore-status style="font-size:12.5px" class=muted>Checking status…</div>
+      <button class="btn dark" style="width:100%;margin-top:8px" onclick="syncPhotoStore(this)">Sync Now — Download New Photos</button>
     </div></div>
     <div class=card><div class=ch>Product Datasheets (Generated)</div><div class=cb>
       <div class=f><label>Save Sololuce Datasheets To</label><div class=setrow><input id=set-catalogue_folder placeholder="Folder where generated product datasheet PDFs are saved"><button class=btn onclick="browseSetting('catalogue_folder')">Choose…</button></div></div>
@@ -4958,8 +5382,136 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <p class=muted style="font-size:11.5px;margin:0 0 4px">Every preset added or removed anywhere in the app, most recent first.</p>
       <div id=auditlog-body style="max-height:320px;overflow:auto"></div>
     </div></div>
+   </div>
+   <!-- The Admin sub-page — hidden until showSettingsAdminPanel() runs
+        (from the entry card above), only ever reachable at all when
+        logged in as admin (the entry card itself is admin-only). The two
+        tools here are the ones that actually CHANGE the shared bucket
+        contents (accounts, the photo library's own files); read-only
+        things like R2 connection settings and Sync Now stay on the main
+        Settings page since every install, admin or not, needs those. -->
+   <div id=settings-admin-panel class=hide>
+    <button type=button class=btn style="margin-bottom:16px" onclick="showSettingsMainPanel()">← Back to Settings</button>
+    <!-- ONE Cloudflare R2 key, admin-managed — used both by this machine
+         directly AND bundled into future builds for everyone else (see
+         photo_store.py's own comment). Only this admin-only page can see
+         or change it (also enforced at the API level, app.py's
+         before_request). -->
+    <div class=card><div class=ch>Cloud Storage</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 8px" id=ps-hint>Your Cloudflare R2 key — used on this machine directly, and bundled into the app itself so every other install works automatically with nothing for them to set up. Save here, then rebuild + GUPDATE to ship it to everyone.</p>
+      <div class=f><label>Account ID</label><input id=ps-account_id placeholder="Cloudflare R2 Account ID"></div>
+      <div class=f><label>Bucket name</label><input id=ps-bucket placeholder="e.g. office-tool-photos"></div>
+      <div class=f><label>Access Key ID</label><input id=ps-access_key_id></div>
+      <div class=f><label id=ps-secret-label>Secret Access Key</label><input id=ps-secret_access_key type=password placeholder="Leave blank to keep the saved key"></div>
+      <button class=btn style="width:100%" onclick="savePhotoStoreConfig(this)">Save Cloud Storage Key</button>
+      <p class=muted id=ps-bundle-note style="font-size:11px;margin:6px 0 0"></p>
+    </div></div>
+    <div class=card><div class=ch>Users &amp; Access</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 4px">Who can open this app, and — for non-admins — which brand and which tools they're limited to. Changes take effect for that user next time they log in.</p>
+      <div id=users-list></div>
+      <div class=f style="margin-top:10px"><label>Username</label><input id=user-username></div>
+      <div class=f><label id=user-password-label>Password</label><input id=user-password type=password placeholder="Leave blank to keep current password when editing"></div>
+      <div class=f><label>Role</label><select id=user-role onchange="renderUserRoleFields()"><option value=user>Limited user</option><option value=admin>Admin (full access)</option></select></div>
+      <div id=user-restrict-fields>
+        <div class=f><label>Locked to brand</label><select id=user-brand-lock><option value="">— none, sees brand switcher —</option></select></div>
+        <div class=f><label>Blocked tools</label><div id=user-blocked-tools style="display:flex;flex-wrap:wrap;gap:10px"></div></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn dark" style="flex:1" onclick=saveUserForm()>+ Add / Save User</button>
+        <button class=btn onclick=resetUserForm()>Clear</button>
+      </div>
+      <button class=btn style="width:100%;margin-top:10px" onclick="publishAccounts(this)">Publish Changes to Cloud</button>
+      <p class=muted id=users-publish-note style="font-size:11px;margin:6px 0 0"></p>
+    </div></div>
+    <div class=card><div class=ch>Manage Cloud Photo Library</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 8px">Add to or remove from the shared photo library everyone syncs from (Settings > Shared Product Photos). Needs the read/write R2 key — see photo_store.py's own comment on why non-admins get a separate read-only one.</p>
+      <div class=f><label>Add individual photos (filename = product code, e.g. STAGNA-MS.png)</label><input type=file id=ps-upload-files multiple accept=".png"></div>
+      <button class=btn style="width:100%" onclick="uploadPhotosToStore('ps-upload-files',this)">Upload Files</button>
+      <!-- webkitdirectory: lets the native file picker select a whole
+           folder (with subfolders) at once — no per-browser 100-file
+           limit like the R2 dashboard's own uploader has, and no
+           separate tool needed. Each file keeps its relative path (see
+           uploadPhotosToStore()) so a folder of subfolders uploads with
+           the same structure; the matcher (engine.load_photo_catalog)
+           scans recursively so subfolders don't break matching either. -->
+      <div class=f style="margin-top:10px"><label>Or add an entire folder at once</label><input type=file id=ps-upload-folder webkitdirectory multiple></div>
+      <button class=btn style="width:100%" onclick="uploadPhotosToStore('ps-upload-folder',this)">Upload Folder</button>
+      <div id=photostore-upload-progress class="muted hide" style="font-size:11.5px;margin-top:6px"></div>
+      <div id=photostore-list style="margin-top:10px;max-height:280px;overflow:auto"></div>
+    </div></div>
+   </div>
   </div>
  </div>
+</div>
+<!-- Scan Now — drives a physically-connected scanner via WIA (see
+     scanner.py) instead of "scan externally, then Browse to find it".
+     Opened from linkScannedDo() (Submissions) in place of the old direct
+     browse-scanned-do call; "Choose Existing File Instead" keeps that old
+     path available, since not every scan starts from this machine's own
+     scanner (e.g. an emailed scan). Deliberately a GLOBAL sibling here —
+     not nested inside v-build like an earlier draft had it, which broke
+     it: v-build carries .hide outside document-editing views, and
+     display:none on an ancestor removes even position:fixed descendants
+     from rendering, no matter their own position value. -->
+<div class="clientmodal hide" id=scannowmodal>
+  <div class=clientmodalbox style="max-width:480px">
+    <div class=clientmodalbar><b>Scan Delivery Order</b><button class=btn onclick=closeScanNowModal()>Cancel</button></div>
+    <div class=clientmodalbody>
+      <div id=scannow-nodevice class="muted hide" style="font-size:12.5px;margin-bottom:10px">No scanner found — check it's connected and turned on, then <a onclick=refreshScannerList() style="cursor:pointer;text-decoration:underline">try again</a>.</div>
+      <div id=scannow-picker-wrap class=f style="display:none"><label>Scanner</label><select id=scannow-device></select></div>
+      <div id=scannow-status class=muted style="font-size:12.5px;margin:0 0 10px">Checking for a scanner…</div>
+      <div id=scannow-pages style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px"></div>
+      <button type=button class="btn dark" style="width:100%" id=scannow-scan-btn onclick=scanNextPage() disabled>Scan Page</button>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button type=button class=btn style="flex:1" onclick=removeLastScanPage()>Remove Last Page</button>
+        <button type=button class="btn dark" style="flex:1" onclick=finalizeScanAndLink()>Save &amp; Link</button>
+      </div>
+      <p style="text-align:center;margin:14px 0 0"><a onclick=chooseExistingScannedFile() style="cursor:pointer;text-decoration:underline;font-size:12px;color:var(--muted)">Choose an existing file instead…</a></p>
+    </div>
+  </div>
+</div>
+<!-- Cloud Photo Library picker — see openCloudPhotoPicker() in the page
+     script. Global sibling for the same reason scannowmodal is (see its
+     own comment just above) — this used to be nested inside v-build and
+     only "worked" by coincidence, since it's currently only ever opened
+     from within that view; moved here so it can't silently break the
+     moment something opens it from elsewhere. Thumbnails are plain
+     <img src="/api/photostore-fetch?..."> (browser-cached); clicking one
+     draws it to an offscreen canvas to get the same kind of data: URI a
+     local upload produces via FileReader, so CAT_IMG[slot].src never
+     needs to know which source a photo came from. -->
+<div class="clientmodal hide" id=cloudphotomodal>
+  <div class=clientmodalbox style="max-width:640px">
+    <div class=clientmodalbar><b>Choose from Cloud Library</b><button class=btn onclick=closeCloudPhotoPicker()>Cancel</button></div>
+    <div class=clientmodalbody>
+      <input id=cloudphoto-search placeholder="Search by product code…" oninput=renderCloudPhotoGrid() style="width:100%;margin-bottom:12px">
+      <div id=cloudphoto-status class=muted style="font-size:12px;margin-bottom:8px"></div>
+      <div id=cloudphoto-grid style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px"></div>
+    </div>
+  </div>
+</div>
+<!-- Update Center — see openUpdateCenter() in the page script. Global
+     sibling, same reasoning as scannowmodal/cloudphotomodal just above:
+     never nest a modal inside a view container that carries .hide
+     outside its own screen. -->
+<div class="clientmodal hide" id=updatecentermodal>
+  <div class=clientmodalbox style="max-width:420px">
+    <div class=clientmodalbar><b>Office Tool Updates</b><button class=btn onclick=closeUpdateCenter()>Close</button></div>
+    <div class=clientmodalbody>
+      <div style="text-align:center;margin-bottom:14px">
+        <div class=muted style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">Current Version</div>
+        <div id=uc-version style="font-size:20px;font-weight:700">—</div>
+      </div>
+      <div id=uc-status class=muted style="font-size:12.5px;text-align:center;margin-bottom:6px">Checking…</div>
+      <div id=uc-notes class="muted hide" style="font-size:11.5px;max-height:120px;overflow:auto;margin-bottom:10px;padding:8px;border:1px solid var(--line);border-radius:8px;white-space:pre-wrap"></div>
+      <button type=button class=btn style="width:100%" onclick=checkForAppUpdate(true)>Check Now</button>
+      <button type=button class="btn dark hide" id=uc-install-btn style="width:100%;margin-top:8px" onclick=installUpdate(this)>Install &amp; Restart</button>
+      <div style="border-top:1px solid var(--line);margin:16px 0 12px"></div>
+      <label class=dvcheck style="text-transform:none;font-size:12.5px;display:block;margin-bottom:8px"><input type=checkbox id=uc-check-on-start onchange=saveUpdatePrefs()> Check for updates on each start</label>
+      <label class=dvcheck style="text-transform:none;font-size:12.5px;display:block"><input type=checkbox id=uc-auto-update onchange=saveUpdatePrefs()> Automatically install updates when found</label>
+      <p class=muted style="font-size:11px;margin:8px 0 0">With auto-install on, a found update installs itself (the app briefly restarts) without asking first.</p>
+    </div>
+  </div>
 </div>
 <div class=toast id=toast></div>
 <div class=hoverprev id=hoverprev></div>
@@ -5182,6 +5734,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button type=button class=btn id=photoadjust-standard-btn style="width:100%;margin-bottom:4px" onclick="setPhotoAdjustCatalogueStandard()"><span id=photoadjust-standard-label>Standard Settings</span></button>
       <div style="display:flex;gap:6px;margin-top:4px">
         <button type=button class=btn style="flex:1" onclick="pickCatImage(PHOTO_ADJUST_SLOT)">Change Photo</button>
+        <button type=button class=btn title="Choose from Cloud Library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(PHOTO_ADJUST_SLOT)"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=9.5/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
         <button type=button class=btn style="flex:1" onclick="resetPhotoAdjust()">Reset</button>
       </div>
     </div>
@@ -5370,15 +5923,23 @@ function toast(m){$('toast').textContent=m;$('toast').classList.add('show');setT
 
 // ---------------------------------------------------------------- Auto-update
 // Polls /api/check-update (GitHub Releases — see update_checker.py) on
-// launch and every few hours the app stays open. Finding one just unhides
-// the rail's Update button (with a pulsing dot) — nothing interrupts the
-// user until they click it themselves. UPDATE_INFO holds the last result
-// so openUpdateMenu() doesn't need to refetch.
-let UPDATE_INFO=null;
-async function checkForAppUpdate(){
+// launch (if UPDATE_PREFS.check_on_start) and every few hours the app
+// stays open, or on demand from the Update Center (top bar, everyone —
+// see openUpdateCenter()). Finding one unhides the rail's pulsing-dot
+// Update button; with auto_update on, it also installs itself right
+// away instead of waiting for a click. UPDATE_INFO holds the last result
+// so openUpdateMenu()/renderUpdateCenter() don't need to refetch.
+let UPDATE_INFO=null, UPDATE_PREFS={check_on_start:true,auto_update:false};
+async function checkForAppUpdate(manual){
   try{
     const r=await fetch('/api/check-update').then(r=>r.json());
-    if(r.available){UPDATE_INFO=r;$('n-update').classList.remove('hide')}
+    UPDATE_INFO=r;
+    $('n-update').classList.toggle('hide',!r.available);
+    renderUpdateCenter();
+    if(r.available&&UPDATE_PREFS.auto_update&&!manual){
+      toast('Installing update automatically…');
+      const fakeBtn=document.createElement('button');fakeBtn.dataset.confirm='1';
+      actuallyInstallUpdate(fakeBtn)}
   }catch(e){/* offline or GitHub unreachable — silently skip, try again later */}}
 function openUpdateMenu(rect){
   if(!UPDATE_INFO)return;
@@ -5417,6 +5978,43 @@ async function actuallyInstallUpdate(btn){
     btn.textContent='Installing…';
     toast('Installer launching — the app will close and reopen the new version');
   }catch(e){toast('Update failed: '+e.message);btn.disabled=false;btn.textContent='Install & Restart'}}
+
+// Reads the saved prefs before deciding whether to auto-check at all —
+// unlike openUpdateCenter() (which always checks, since the user just
+// asked), a launch-time check should stay off if "Check for updates on
+// each start" was unchecked. Still populates UPDATE_PREFS either way, so
+// auto_update is known even if the user later finds an update manually.
+async function initUpdateChecking(){
+  UPDATE_PREFS=await fetch('/api/update-prefs').then(r=>r.json()).catch(()=>UPDATE_PREFS);
+  if(!UPDATE_PREFS.check_on_start)return;
+  checkForAppUpdate();
+  setInterval(checkForAppUpdate,4*60*60*1000)} // re-check every 4h for a long-running session
+
+// ---- Update Center (top bar, everyone) ----
+async function openUpdateCenter(){
+  $('updatecentermodal').classList.remove('hide');
+  const p=await fetch('/api/update-prefs').then(r=>r.json()).catch(()=>UPDATE_PREFS);
+  UPDATE_PREFS=p;
+  $('uc-check-on-start').checked=!!p.check_on_start;
+  $('uc-auto-update').checked=!!p.auto_update;
+  await checkForAppUpdate(true)}
+function closeUpdateCenter(){$('updatecentermodal').classList.add('hide')}
+function renderUpdateCenter(){
+  const u=UPDATE_INFO;if(!u)return;
+  $('uc-version').textContent=u.current?('v'+u.current):'—';
+  const installBtn=$('uc-install-btn'),notes=$('uc-notes');
+  if(u.available){
+    $('uc-status').textContent='v'+u.latest+' is available.';
+    installBtn.classList.remove('hide');
+    installBtn.dataset.confirm='';installBtn.disabled=false;installBtn.textContent='Install & Restart';
+    if(u.notes){notes.textContent=u.notes;notes.classList.remove('hide')}else notes.classList.add('hide')
+  }else{
+    $('uc-status').textContent=u.error?'Could not check for updates.':"You're on the latest version.";
+    installBtn.classList.add('hide');notes.classList.add('hide')}}
+async function saveUpdatePrefs(){
+  UPDATE_PREFS={check_on_start:$('uc-check-on-start').checked,auto_update:$('uc-auto-update').checked};
+  await fetch('/api/update-prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(UPDATE_PREFS)});
+  toast('Saved')}
 // Explicit choice wins and persists (localStorage); with no choice yet, the
 // :root media-query block already follows the OS preference on its own —
 // this just keeps the toggle's own icon/label in sync with whichever is
@@ -5445,6 +6043,11 @@ syncThemeIcon();
 const DOC_VIEWS={QTN2:'qtn2',INV:'inv',DO:'do',EXP:'exp',CAT:'catbuild'};
 const DOC_VIEW_LIST=Object.values(DOC_VIEWS);
 function view(v){
+  // Defense in depth for a restricted user — the corresponding nav
+  // button/tile is already hidden (see applyAccessRestrictions()), this
+  // just stops a direct view('settings')-style console call too. The
+  // real enforcement is server-side (app.py's before_request).
+  if(BLOCKED_TOOLS.includes(v))v='menu';
   const isDoc=DOC_VIEW_LIST.includes(v);
   $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');
   $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
@@ -5495,12 +6098,27 @@ function refreshCatSectionResize(id){
     run()})})();
 const SETTINGS_FIELDS=['inv_folder','do_folder','qtn2_folder','pi_folder','rv_folder','cn_folder','scanned_do_folder','product_photos_folder','datasheets_folder','templates_folder','clients_file','catalogue_folder','expense_folder'];
 async function loadSettings(){
+  showSettingsMainPanel();  // always land on the main panel, not wherever the admin sub-page was left
   const r=await fetch('/api/settings').then(r=>r.json());
   SETTINGS_FIELDS.forEach(k=>{const el=$('set-'+k);if(el)el.value=r[k]||''});
   const b=BRAND_LIST.find(x=>x.code===BRAND)||{code:BRAND,label:BRAND};
   $('set-brandname').textContent=b.label;
   $('set-bulb').innerHTML=brandIcon(BRAND,'set');
-  renderManageLists();renderAuditLog()}
+  renderManageLists();renderAuditLog();loadPhotoStoreSettings()}
+// Admin Tools — a sub-page nested WITHIN Settings itself (own rail item
+// deliberately rejected — see applyAccessRestrictions()'s comment), only
+// ever reachable via the entry card that's only visible for role==='admin'.
+// Global top-bar button (visible on every screen for role==='admin', see
+// the .bar markup) — jumps straight to Settings' Admin sub-page from
+// anywhere, no need to go through Settings' own UI first.
+function openAdminTools(){view('settings');showSettingsAdminPanel()}
+function showSettingsAdminPanel(){
+  $('settings-main-panel').classList.add('hide');
+  $('settings-admin-panel').classList.remove('hide');
+  loadUsersAdmin();loadPhotoStoreList();loadPhotoStoreAdminSettings()}
+function showSettingsMainPanel(){
+  $('settings-admin-panel').classList.add('hide');
+  $('settings-main-panel').classList.remove('hide')}
 async function browseSetting(field){
   const r=await fetch('/api/browse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field})}).then(r=>r.json());
   if(r.error){alert(r.error);return}
@@ -5511,6 +6129,110 @@ async function saveSettings(){
   if(r.error){alert(r.error);return}
   loadSettings();
   toast('Settings saved')}
+
+// ---------------------------------------------------------------- Shared Product Photos (Cloudflare R2)
+// See photo_store.py's own comment for the full design. Credentials here
+// are per-machine (this install's own config.json) — every install (admin
+// or not) fills this in once with whichever token it was given.
+function fmtBytes(n){
+  if(n>=1073741824)return (n/1073741824).toFixed(2)+' GB';
+  if(n>=1048576)return (n/1048576).toFixed(1)+' MB';
+  return Math.round(n/1024)+' KB'}
+// General Settings (everyone) — status only, no credential fields at all
+// (admin-only now, see Admin Tools) — just whether syncing is working.
+async function loadPhotoStoreSettings(){
+  refreshPhotoStoreStatus()}
+// Admin Tools — both credential tiers. See photo_store.py's own comment:
+// "Your Admin Key" is this machine's write-capable key; "Read-Only Key"
+// is what gets BUNDLED into future builds for everyone else, not typed
+// in by them.
+async function loadPhotoStoreAdminSettings(){
+  const r=await fetch('/api/photostore-config').then(r=>r.json());
+  $('ps-account_id').value=r.account_id||'';
+  $('ps-bucket').value=r.bucket||'';
+  $('ps-access_key_id').value=r.access_key_id||'';
+  $('ps-secret_access_key').value='';
+  $('ps-secret-label').textContent=r.has_secret?'Secret Access Key (saved — leave blank to keep it)':'Secret Access Key';
+  refreshPhotoStoreStatus()}
+// One key, saved to both this machine's own config AND the bundle every
+// future build ships (see /api/photostore-config's own comment) — the
+// bundle half only actually lands from the admin's dev checkout, so
+// report that separately rather than failing the whole save over it.
+async function savePhotoStoreConfig(btn){
+  btn.disabled=true;btn.textContent='Saving…';
+  const r=await fetch('/api/photostore-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    account_id:$('ps-account_id').value.trim(),bucket:$('ps-bucket').value.trim(),
+    access_key_id:$('ps-access_key_id').value.trim(),secret_access_key:$('ps-secret_access_key').value})}).then(r=>r.json());
+  btn.disabled=false;btn.textContent='Save Cloud Storage Key';
+  $('ps-bundle-note').textContent=r.bundled?'Bundled for future builds too — rebuild + GUPDATE to ship it to everyone.':('Saved for this machine, but not bundled: '+(r.bundle_error||'unknown error'));
+  toast('Saved — checking connection…');
+  loadPhotoStoreAdminSettings()}
+async function refreshPhotoStoreStatus(){
+  const el=$('photostore-status');
+  const r=await fetch('/api/photostore-status').then(r=>r.json()).catch(()=>({configured:false}));
+  if(!r.configured){el.textContent=CURRENT_ROLE==='admin'?'Not set up yet — see Admin Tools.':'Not set up yet — ask your admin.';return}
+  if(r.error){el.textContent='Could not connect: '+r.error;return}
+  const pct=Math.min(100,Math.round(r.bytes_used/r.limit_bytes*100));
+  el.innerHTML=r.count+' photo'+(r.count!==1?'s':'')+' in the shared library — '+fmtBytes(r.bytes_used)+' / 10 GB used'+
+    '<div style="height:6px;border-radius:4px;background:var(--tint);margin-top:5px;overflow:hidden">'+
+    '<div style="height:100%;width:'+pct+'%;background:'+(pct>90?'var(--danger)':'var(--brand-dark)')+'"></div></div>'}
+async function syncPhotoStore(btn){
+  btn.disabled=true;btn.textContent='Syncing…';
+  const r=await fetch('/api/photostore-sync',{method:'POST'}).then(r=>r.json());
+  btn.disabled=false;btn.textContent='Sync Now — Download New Photos';
+  toast(r.ok?(r.downloaded?'Downloaded '+r.downloaded+' new photo'+(r.downloaded!==1?'s':''):'Already up to date'):('Sync failed: '+(r.error||'unknown error')));
+  refreshPhotoStoreStatus()}
+async function loadPhotoStoreList(){
+  const r=await fetch('/api/photostore-list').then(r=>r.json()).catch(()=>null);
+  if(!r||r.error){$('photostore-list').innerHTML='';return}
+  $('photostore-list').innerHTML=r.photos.map(p=>
+    '<div class=usercard><b style="font-weight:600;font-size:12.5px">'+escHtml(p.key)+'</b>'+
+      '<span class=userbadge>'+fmtBytes(p.size)+'</span>'+
+      '<button type=button class=btn style="padding:4px 9px;font-size:11px" onclick="deletePhotoFromStore(\''+escHtml(p.key).replace(/'/g,"\\'")+'\',this)">✕</button></div>').join('')
+    || '<p class=muted style="font-size:12px">No photos uploaded yet.</p>'}
+function deletePhotoFromStore(name,btn){
+  if(btn.dataset.confirm!=='1'){
+    btn.dataset.confirm='1';btn.textContent='Sure?';
+    setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='✕'}},2500);
+    return}
+  actuallyDeletePhotoFromStore(name)}
+async function actuallyDeletePhotoFromStore(name){
+  const r=await fetch('/api/photostore-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name})}).then(r=>r.json());
+  if(!r.ok){toast(r.error||'Could not delete');return}
+  toast('Removed '+name);loadPhotoStoreList();refreshPhotoStoreStatus()}
+// Handles both the plain multi-file picker and the whole-folder picker
+// (webkitdirectory) — a folder pick can easily be hundreds of files, so
+// this uploads in small batches sequentially (one big multipart request
+// for hundreds of images risks timing out or exhausting memory) with a
+// progress line, and skips anything that isn't a .png up front since
+// that's all engine.load_photo_catalog() ever matches against.
+const UPLOAD_BATCH_SIZE=15;
+async function uploadPhotosToStore(inputId,btn){
+  const input=$(inputId);
+  const all=[...input.files];
+  const pngs=all.filter(f=>f.name.toLowerCase().endsWith('.png'));
+  const skipped=all.length-pngs.length;
+  if(!pngs.length){toast(all.length?'None of those were .png files — only .png is matched by the app':'Choose at least one photo first');return}
+  const origLabel=btn.textContent;
+  btn.disabled=true;
+  const prog=$('photostore-upload-progress');prog.classList.remove('hide');
+  let uploadedTotal=0,errorList=[];
+  for(let i=0;i<pngs.length;i+=UPLOAD_BATCH_SIZE){
+    const batch=pngs.slice(i,i+UPLOAD_BATCH_SIZE);
+    btn.textContent='Uploading '+Math.min(i+UPLOAD_BATCH_SIZE,pngs.length)+' / '+pngs.length+'…';
+    prog.textContent='Uploading '+Math.min(i+UPLOAD_BATCH_SIZE,pngs.length)+' of '+pngs.length+' photos'+(skipped?' ('+skipped+' non-.png file'+(skipped!==1?'s':'')+' skipped)':'');
+    const fd=new FormData();
+    batch.forEach(f=>fd.append('files',f,f.webkitRelativePath||f.name));
+    const r=await fetch('/api/photostore-upload',{method:'POST',body:fd}).then(r=>r.json()).catch(e=>({ok:false,errors:[e.message]}));
+    uploadedTotal+=(r.uploaded||[]).length;
+    errorList=errorList.concat(r.errors||[]);
+  }
+  btn.disabled=false;btn.textContent=origLabel;
+  prog.classList.add('hide');
+  input.value='';
+  toast(uploadedTotal+' photo'+(uploadedTotal!==1?'s':'')+' uploaded'+(errorList.length?', '+errorList.length+' failed':'')+(skipped?' — '+skipped+' non-.png skipped':''));
+  if(errorList.length)console.warn('Photo upload errors:',errorList);
+  loadPhotoStoreList();refreshPhotoStoreStatus()}
 
 // ---------------------------------------------------------------- Full Catalog Builder
 // Assembles every generated Sololuce Datasheet into one bound book — see
@@ -7452,6 +8174,11 @@ const CAT_IMG_ALIGN_BUTTON_SLOTS=new Set(['diagram',...CAT_IMG_EXTRA_SLOTS]);
 // default (unlabeled) placeholder text and as the Adjust modal's title,
 // so it's always clear where a photo will land before typing a label.
 const CAT_IMG_EXTRA_POSITION={extra1:'Top Left',extra2:'Top Right',extra3:'Bottom Left'};
+// Shared "choose from Cloud Library" trigger icon — a sketchy hand-drawn
+// globe (thin stroke, extra latitude lines beyond the plain Feather-icon
+// version) rather than a label, colored bright green so it reads as a
+// distinct action from the plain-text "Choose image…" button beside it.
+const CLOUD_GLOBE_ICON='<svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=9.5/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg>';
 function pickCatImage(slot){
   const inp=document.createElement('input');
   inp.type='file';inp.accept='image/*';
@@ -7472,6 +8199,54 @@ function pickCatImage(slot){
     reader.readAsDataURL(f)};
   inp.click()}
 function removeCatImage(slot){CAT_IMG[slot]=Object.assign(catImgDefault(),{label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});renderCatImages();schedulePreview()}
+
+// ---------------------------------------------------------------- Cloud Photo Library picker
+// Lets a user pick a product photo visually out of the shared R2 library
+// (see photo_store.py) instead of needing the exact file already on their
+// own PC — same end result as pickCatImage() (CAT_IMG[slot].src becomes a
+// self-contained data: URI), just sourced from the cloud gallery instead
+// of a local file. Every logged-in user can browse/pick (read-only); only
+// admins can add to or remove from the library itself (Settings).
+let CLOUD_PHOTO_SLOT=null, CLOUD_PHOTO_LIST=null;
+async function openCloudPhotoPicker(slot){
+  CLOUD_PHOTO_SLOT=slot;
+  $('cloudphotomodal').classList.remove('hide');
+  $('cloudphoto-search').value='';
+  $('cloudphoto-status').textContent='Loading…';
+  $('cloudphoto-grid').innerHTML='';
+  const r=await fetch('/api/photostore-list').then(r=>r.json()).catch(e=>({error:e.message}));
+  if(r.error){$('cloudphoto-status').textContent='Could not load the cloud library: '+r.error;CLOUD_PHOTO_LIST=[];return}
+  CLOUD_PHOTO_LIST=r.photos||[];
+  renderCloudPhotoGrid()}
+function closeCloudPhotoPicker(){$('cloudphotomodal').classList.add('hide');CLOUD_PHOTO_SLOT=null}
+function renderCloudPhotoGrid(){
+  const q=($('cloudphoto-search').value||'').trim().toLowerCase();
+  const list=(CLOUD_PHOTO_LIST||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
+  $('cloudphoto-status').textContent=(CLOUD_PHOTO_LIST||[]).length
+    ?list.length+' of '+CLOUD_PHOTO_LIST.length+' photo'+(CLOUD_PHOTO_LIST.length!==1?'s':'')
+    :'The cloud library is empty — an admin can add photos from Settings > Shared Product Photos.';
+  $('cloudphoto-grid').innerHTML=list.map(p=>{
+    const name=p.key.split('/').pop().replace(/\.png$/i,'');
+    return '<div class=cloudphototile onclick="selectCloudPhoto(\''+p.key.replace(/'/g,"\\'")+'\')" title="'+escHtml(p.key)+'">'+
+      '<img src="/api/photostore-fetch?key='+encodeURIComponent(p.key)+'" loading=lazy>'+
+      '<span>'+escHtml(name)+'</span></div>'}).join('')}
+function selectCloudPhoto(key){
+  const slot=CLOUD_PHOTO_SLOT;if(!slot)return;
+  $('cloudphoto-status').textContent='Downloading…';
+  const img=new Image();
+  img.crossOrigin='anonymous';
+  img.onload=()=>{
+    const canvas=document.createElement('canvas');
+    canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;
+    canvas.getContext('2d').drawImage(img,0,0);
+    const dataUrl=canvas.toDataURL('image/png');
+    // Same "preserve everything except the photo itself" merge as
+    // pickCatImage()'s own onload — see that function's comment.
+    CAT_IMG[slot]=Object.assign(catImgDefault(),{src:dataUrl,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
+    closeCloudPhotoPicker();
+    renderCatImages();schedulePreview();openPhotoAdjust(slot)};
+  img.onerror=()=>{$('cloudphoto-status').textContent='Could not download that photo — try again.'};
+  img.src='/api/photostore-fetch?key='+encodeURIComponent(key)}
 // Compact button per slot (3 fit side-by-side in the .g3 row) — the actual
 // "where will this land" position box lives in the live PDF preview itself
 // (sololuce_datasheet.html always renders the frame, image or not), not
@@ -7524,7 +8299,10 @@ function renderCatImages(){
          '<button type=button class=btn style="flex:1;font-size:11px;padding:8px 4px" onclick="openPhotoAdjust(\''+slot+'\')">Adjust</button>'+
          '<button type=button class=rm onclick="removeCatImage(\''+slot+'\')" title="Remove">×</button>'+
        '</div>'
-      :'<button type=button class=btn style="width:100%" onclick="pickCatImage(\''+slot+'\')">Choose image…</button>'})}
+      :'<div style="display:flex;gap:5px">'+
+         '<button type=button class=btn style="flex:1;font-size:11px;padding:8px 4px" onclick="pickCatImage(\''+slot+'\')">Choose image…</button>'+
+         '<button type=button class=btn title="Choose from Cloud Library" style="width:38px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(\''+slot+'\')">'+CLOUD_GLOBE_ICON+'</button>'+
+       '</div>'})}
 
 // Photos section decluttering — explicit "so many checkmarks... confusing"
 // request. Each zone used to show its Placeholder checkbox (every zone)
@@ -11685,11 +12463,14 @@ function deleteSubmission(id,btn){
 async function actuallyDeleteSubmission(id){
   const r=await fetch('/api/submissions-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
   SUBMISSIONS=r.submissions||[];renderSubmissions();toast('Submission deleted')}
-async function linkScannedDo(id){
-  const r=await fetch('/api/browse-scanned-do',{method:'POST'}).then(r=>r.json());
-  if(r.error){alert(r.error);return}
-  if(!r.rel)return;
-  const r2=await fetch('/api/submissions-link-scanned-do',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,rel:r.rel})}).then(r=>r.json());
+// Scan Now — see scanner.py's own top-of-file comment for the full flow.
+// linkScannedDo() now opens that modal instead of going straight to a
+// file picker; chooseExistingScannedFile() (reachable from inside the
+// modal) is the old direct-browse path, kept as a fallback for a scan
+// that didn't originate from this machine's own scanner (e.g. emailed in).
+let SCANNOW_SUB_ID=null, SCANNOW_SESSION=null, SCANNOW_SCANNING=false;
+async function _applyScannedDoLink(id,rel){
+  const r2=await fetch('/api/submissions-link-scanned-do',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,rel})}).then(r=>r.json());
   if(r2.error){alert(r2.error);return}
   await loadSubmissions();
   // Linking the scanned/signed DO is "delivery confirmed" — per the user's
@@ -11699,6 +12480,74 @@ async function linkScannedDo(id){
   // its own Cancel button is the "not now" answer.
   toast('Scanned Delivery Order linked');
   openBuildSubmittal(id)}
+async function chooseExistingScannedFile(){
+  const id=SCANNOW_SUB_ID;
+  closeScanNowModal();
+  const r=await fetch('/api/browse-scanned-do',{method:'POST'}).then(r=>r.json());
+  if(r.error){alert(r.error);return}
+  if(!r.rel)return;
+  _applyScannedDoLink(id,r.rel)}
+async function linkScannedDo(id){
+  SCANNOW_SUB_ID=id;SCANNOW_SESSION=null;
+  $('scannowmodal').classList.remove('hide');
+  $('scannow-pages').innerHTML='';
+  $('scannow-scan-btn').disabled=true;
+  $('scannow-status').textContent='Checking for a scanner…';
+  $('scannow-nodevice').classList.add('hide');
+  $('scannow-picker-wrap').style.display='none';
+  refreshScannerList()}
+function closeScanNowModal(){
+  $('scannowmodal').classList.add('hide');
+  if(SCANNOW_SESSION)fetch('/api/scanner-cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:SCANNOW_SESSION})});
+  SCANNOW_SESSION=null;SCANNOW_SUB_ID=null}
+async function refreshScannerList(){
+  $('scannow-nodevice').classList.add('hide');
+  const r=await fetch('/api/scanner-list').then(r=>r.json()).catch(()=>({scanners:[]}));
+  const scanners=r.scanners||[];
+  if(!scanners.length){
+    $('scannow-status').textContent='';
+    $('scannow-nodevice').classList.remove('hide');
+    $('scannow-scan-btn').disabled=true;
+    return}
+  $('scannow-picker-wrap').style.display=scanners.length>1?'':'none';
+  $('scannow-device').innerHTML=scanners.map(s=>'<option value="'+escHtml(s.id)+'">'+escHtml(s.name)+'</option>').join('');
+  $('scannow-status').textContent=scanners.length>1?'Choose a scanner, then Scan Page.':'Ready — '+scanners[0].name;
+  $('scannow-scan-btn').disabled=false}
+async function scanNextPage(){
+  if(SCANNOW_SCANNING)return;
+  SCANNOW_SCANNING=true;
+  const btn=$('scannow-scan-btn');
+  btn.disabled=true;btn.textContent='Scanning…';
+  $('scannow-status').textContent='Scanning — please wait…';
+  const deviceSel=$('scannow-device');
+  const device_id=deviceSel.options.length?deviceSel.value:undefined;
+  const r=await fetch('/api/scanner-scan-page',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:SCANNOW_SESSION,device_id})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  btn.disabled=false;btn.textContent='Scan Page';
+  SCANNOW_SCANNING=false;
+  if(!r.ok){$('scannow-status').textContent='Scan failed: '+(r.error||'unknown error');return}
+  SCANNOW_SESSION=r.session_id;
+  $('scannow-status').textContent=r.page_count+' page'+(r.page_count!==1?'s':'')+' scanned — Scan Page again to add another, or Save & Link when done.';
+  const div=document.createElement('div');
+  div.className='scanpagetile';
+  div.innerHTML='<img src="'+r.preview+'"><span>'+r.page_count+'</span>';
+  $('scannow-pages').appendChild(div)}
+async function removeLastScanPage(){
+  if(!SCANNOW_SESSION)return;
+  const r=await fetch('/api/scanner-remove-last-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:SCANNOW_SESSION})}).then(r=>r.json());
+  const tiles=$('scannow-pages');
+  if(tiles.lastChild)tiles.removeChild(tiles.lastChild);
+  $('scannow-status').textContent=r.page_count+' page'+(r.page_count!==1?'s':'')+' scanned.'}
+async function finalizeScanAndLink(){
+  if(!SCANNOW_SESSION){toast('Scan at least one page first');return}
+  const id=SCANNOW_SUB_ID;
+  $('scannow-status').textContent='Saving…';
+  const r=await fetch('/api/scanner-finalize',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:SCANNOW_SESSION,submission_id:id})}).then(r=>r.json());
+  if(!r.ok){$('scannow-status').textContent='Could not save: '+(r.error||'unknown error');return}
+  SCANNOW_SESSION=null;
+  closeScanNowModal();
+  _applyScannedDoLink(id,r.rel)}
 
 // -------- build submittal: attach the LPO (first appearance in the flow), confirm/adjust quantities, merge into one PDF
 let SUBMITTAL_SUB=null, SUBMITTAL_ITEMS=[], SUBMITTAL_LPO_FILE='', SUBMITTAL_LPO_NAME='';
@@ -12501,15 +13350,134 @@ async function deleteDraftFromAllDocs(id){
   if(EDITING_DRAFT===id)EDITING_DRAFT=null;
   renderList()}
 
-loadUnits().then(()=>{setType('QTN2');$('title').textContent='Menu'});loadCfg();loadBrands();loadClients();loadClientsView();checkUnfinishedDraftsOnLaunch();
-checkForAppUpdate();setInterval(checkForAppUpdate,4*60*60*1000); // re-check every 4h for a long-running session
-loadCatSpecLabels();loadCatFinishColors();loadCatBadgeLibrary();loadCatSeriesLabels();loadCatFamilyLabels();loadCatOrdCategories();loadCatModelNoOptions();loadCatCctOptions();loadCatControlsOptions();loadCatVoltageOptions();loadCatPowerOptions();loadCatBeamAngleOptions();loadCatCutOutOptions();loadCatOptionsOptions();loadCatSizeIndex();loadCatSpecValues();loadCatStandardFillFields();loadCatStandardFillValues();loadExpPaymentMethods();loadExpEmployees();loadExpCategories();loadExpProducts();loadExpDescriptions();
-renderCatBadges();renderCatSpecs();renderCatFinish();renderCatImages();renderCatOrdTable();renderExpItems();renderExpEmployeeField('');renderExpCategoryField('');
-initRichText();
-renderRichSwatches();
-attachAutocomplete($('company-rich'),allCompanyNames);
-attachAutocomplete($('customer_attn'),allAttns);
-attachAutocomplete($('customer_address'),allAddresses);
+// Everything that loads real data or hits an /api/* endpoint is gated
+// behind login now (see app.py's before_request) — deferred into
+// bootApp(), called only after checkLogin()/doLogin() confirms a session.
+// initResizer()'s own calls stay outside: they only wire up drag behavior
+// on static DOM elements, no API calls, safe to run immediately.
+let LOGGED_IN=false, CURRENT_USER=null, CURRENT_ROLE=null, BRAND_LOCK=null, BLOCKED_TOOLS=[];
+function bootApp(){
+  loadUnits().then(()=>{setType('QTN2');$('title').textContent='Menu'});loadCfg();loadBrands();loadClients();loadClientsView();checkUnfinishedDraftsOnLaunch();
+  initUpdateChecking(); // respects the "check for updates on each start" preference — see Update Center
+  loadCatSpecLabels();loadCatFinishColors();loadCatBadgeLibrary();loadCatSeriesLabels();loadCatFamilyLabels();loadCatOrdCategories();loadCatModelNoOptions();loadCatCctOptions();loadCatControlsOptions();loadCatVoltageOptions();loadCatPowerOptions();loadCatBeamAngleOptions();loadCatCutOutOptions();loadCatOptionsOptions();loadCatSizeIndex();loadCatSpecValues();loadCatStandardFillFields();loadCatStandardFillValues();loadExpPaymentMethods();loadExpEmployees();loadExpCategories();loadExpProducts();loadExpDescriptions();
+  renderCatBadges();renderCatSpecs();renderCatFinish();renderCatImages();renderCatOrdTable();renderExpItems();renderExpEmployeeField('');renderExpCategoryField('');
+  initRichText();
+  renderRichSwatches();
+  attachAutocomplete($('company-rich'),allCompanyNames);
+  attachAutocomplete($('customer_attn'),allAttns);
+  attachAutocomplete($('customer_address'),allAddresses);
+}
+
+// ---------------------------------------------------------------- Login / accounts
+async function checkLogin(){
+  const r=await fetch('/api/current-user').then(r=>r.json()).catch(()=>({logged_in:false}));
+  if(r.logged_in){applySession(r);$('loginoverlay').classList.add('hide');bootApp()}
+  else{$('loginoverlay').classList.remove('hide');setTimeout(()=>$('login-username').focus(),50)}
+}
+function applySession(u){
+  LOGGED_IN=true;CURRENT_USER=u.username;CURRENT_ROLE=u.role;BRAND_LOCK=u.brand_lock;BLOCKED_TOOLS=u.blocked_tools||[];
+  applyAccessRestrictions()}
+function applyAccessRestrictions(){
+  // Brand lock: hide the brand switcher entirely and pin BRAND once
+  // loadBrands()/applyBrandUI() run — see their own code for where BRAND
+  // gets set from cfg (the server already forced cfg.brand to the lock at
+  // login, see /api/login).
+  $('brandbtn').style.display=BRAND_LOCK?'none':'';
+  // Blocked tools: hide the corresponding rail nav button. Server-side
+  // enforcement (app.py's before_request) is what actually matters —
+  // this is just so a restricted user isn't shown a button that 403s.
+  const navByTool={settings:['n-settings','t-settings','t-settings-title'],clients:['n-clients','t-clients'],submissions:['n-submissions','t-submissions'],statement:['n-statement','t-statement'],alldocs:['n-all','t-all']};
+  Object.entries(navByTool).forEach(([tool,ids])=>ids.forEach(id=>{
+    const el=$(id);if(el)el.classList.toggle('hide',BLOCKED_TOOLS.includes(tool))}));
+  // Admin Tools is a sub-page WITHIN Settings (not its own rail item) —
+  // just the entry card's visibility, per explicit request. Always land
+  // back on the main Settings panel on login, in case a previous session
+  // left the admin sub-page showing.
+  $('admin-tools-btn').style.display=CURRENT_ROLE==='admin'?'':'none';
+  showSettingsMainPanel();
+  $('logoutlabel').textContent='Sign out ('+CURRENT_USER+')'}
+async function doLogin(ev){
+  ev.preventDefault();
+  const btn=$('login-submit'),err=$('login-error');
+  btn.disabled=true;btn.textContent='Signing in…';err.classList.add('hide');
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:$('login-username').value,password:$('login-password').value,remember:$('login-remember').checked})}).then(r=>r.json());
+    if(!r.ok){err.textContent=r.error||'Sign in failed';err.classList.remove('hide');btn.disabled=false;btn.textContent='Sign In';return false}
+    $('login-password').value='';
+    applySession(r);$('loginoverlay').classList.add('hide');bootApp()
+  }catch(e){err.textContent='Could not reach the app — try again';err.classList.remove('hide');btn.disabled=false;btn.textContent='Sign In'}
+  return false}
+async function doLogout(){
+  await fetch('/api/logout',{method:'POST'}).catch(()=>{});
+  location.reload()}
+
+// ---- Admin: Users & Access (Settings) ----
+let USERS_LIST=[],USERS_BLOCKABLE=[],USERS_BRANDS=[],EDITING_USERNAME=null;
+const TOOL_LABEL={settings:'Settings',clients:'Clients',submissions:'Submissions',statement:'Statement',alldocs:'All Docs'};
+async function loadUsersAdmin(){
+  const r=await fetch('/api/accounts').then(r=>r.json()).catch(()=>null);
+  if(!r)return;
+  USERS_LIST=r.users;USERS_BLOCKABLE=r.blockable_tools;USERS_BRANDS=r.brands;
+  const sel=$('user-brand-lock');
+  sel.innerHTML='<option value="">— none, sees brand switcher —</option>'+
+    USERS_BRANDS.map(b=>'<option value="'+b+'">'+escHtml(engineBrandLabel(b))+'</option>').join('');
+  $('user-blocked-tools').innerHTML=USERS_BLOCKABLE.map(t=>
+    '<label class=usertoolchip><input type=checkbox value="'+t+'" class=user-tool-cb> '+TOOL_LABEL[t]+'</label>').join('');
+  renderUsersList()}
+function engineBrandLabel(code){
+  const b=BRAND_LIST.find(x=>x.code===code);return b?b.label:code}
+function renderUsersList(){
+  $('users-list').innerHTML=USERS_LIST.map(u=>
+    '<div class=usercard><b>'+escHtml(u.username)+'</b>'+
+      '<span class="userbadge'+(u.role==='admin'?' admin':'')+'">'+(u.role==='admin'?'Admin':(u.brand_lock?escHtml(engineBrandLabel(u.brand_lock)):'All brands'))+'</span>'+
+      '<button type=button class=btn style="padding:4px 9px;font-size:11px" onclick="editUser(\''+escHtml(u.username).replace(/'/g,"\\'")+'\')">Edit</button>'+
+      '<button type=button class=btn style="padding:4px 9px;font-size:11px" onclick="deleteUserConfirm(\''+escHtml(u.username).replace(/'/g,"\\'")+'\',this)">✕</button></div>').join('')
+    || '<p class=muted style="font-size:12px">No users yet.</p>'}
+function editUser(username){
+  const u=USERS_LIST.find(x=>x.username===username);if(!u)return;
+  EDITING_USERNAME=username;
+  $('user-username').value=u.username;$('user-username').disabled=true;
+  $('user-password').value='';$('user-password-label').textContent='New password (leave blank to keep current)';
+  $('user-role').value=u.role;
+  $('user-brand-lock').value=u.brand_lock||'';
+  document.querySelectorAll('.user-tool-cb').forEach(cb=>cb.checked=(u.blocked_tools||[]).includes(cb.value));
+  renderUserRoleFields()}
+function resetUserForm(){
+  EDITING_USERNAME=null;
+  $('user-username').value='';$('user-username').disabled=false;
+  $('user-password').value='';$('user-password-label').textContent='Password';
+  $('user-role').value='user';$('user-brand-lock').value='';
+  document.querySelectorAll('.user-tool-cb').forEach(cb=>cb.checked=false);
+  renderUserRoleFields()}
+function renderUserRoleFields(){
+  $('user-restrict-fields').style.display=$('user-role').value==='admin'?'none':''}
+async function saveUserForm(){
+  const username=$('user-username').value.trim();
+  if(!username){toast('Username required');return}
+  const blocked=[...document.querySelectorAll('.user-tool-cb:checked')].map(cb=>cb.value);
+  const body={username,password:$('user-password').value||undefined,role:$('user-role').value,
+    brand_lock:$('user-brand-lock').value||null,blocked_tools:blocked};
+  const r=await fetch('/api/accounts-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  if(!r.ok){toast(r.error||'Could not save user');return}
+  toast('Saved '+username+' — remember to Publish so other installs see it');
+  resetUserForm();loadUsersAdmin()}
+function deleteUserConfirm(username,btn){
+  if(btn.dataset.confirm!=='1'){
+    btn.dataset.confirm='1';btn.textContent='Sure?';
+    setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='✕'}},2500);
+    return}
+  actuallyDeleteUser(username)}
+async function actuallyDeleteUser(username){
+  const r=await fetch('/api/accounts-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})}).then(r=>r.json());
+  if(!r.ok){toast(r.error||'Could not delete user');return}
+  toast('Removed '+username+' — remember to Publish');loadUsersAdmin()}
+async function publishAccounts(btn){
+  btn.disabled=true;btn.textContent='Publishing…';
+  const r=await fetch('/api/accounts-publish',{method:'POST'}).then(r=>r.json());
+  btn.disabled=false;btn.textContent='Publish Changes to Cloud';
+  $('users-publish-note').textContent=r.ok?'Published — other installs pick this up automatically the next time anyone logs in.':('Could not publish: '+(r.error||'unknown error'));
+  toast(r.ok?'Published to GitHub':'Publish failed — see note below the button')}
 
 // Draggable left/right divider — shared by every .wrap/.fcwrap screen in
 // the app (Document Builder's #resizer, Full Catalog Builder's own
@@ -12545,7 +13513,19 @@ function initResizer(resizerId, onDrag){
 initResizer('resizer', renderPreviewPages);
 initResizer('fcresizer', fcRenderPreviewPages);
 window.addEventListener('resize',()=>{renderPreviewPages();fcRenderPreviewPages()});
+checkLogin();
 </script></body></html>"""
+
+# Best-effort sync of accounts.json from R2 — see accounts.py's own
+# top-of-file comment. Deliberately placed here, at true end-of-module
+# (not right after photo_store.configure() further up), because load_cfg()
+# itself references module-level constants (CAT_STANDARD_FILL_KEYS etc.)
+# that aren't defined yet earlier in this file — calling it any sooner
+# raises NameError before the module even finishes importing. Never
+# blocks/crashes startup if R2 isn't configured yet or the machine is
+# offline; login still works off the last cached copy (or the hardcoded
+# single-admin default).
+accounts.refresh_from_cloud()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
@@ -12564,7 +13544,14 @@ if __name__ == "__main__":
             app.run(port=port, debug=False, use_reloader=False)
         threading.Thread(target=_run_server, daemon=True).start()
         webview.create_window("Office Tool", url, width=1400, height=900, min_size=(1000, 650))
-        webview.start()
+        # pywebview defaults private_mode=True (incognito-style — wipes ALL
+        # cookies the moment the window closes), which silently broke the
+        # "Remember me for 30 days" login checkbox: the server-side session
+        # was always correct, but the client itself never kept the cookie
+        # past a single run. storage_path pins WebView2's persistent
+        # profile to this install's own data folder (see engine.DATA_BASE)
+        # so it survives reinstalls/updates the same way config.json does.
+        webview.start(private_mode=False, storage_path=os.path.join(engine.DATA_BASE, "webview_data"))
     except ImportError:
         # pywebview isn't installed yet — falls back to the original
         # browser-tab launch so the app still runs either way. Run

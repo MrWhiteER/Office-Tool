@@ -3,3 +3,6 @@ openpyxl>=3.1
 pymupdf>=1.24
 playwright>=1.40
 pywebview>=5.0
+boto3>=1.34
+pillow>=10.0
+pywin32>=306; sys_platform == "win32"
