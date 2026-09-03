@@ -2333,20 +2333,21 @@ def api_update_prefs_save():
 # survive, same as any manual update — see installer.iss's own comment.
 @app.post("/api/apply-update")
 def api_apply_update():
+    """Starts the download on a background thread and returns immediately
+    — /api/apply-update-progress is what the frontend polls for real
+    progress (see update_checker.start_update_async's own comment on why:
+    an 80MB+ installer downloading with zero visible feedback read as
+    "nothing happens" in practice)."""
     data = request.json or {}
     url = data.get("download_url", "")
     if not url:
         return jsonify({"ok": False, "error": "Missing download_url."}), 400
-    try:
-        update_checker.download_and_launch_installer(url)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-    def _exit_soon():
-        time.sleep(1.0)
-        os._exit(0)
-    threading.Thread(target=_exit_soon, daemon=True).start()
+    update_checker.start_update_async(url)
     return jsonify({"ok": True})
+
+@app.get("/api/apply-update-progress")
+def api_apply_update_progress():
+    return jsonify(update_checker.get_progress())
 
 # Generic read/delete pair the Settings "Manage Lists" UI drives, covering
 # every list in MANAGED_STRING_LISTS uniformly — one route instead of a
@@ -5966,18 +5967,52 @@ function renderUpdateMenu(){
 function installUpdate(btn){
   if(btn.dataset.confirm!=='1'){
     btn.dataset.confirm='1';btn.textContent='Click again to install & restart';
-    setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='Install & Restart'}},3000);
+    // Was 3000ms — real usage showed that's too tight (read the button,
+    // decide, click again easily takes longer) and the reset back to
+    // "Install & Restart" gave zero feedback, so a mistimed second click
+    // silently re-armed instead of confirming: looked exactly like
+    // "nothing happens" with no error anywhere. Longer window (8s) + a
+    // toast when it actually does expire, so that's never silent again.
+    setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='Install & Restart';toast('Confirmation timed out — click Install & Restart again')}},8000);
     return}
   actuallyInstallUpdate(btn)}
+function fmtMB(n){return (n/1048576).toFixed(1)+' MB'}
+// Downloads a real installer (80MB+) — the OLD version just said
+// "Downloading…" with zero feedback for however long that took, which
+// (combined with the confirm-timing bug just above) is exactly why this
+// looked like "nothing happens" in practice. Now polls
+// /api/apply-update-progress (backend runs the download on its own
+// thread — see start_update_async()) and shows a real percentage + a
+// fill bar, inserted right after whichever button was clicked (works the
+// same whether that's the rail popover or the Update Center modal).
 async function actuallyInstallUpdate(btn){
-  btn.disabled=true;btn.textContent='Downloading…';
+  btn.disabled=true;btn.textContent='Starting…';
+  const bar=document.createElement('div');
+  bar.style.cssText='margin-top:8px';
+  bar.innerHTML='<div style="height:6px;border-radius:4px;background:var(--tint);overflow:hidden"><div id=update-progress-fill style="height:100%;width:0%;background:var(--brand-dark);transition:width .2s"></div></div>'+
+    '<div id=update-progress-text class=muted style="font-size:11px;margin-top:4px;text-align:center">Starting…</div>';
+  btn.insertAdjacentElement('afterend',bar);
   try{
     const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({download_url:UPDATE_INFO.download_url})}).then(r=>r.json());
-    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));btn.disabled=false;btn.textContent='Install & Restart';return}
-    btn.textContent='Installing…';
-    toast('Installer launching — the app will close and reopen the new version');
-  }catch(e){toast('Update failed: '+e.message);btn.disabled=false;btn.textContent='Install & Restart'}}
+    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));bar.remove();btn.disabled=false;btn.textContent='Install & Restart';return}
+  }catch(e){toast('Update failed: '+e.message);bar.remove();btn.disabled=false;btn.textContent='Install & Restart';return}
+  btn.textContent='Downloading…';
+  const fill=bar.querySelector('#update-progress-fill'),text=bar.querySelector('#update-progress-text');
+  const poll=setInterval(async()=>{
+    const p=await fetch('/api/apply-update-progress').then(r=>r.json()).catch(()=>null);
+    if(!p)return;
+    if(p.status==='downloading'){
+      const pct=p.total?Math.round(p.done/p.total*100):0;
+      fill.style.width=pct+'%';
+      text.textContent=p.total?(pct+'% — '+fmtMB(p.done)+' / '+fmtMB(p.total)):'Downloading…'
+    }else if(p.status==='launched'){
+      clearInterval(poll);fill.style.width='100%';text.textContent='Installing…';btn.textContent='Installing…';
+      toast('Installer launching — the app will close and reopen the new version')
+    }else if(p.status==='error'){
+      clearInterval(poll);bar.remove();btn.disabled=false;btn.textContent='Install & Restart';
+      toast('Update failed: '+(p.error||'unknown error'))}
+  },400)}
 
 // Reads the saved prefs before deciding whether to auto-check at all —
 // unlike openUpdateCenter() (which always checks, since the user just

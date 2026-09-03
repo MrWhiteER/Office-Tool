@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -106,3 +107,47 @@ def download_and_launch_installer(download_url, on_progress=None):
                     on_progress(done, total)
     subprocess.Popen([dest], close_fds=True)
     return dest
+
+
+# Real download progress for the UI — the confirm-then-click install flow
+# previously showed only a static "Downloading…" for however long an
+# 80MB+ installer took, with no feedback at all, which (combined with a
+# separate double-click-confirm timing bug) got reported as "nothing
+# happens" after confirming. _PROGRESS is a single shared dict (this app
+# only ever runs one update at a time) polled by the frontend via
+# /api/apply-update-progress while start_update_async() does the real
+# work on a background thread.
+_PROGRESS = {"status": "idle", "done": 0, "total": 0, "error": None}
+
+
+def get_progress():
+    return dict(_PROGRESS)
+
+
+def start_update_async(download_url):
+    """Kicks off download_and_launch_installer() on a background thread
+    and returns immediately, so the calling HTTP request doesn't block for
+    the whole download — the frontend polls get_progress() instead. The
+    thread updates _PROGRESS as it goes; the caller (app.py) is
+    responsible for exiting the process shortly after status hits
+    "launched", same as before."""
+    _PROGRESS.update(status="downloading", done=0, total=0, error=None)
+
+    def _run():
+        try:
+            def _on_progress(done, total):
+                _PROGRESS["done"] = done
+                _PROGRESS["total"] = total
+            download_and_launch_installer(download_url, on_progress=_on_progress)
+            _PROGRESS["status"] = "launched"
+            # Give the frontend's poll loop one last chance to see
+            # status="launched" (and show "Installing…") before this
+            # process disappears — same 1s grace the old synchronous
+            # version gave the HTTP response.
+            time.sleep(1.0)
+            os._exit(0)
+        except Exception as e:
+            _PROGRESS["status"] = "error"
+            _PROGRESS["error"] = str(e)
+
+    threading.Thread(target=_run, daemon=True).start()
