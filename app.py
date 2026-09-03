@@ -11672,7 +11672,26 @@ async function runPreview(){
     return}
   if(mySeq!==previewSeq)return;  // superseded by a newer request — never apply a stale response
   if(pages)pages.classList.remove('pv-loading');
-  if(!r.error)showPreviewPages(r.pages||1)}
+  if(!r.error){showPreviewPages(r.pages||1);return}
+  // The backend genuinely failed (not a network drop — that's the catch
+  // above) — this used to fall through silently here, leaving whatever
+  // was already showing (often the "Rendering live preview…" empty
+  // state) on screen forever with zero feedback, indistinguishable from
+  // the render actually being stuck. Show the real error instead.
+  showPreviewError(r.error)}
+function showPreviewError(msg){
+  const img=$('previewimg'),empty=$('previewempty'),pages=$('previewpages');
+  previewImgToken++;
+  img.classList.add('hide');img.src='';
+  pages.classList.add('hide');
+  empty.classList.remove('hide');
+  // Some backend errors (Playwright's own) come as a multi-line message
+  // with a decorative ASCII box border — strip that and collapse to one
+  // clean line rather than showing the box-drawing characters raw.
+  const clean=(msg||'').split('\n')
+    .map(l=>l.replace(/^[║╔╗╚╝═\s]+|[║╔╗╚╝═\s]+$/g,'').trim())
+    .filter(l=>l).join(' ');
+  empty.textContent='Preview failed: '+clean}
 
 function collectDocData(){
   const data={doc_type:TYPE,items:items.filter(x=>x.description),company:companyVal()};
@@ -13723,6 +13742,7 @@ if __name__ == "__main__":
     # creates one and we repoint stdout/stderr/stdin at it. Skipped
     # entirely in dev (`python app.py`) — that already has a real terminal.
     if getattr(sys, "frozen", False):
+        got_real_console = False
         try:
             import ctypes
             if ctypes.windll.shell32.IsUserAnAdmin():
@@ -13731,8 +13751,28 @@ if __name__ == "__main__":
                 sys.stderr = open("CONOUT$", "w")
                 sys.stdin = open("CONIN$", "r")
                 print("Office Tool — running elevated, console enabled.\n")
+                got_real_console = True
         except Exception:
             pass  # never let console setup itself be the reason the app fails to start
+        # A --windowed build has no console attached at all for a normal
+        # (non-admin) launch. PyInstaller's bootloader does NOT leave
+        # sys.stdout/sys.stderr as None here (confirmed directly) — it
+        # hands back stub file-like objects that swallow print() safely,
+        # but which have no real underlying OS handle, unlike a real
+        # open(os.devnull, ...) file. That stub was investigated as a
+        # possible cause of the live-preview hang (a CHILD PROCESS this
+        # app spawns, like Playwright's Node driver, inheriting a
+        # handle-less stdio stand-in) — direct testing showed it was NOT
+        # actually the cause (the real cause turned out to be elsewhere,
+        # see html_engine.py's _get_browser() and runPreview()'s error
+        # handling). Kept anyway as a real, if minor, hardening: a genuine
+        # devnull file has a valid handle for anything this process or a
+        # child of it might try to write to, where the bootloader's own
+        # stub does not.
+        if not got_real_console:
+            sys.stdout = open(os.devnull, "w")
+            sys.stderr = open(os.devnull, "w")
+            sys.stdin = open(os.devnull, "r")
     port = int(os.environ.get("PORT", 5000))
     url = f"http://127.0.0.1:{port}"
     try:

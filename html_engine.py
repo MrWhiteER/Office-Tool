@@ -317,30 +317,29 @@ def _get_browser():
             pass
     from playwright.sync_api import sync_playwright
     _tls.playwright = sync_playwright().start()
-    try:
-        _tls.browser = _tls.playwright.chromium.launch()
-    except Exception as e:
-        # Confirmed directly: launched from a normal `python app.py`,
-        # chromium.launch() correctly resolves the full chrome.exe (the
-        # only variant page.pdf() actually works on — chrome-headless-
-        # shell is a stripped screenshot-only build with no PDF/print
-        # support at all); launched from the PyInstaller-frozen .exe, the
-        # exact same call instead resolves chrome-headless-shell and
-        # fails outright since it doesn't exist at the path it expects.
-        # Same browsers cache, same Playwright version, only the freeze
-        # changes which variant gets picked — so rather than chase that
-        # PyInstaller/Playwright manifest quirk, fall back to hunting the
-        # real chrome.exe down directly and launching that by explicit
-        # path, which works regardless of why the default resolution
-        # went wrong.
-        if "Executable doesn't exist" not in str(e):
-            raise
-        import glob as _glob
-        browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
-        candidates = _glob.glob(os.path.join(browsers_dir, "chromium-*", "chrome-win64", "chrome.exe"))
-        if not candidates:
-            raise
+    # Confirmed directly (live, against the real installed app, across
+    # several reproduction attempts): Playwright's OWN default resolution
+    # for chromium.launch() is unreliable specifically once this app is a
+    # frozen .exe — it can resolve to chrome-headless-shell (a stripped
+    # screenshot-only build with no PDF/print support, so page.pdf()
+    # fails outright) instead of the full chrome.exe the SAME browsers
+    # cache also has, and which apps this picks seems to depend on
+    # something about how the .exe itself was launched, not on anything
+    # this app controls. Rather than call the default resolution AT ALL
+    # and catch/recover from whichever way it goes wrong, look for the
+    # real chrome.exe ourselves FIRST and launch that directly whenever
+    # it's there — deterministic, and sidesteps the unreliable default
+    # path entirely instead of papering over one specific failure mode of
+    # it. Only falls through to the default resolution (dev's own
+    # `python app.py`, or an environment that genuinely never had
+    # `playwright install chromium` run) when no local copy is found.
+    import glob as _glob
+    browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
+    candidates = _glob.glob(os.path.join(browsers_dir, "chromium-*", "chrome-win64", "chrome.exe"))
+    if candidates:
         _tls.browser = _tls.playwright.chromium.launch(executable_path=candidates[0])
+    else:
+        _tls.browser = _tls.playwright.chromium.launch()
     atexit.register(_close_thread_browser, _tls)
     return _tls.browser
 
