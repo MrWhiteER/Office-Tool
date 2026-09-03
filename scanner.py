@@ -196,11 +196,16 @@ def _cleanup_dir(path):
         pass
 
 
-def build_scan_filename(brand, do_number, company):
+def build_scan_filename(brand, do_number, company, kind="DO"):
     """Mirrors engine.py's own BRAND_TYPE_NUMBER..._DATE convention, marked
-    SCANNED so it's obviously distinct from the original generated DO."""
+    SCANNED so it's obviously distinct from the original generated DO.
+    kind defaults to "DO" (the original Submissions-linked flow, unchanged
+    for every existing caller); the standalone Scanner tool (Menu -> Scanner,
+    not tied to any submission) passes kind="SCAN" and company as a free-text
+    label instead, so a generic scan doesn't read as if it were a delivery
+    order."""
     today = datetime.date.today().isoformat()
-    parts = [p for p in (brand, "DO", str(do_number or "").strip(), "SCANNED") if p]
+    parts = [p for p in (brand, kind, str(do_number or "").strip(), "SCANNED") if p]
     safe_company = "".join(c if c.isalnum() or c in "-_ " else "" for c in (company or "")).strip().replace(" ", "-")
     if safe_company:
         parts.append(safe_company)

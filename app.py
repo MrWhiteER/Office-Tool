@@ -3694,18 +3694,30 @@ def api_scanner_cancel():
 
 @app.post("/api/scanner-finalize")
 def api_scanner_finalize():
-    """Combines the session's captured pages into one PDF, named after the
-    submission it's for, saved straight into the Scanned Delivery Orders
-    folder — same {rel, name} shape /api/browse-scanned-do already
-    returns, so the frontend's existing submissions-link-scanned-do call
-    needs no changes at all."""
+    """Combines the session's captured pages into one PDF, saved straight
+    into the Scanned Delivery Orders folder — same {rel, name} shape
+    /api/browse-scanned-do already returns, so the frontend's existing
+    submissions-link-scanned-do call needs no changes at all.
+
+    Two callers, same route: the Submissions "Import Scanned DO" flow
+    passes submission_id (unchanged from before — filename built around
+    that submission's own DO number/company, kind="DO"). The standalone
+    Menu -> Scanner tool passes no submission_id at all (this is the ONLY
+    thing that makes a scan "standalone" rather than linked — nothing
+    downstream treats it specially otherwise) and an optional free-text
+    label instead, building a generic kind="SCAN" filename so it doesn't
+    read as if it were a delivery order that just isn't linked yet."""
     data = request.json or {}
     folder = brand_settings().get("scanned_do_folder", "")
     if not folder:
         return jsonify({"ok": False, "error": "Set your Scanned Delivery Orders folder first (see Settings)."}), 400
     brand = current_brand()
-    _subs, sub = _find_submission(data.get("submission_id", ""), brand)
-    filename = scanner.build_scan_filename(brand, sub.get("do_number") if sub else "", sub.get("company") if sub else "")
+    submission_id = data.get("submission_id", "")
+    if submission_id:
+        _subs, sub = _find_submission(submission_id, brand)
+        filename = scanner.build_scan_filename(brand, sub.get("do_number") if sub else "", sub.get("company") if sub else "")
+    else:
+        filename = scanner.build_scan_filename(brand, "", data.get("label", ""), kind="SCAN")
     try:
         path = scanner.finalize_session(data.get("session_id", ""), folder, filename)
     except ValueError as e:
@@ -4687,6 +4699,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button class=launchertile onclick="launcherGoSololuce()"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M9 15h6M9 11h3"/></svg></span><span>Sololuce Datasheets</span></button>
       <button class=launchertile onclick="launcherGoFullCatalog()"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg></span><span>Full Catalog Builder</span></button>
     </div>
+    <div class=fmtitle>Tools</div>
+    <div class=launchergrid>
+      <button class=launchertile id=t-scanner onclick="launcherGoScanner()"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 7V5a2 2 0 0 1 2-2h2M4 17v2a2 2 0 0 0 2 2h2M20 7V5a2 2 0 0 0-2-2h-2M20 17v2a2 2 0 0 1-2 2h-2"/><line x1=3 y1=12 x2=21 y2=12 /></svg></span><span>Scanner</span></button>
+    </div>
     <div class=fmtitle>Records</div>
     <div class=launchergrid>
       <button class=launchertile id=t-all onclick="launcherGo('all')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span>All Docs</span></button>
@@ -4697,6 +4713,40 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div class=fmtitle id=t-settings-title>System</div>
     <div class=launchergrid>
       <button class=launchertile id=t-settings onclick="launcherGo('settings')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=3 /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></span><span>Settings</span></button>
+    </div>
+  </div>
+
+  <!-- SCANNER — standalone scan-and-save tool (Menu -> Scanner), not tied
+       to any one document flow. Drives the same WIA session mechanics as
+       the Submissions "Import Scanned DO" modal (scanner.py), but the
+       result can either be saved as a plain file or linked to an open
+       Submission's Delivery Order right from here — see launcherGoScanner()
+       and finalizeScanTool() in the page script. -->
+  <div id=v-scanner class=hide style="padding:24px;max-width:640px;margin:0 auto">
+    <div class=card>
+      <div class=ch>Scan a Document</div>
+      <div class=cb>
+        <div id=scanner-nodevice class="muted hide" style="font-size:12.5px;margin-bottom:10px">No scanner found — check it's connected and turned on, then <a onclick=refreshScanToolList() style="cursor:pointer;text-decoration:underline">try again</a>.</div>
+        <div id=scanner-picker-wrap class=f style="display:none"><label>Scanner</label><select id=scanner-device></select></div>
+        <div id=scanner-status class=muted style="font-size:12.5px;margin:0 0 10px">Checking for a scanner…</div>
+        <div id=scanner-pages style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px"></div>
+        <button type=button class="btn dark" style="width:100%" id=scanner-scan-btn onclick=scanToolNextPage() disabled>Scan Page</button>
+        <button type=button class=btn style="width:100%;margin-top:8px" onclick=scanToolRemoveLastPage()>Remove Last Page</button>
+      </div>
+    </div>
+    <div class=card>
+      <div class=ch>Save This Scan</div>
+      <div class=cb>
+        <div class=f><label>What is this?</label>
+          <div class=seg id=scanner-dest-seg>
+            <button type=button class=on data-d=standalone onclick="setScanToolDest('standalone')">Save as File</button>
+            <button type=button data-d=submission onclick="setScanToolDest('submission')">Link to Submission</button>
+          </div>
+        </div>
+        <div id=scanner-dest-standalone class=f><label>Label (optional)</label><input id=scanner-label placeholder="e.g. Signed Contract, Warehouse Receipt…"></div>
+        <div id=scanner-dest-submission class="f hide"><label>Submission</label><select id=scanner-submission></select></div>
+        <button type=button class="btn dark" style="width:100%" onclick=finalizeScanTool()>Save Scan</button>
+      </div>
     </div>
   </div>
 
@@ -6083,14 +6133,14 @@ function view(v){
   // real enforcement is server-side (app.py's before_request).
   if(BLOCKED_TOOLS.includes(v))v='menu';
   const isDoc=DOC_VIEW_LIST.includes(v);
-  $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');
+  $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');$('v-scanner').classList.toggle('hide',v!='scanner');
   $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
   // Update/Admin Tools buttons: only make sense while looking at Settings
   // (Admin Tools opens Settings' own admin sub-page; Update Center is
   // reachable from the same corner) — see bar-admin-update-group.
   $('bar-admin-update-group').style.display=(v=='settings')?'flex':'none';
   DOC_VIEW_LIST.forEach(dv=>$('n-'+dv).classList.toggle('on',v===dv));
-  if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients')loadClientsView();if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}}
+  if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients')loadClientsView();if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}if(v=='scanner')$('title').textContent='Scanner'}
 // The one way to open a document screen — every rail button and Menu tile
 // goes through here. Only resets the form when actually switching type, so
 // clicking the nav item you're already on never wipes work in progress
@@ -12587,6 +12637,99 @@ async function finalizeScanAndLink(){
   closeScanNowModal();
   _applyScannedDoLink(id,r.rel)}
 
+// Standalone Scanner tool (Menu -> Scanner) — same WIA session mechanics
+// as the modal above (scanNextPage/removeLastScanPage/scannowmodal), just
+// running inside a real page (v-scanner) instead of a modal, and offering
+// a choice of what happens to the finished scan: a plain saved file, or
+// (reusing the exact same link-up as "Import Scanned DO") linked to an
+// open Submission. Kept as separate state/functions rather than reusing
+// SCANNOW_* — the modal can still be opened mid-scan from Submissions
+// while this page is independently open, and mixing their sessions would
+// be a real bug, not just a naming clash.
+let SCANTOOL_SESSION=null, SCANTOOL_SCANNING=false, SCANTOOL_DEST='standalone';
+async function launcherGoScanner(){
+  view('scanner');
+  SCANTOOL_SESSION=null;SCANTOOL_SCANNING=false;
+  $('scanner-pages').innerHTML='';
+  $('scanner-scan-btn').disabled=true;
+  $('scanner-status').textContent='Checking for a scanner…';
+  $('scanner-nodevice').classList.add('hide');
+  $('scanner-picker-wrap').style.display='none';
+  $('scanner-label').value='';
+  setScanToolDest('standalone');
+  refreshScanToolList();
+  populateScanToolSubmissions()}
+function setScanToolDest(d){
+  SCANTOOL_DEST=d;
+  document.querySelectorAll('#scanner-dest-seg button').forEach(b=>b.classList.toggle('on',b.dataset.d===d));
+  $('scanner-dest-standalone').classList.toggle('hide',d!=='standalone');
+  $('scanner-dest-submission').classList.toggle('hide',d!=='submission')}
+async function populateScanToolSubmissions(){
+  if(!SUBMISSIONS.length)await loadSubmissions();
+  const open=SUBMISSIONS.filter(s=>s.stage==='in_progress');
+  $('scanner-submission').innerHTML=open.length
+    ?open.map(s=>'<option value="'+s.id+'">'+escHtml(s.company||'—')+' — DO '+escHtml(String(s.do_number||''))+'</option>').join('')
+    :'<option value="">No open submissions</option>'}
+async function refreshScanToolList(){
+  $('scanner-nodevice').classList.add('hide');
+  const r=await fetch('/api/scanner-list').then(r=>r.json()).catch(()=>({scanners:[]}));
+  const scanners=r.scanners||[];
+  if(!scanners.length){
+    $('scanner-status').textContent='';
+    $('scanner-nodevice').classList.remove('hide');
+    $('scanner-scan-btn').disabled=true;
+    return}
+  $('scanner-picker-wrap').style.display=scanners.length>1?'':'none';
+  $('scanner-device').innerHTML=scanners.map(s=>'<option value="'+escHtml(s.id)+'">'+escHtml(s.name)+'</option>').join('');
+  $('scanner-status').textContent=scanners.length>1?'Choose a scanner, then Scan Page.':'Ready — '+scanners[0].name;
+  $('scanner-scan-btn').disabled=false}
+async function scanToolNextPage(){
+  if(SCANTOOL_SCANNING)return;
+  SCANTOOL_SCANNING=true;
+  const btn=$('scanner-scan-btn');
+  btn.disabled=true;btn.textContent='Scanning…';
+  $('scanner-status').textContent='Scanning — please wait…';
+  const deviceSel=$('scanner-device');
+  const device_id=deviceSel.options.length?deviceSel.value:undefined;
+  const r=await fetch('/api/scanner-scan-page',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:SCANTOOL_SESSION,device_id})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  btn.disabled=false;btn.textContent='Scan Page';
+  SCANTOOL_SCANNING=false;
+  if(!r.ok){$('scanner-status').textContent='Scan failed: '+(r.error||'unknown error');return}
+  SCANTOOL_SESSION=r.session_id;
+  $('scanner-status').textContent=r.page_count+' page'+(r.page_count!==1?'s':'')+' scanned — Scan Page again to add another, or Save Scan when done.';
+  const div=document.createElement('div');
+  div.className='scanpagetile';
+  div.innerHTML='<img src="'+r.preview+'"><span>'+r.page_count+'</span>';
+  $('scanner-pages').appendChild(div)}
+async function scanToolRemoveLastPage(){
+  if(!SCANTOOL_SESSION)return;
+  const r=await fetch('/api/scanner-remove-last-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:SCANTOOL_SESSION})}).then(r=>r.json());
+  const tiles=$('scanner-pages');
+  if(tiles.lastChild)tiles.removeChild(tiles.lastChild);
+  $('scanner-status').textContent=r.page_count+' page'+(r.page_count!==1?'s':'')+' scanned.'}
+async function finalizeScanTool(){
+  if(!SCANTOOL_SESSION){toast('Scan at least one page first');return}
+  const body={session_id:SCANTOOL_SESSION};
+  if(SCANTOOL_DEST==='submission'){
+    const id=$('scanner-submission').value;
+    if(!id){toast('Choose a submission to link to');return}
+    body.submission_id=id;
+  }else{
+    body.label=$('scanner-label').value.trim()}
+  $('scanner-status').textContent='Saving…';
+  const r=await fetch('/api/scanner-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  if(!r.ok){$('scanner-status').textContent='Could not save: '+(r.error||'unknown error');return}
+  SCANTOOL_SESSION=null;
+  $('scanner-pages').innerHTML='';
+  if(SCANTOOL_DEST==='submission'){
+    const id=body.submission_id;
+    view('submissions');
+    _applyScannedDoLink(id,r.rel)
+  }else{
+    toast('Scan saved: '+r.name);
+    $('scanner-status').textContent='Saved as '+r.name+'. Scan another page to start a new file.'}}
+
 // -------- build submittal: attach the LPO (first appearance in the flow), confirm/adjust quantities, merge into one PDF
 let SUBMITTAL_SUB=null, SUBMITTAL_ITEMS=[], SUBMITTAL_LPO_FILE='', SUBMITTAL_LPO_NAME='';
 function openBuildSubmittal(id){
@@ -13424,7 +13567,7 @@ function applyAccessRestrictions(){
   // Blocked tools: hide the corresponding rail nav button. Server-side
   // enforcement (app.py's before_request) is what actually matters —
   // this is just so a restricted user isn't shown a button that 403s.
-  const navByTool={settings:['n-settings','t-settings','t-settings-title'],clients:['n-clients','t-clients'],submissions:['n-submissions','t-submissions'],statement:['n-statement','t-statement'],alldocs:['n-all','t-all']};
+  const navByTool={settings:['n-settings','t-settings','t-settings-title'],clients:['n-clients','t-clients'],submissions:['n-submissions','t-submissions','t-scanner'],statement:['n-statement','t-statement'],alldocs:['n-all','t-all']};
   Object.entries(navByTool).forEach(([tool,ids])=>ids.forEach(id=>{
     const el=$(id);if(el)el.classList.toggle('hide',BLOCKED_TOOLS.includes(tool))}));
   // Admin Tools is a sub-page WITHIN Settings (not its own rail item) —
