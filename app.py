@@ -6022,8 +6022,19 @@ function installUpdate(btn){
     // silently re-armed instead of confirming: looked exactly like
     // "nothing happens" with no error anywhere. Longer window (8s) + a
     // toast when it actually does expire, so that's never silent again.
-    setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='Install & Restart';toast('Confirmation timed out — click Install & Restart again')}},8000);
+    // This timer's id is stashed on the button so the CONFIRMING click
+    // below can cancel it — found the hard way (real user report, on a
+    // real 200MB+ update after Chromium got bundled in) that it wasn't
+    // being cancelled at all: it kept running regardless of confirming,
+    // fired 8s after the FIRST click no matter what, and stomped the
+    // real download's own progress UI with a false "timed out" toast —
+    // while the actual download (a separate poll loop) kept going
+    // correctly in the background the whole time, since this bug never
+    // touched that. Purely a leftover-timer bug, not a real timeout.
+    btn._confirmTimer=setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='Install & Restart';toast('Confirmation timed out — click Install & Restart again')}},8000);
     return}
+  clearTimeout(btn._confirmTimer);
+  btn.dataset.confirm='';
   actuallyInstallUpdate(btn)}
 function fmtMB(n){return (n/1048576).toFixed(1)+' MB'}
 // Downloads a real installer (80MB+) — the OLD version just said
@@ -6057,7 +6068,14 @@ async function actuallyInstallUpdate(btn){
       text.textContent=p.total?(pct+'% — '+fmtMB(p.done)+' / '+fmtMB(p.total)):'Downloading…'
     }else if(p.status==='launched'){
       clearInterval(poll);fill.style.width='100%';text.textContent='Installing…';btn.textContent='Installing…';
-      toast('Installer launching — the app will close and reopen the new version')
+      // Set real duration expectations here: since Chromium got bundled
+      // into the installer (v1.1.6), the install step alone can genuinely
+      // take a few minutes (a small native progress window shows during
+      // that — installer.iss/update_checker.py run it /SILENT, not
+      // /VERYSILENT, specifically so that's visible) — this app closes
+      // first regardless, so a long, ordinary-looking wait afterward is
+      // expected, not a sign anything failed.
+      toast('Installer launching — this app will close, and the update can take a few minutes. It reopens on its own when done.')
     }else if(p.status==='error'){
       clearInterval(poll);bar.remove();btn.disabled=false;btn.textContent='Install & Restart';
       toast('Update failed: '+(p.error||'unknown error'))}

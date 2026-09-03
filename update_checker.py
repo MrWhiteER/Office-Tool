@@ -85,14 +85,26 @@ def check_for_update(timeout=6):
 def download_and_launch_installer(download_url, on_progress=None):
     """
     Downloads the release's Setup.exe to a fresh temp folder and runs it
-    SILENTLY (/VERYSILENT /SUPPRESSMSGBOXES /NORESTART) — no wizard, no
-    "Welcome to Setup" screen, nothing that reads as "installing new
-    software"; it just replaces the files and relaunches (see
-    installer.iss's [Run] — skipifsilent was removed specifically so a
-    silent run still reopens the app afterward on its own). Same AppId as
-    the current install (installer.iss) means this is always an in-place
-    upgrade, never a fresh install, so config.json/drafts/etc. survive
-    exactly as before.
+    with /SILENT /SUPPRESSMSGBOXES /NORESTART — no wizard, no "Welcome to
+    Setup" screen or license/directory pages, just Inno Setup's own small
+    native progress bar while it works (see installer.iss's [Run] —
+    skipifsilent was removed specifically so a silent run still reopens
+    the app afterward on its own). Same AppId as the current install
+    (installer.iss) means this is always an in-place upgrade, never a
+    fresh install, so config.json/drafts/etc. survive exactly as before.
+
+    /SILENT, not /VERYSILENT: confirmed directly that once Chromium got
+    bundled into the installer (v1.1.6), the actual file-copy step alone
+    can take several minutes (a real, timed run: ~290s) — and this app's
+    own process has to exit before that starts (Windows won't let the
+    installer overwrite files this process still has open), so with
+    /VERYSILENT there'd be several minutes of NOTHING visible at all:
+    the app just closes, and nothing reappears for a long, silent
+    stretch that reads exactly like a failure (a real user hit this and
+    reported it as one). /SILENT's small native progress window is a
+    minor step back from "never looks like installing software," but a
+    long silent gap with zero feedback is a worse experience than a
+    small progress bar — this is the actual tradeoff, not a preference.
 
     /DIR= pins the target explicitly to THIS running instance's own
     folder (engine.DATA_BASE) rather than trusting Inno Setup's registry
@@ -122,7 +134,7 @@ def download_and_launch_installer(download_url, on_progress=None):
                 if on_progress and total:
                     on_progress(done, total)
     subprocess.Popen(
-        [dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=" + engine.DATA_BASE],
+        [dest, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=" + engine.DATA_BASE],
         close_fds=True,
     )
     return dest
@@ -159,11 +171,17 @@ def start_update_async(download_url):
                 _PROGRESS["total"] = total
             download_and_launch_installer(download_url, on_progress=_on_progress)
             _PROGRESS["status"] = "launched"
-            # Give the frontend's poll loop one last chance to see
-            # status="launched" (and show "Installing…") before this
-            # process disappears — same 1s grace the old synchronous
-            # version gave the HTTP response.
-            time.sleep(1.0)
+            # Give the frontend's poll loop a real chance to see
+            # status="launched" — and, now, actually READ the toast
+            # explaining the install can take a few minutes (see the
+            # p.status==='launched' branch in app.py's page script) —
+            # before this window disappears. Was 1.0s (same grace the
+            # old synchronous version gave the HTTP response); too short
+            # to read a toast, not just show it, so the app closing right
+            # after felt abrupt right when the user most needed the
+            # context that a long silent wait afterward is normal, not a
+            # failure.
+            time.sleep(3.0)
             os._exit(0)
         except Exception as e:
             _PROGRESS["status"] = "error"
