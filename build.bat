@@ -11,7 +11,17 @@ REM comment on PLAYWRIGHT_BROWSERS_PATH for why).
 where python >nul 2>nul || (echo Python is not installed. Get it from https://python.org & pause & exit /b)
 python -m pip install -r requirements.txt
 python -m pip show pyinstaller >nul 2>nul || python -m pip install pyinstaller
-pyinstaller --name OfficeTool --noconfirm ^
+REM --clean (plus deleting any leftover dist\build folders first) — found
+REM the hard way: an incremental PyInstaller build can silently keep a
+REM STALE cached copy of a module even after its source changed, with no
+REM warning. That shipped a real regression once already (the live-
+REM preview PDF fix in html_engine.py's _get_browser() sat in source for
+REM most of a session while every incremental rebuild kept serving the
+REM pre-fix cached version) — always building clean is the only way to be
+REM sure what's actually in the .exe matches what's actually in source.
+rmdir /s /q build 2>nul
+rmdir /s /q dist 2>nul
+pyinstaller --name OfficeTool --noconfirm --clean ^
   --add-data "templates_html;templates_html" ^
   --add-data "templates;templates" ^
   --add-data "static;static" ^
