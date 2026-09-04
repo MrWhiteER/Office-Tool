@@ -14140,6 +14140,29 @@ loadBrandTheme();
 # single-admin default).
 accounts.refresh_from_cloud()
 
+# Keep the local accounts cache continuously fresh, not just at login —
+# per explicit request: "always update with the Cloudflare data... let
+# the update be each 8 seconds, so new users added or edited accounts
+# will be updated". verify_login() already refreshed on every login
+# ATTEMPT (see accounts.py), which already let a brand-new user log in
+# right away -- this adds a standing background refresh on top of that,
+# every 8 seconds, for the whole life of the process, so the local cache
+# never sits stale for more than a few seconds even between login
+# attempts. refresh_from_cloud() is already fully best-effort/never-
+# raises and respects the admin's own DIRTY_FLAG (skips while there are
+# unpublished local edits), so calling it on a timer needs no extra
+# guarding here. True module level (not inside __main__) so this applies
+# whether the app launched as a real webview window or fell back to a
+# browser tab.
+def _accounts_sync_loop():
+    while True:
+        time.sleep(8)
+        try:
+            accounts.refresh_from_cloud()
+        except Exception:
+            pass
+threading.Thread(target=_accounts_sync_loop, daemon=True).start()
+
 if __name__ == "__main__":
     # The packaged .exe is now built --windowed (no console subsystem at
     # all, see build.bat) — a real desktop app shouldn't pop a black
