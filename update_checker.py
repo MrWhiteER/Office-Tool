@@ -130,10 +130,14 @@ def cleanup_update_cache():
 
 def _kill_bundled_browser_processes():
     """
-    Terminates every leftover chrome.exe (and its helper processes —
-    GPU/renderer/utility processes, which share the exact same exe path)
-    spawned from THIS install's own bundled_browser folder, right before
-    the installer gets a chance to try overwriting those exact files.
+    Terminates every leftover process this install's own Playwright
+    integration can leave running — chrome.exe/chrome_proxy.exe (and its
+    GPU/renderer/utility helper processes, which all share that same exe
+    path) under bundled_browser\\, AND playwright\\driver\\node.exe, the
+    SEPARATE Node.js process Playwright's own driver runs as (it talks to
+    the browser over its own protocol; it is not part of Chromium at
+    all) — right before the installer gets a chance to try overwriting
+    any of those files.
 
     This is the real fix for a confirmed, reproduced bug: a real update
     attempt (v1.1.17 -> v1.1.20) downloaded fine but the installer
@@ -143,37 +147,41 @@ def _kill_bundled_browser_processes():
     these under /SILENT /SUPPRESSMSGBOXES — and SUPPRESSMSGBOXES hides
     whatever error/retry UI Inno Setup would otherwise show for a locked
     file, so a failure here is completely silent to the user, exactly
-    matching what was reported. Directly confirmed the underlying cause:
-    a WMI process query against a real running install found SIX
-    chrome.exe processes still holding open handles under
-    _internal\\bundled_browser\\... at the exact moment an update would
-    try to overwrite those files. Playwright's live-preview rendering
-    spins up a real multi-process Chromium (main + renderer + GPU +
-    utility processes, all sharing that one chrome.exe image path), and
-    none of it is tied to the parent Python process's lifetime the way a
-    normal child process might be — os._exit(0) on the app's own process
-    does not take these down with it.
+    matching what was reported. Directly confirmed the underlying cause
+    TWICE, live, on the user's own real PC: first pass found six
+    chrome.exe processes holding handles under bundled_browser\\... —
+    fixed, shipped, then reproduced AGAIN live (v1.1.22 -> v1.1.25):
+    Inno Setup's own install log named the exact remaining culprit —
+    "RestartManager found an application using one of our files:
+    Node.js JavaScript Runtime" — "Some applications could not be shut
+    down" -> defaults to Abort under SUPPRESSMSGBOXES -> "User canceled
+    the installation process. Rolling back changes." — the Playwright
+    Node driver process was never being killed at all, only its Chromium
+    child was. Confirmed the actual bundled path directly
+    (_internal\\playwright\\driver\\node.exe) before writing this fix.
 
     Uses WMI (via the pywin32 dependency already bundled) to filter by
-    ExecutablePath specifically, not just process NAME — "chrome.exe"
-    alone would also match the user's own real Google Chrome browser,
-    which must never be touched. Best-effort: any failure here (WMI
-    unavailable, permission issue, etc.) is swallowed — worst case, this
-    just falls back to relying on installer.iss's own
-    CloseApplications=yes exactly as before this fix existed.
+    ExecutablePath specifically, not just process NAME — "node.exe"/
+    "chrome.exe" alone would also match some unrelated real Node.js app
+    or the user's own real Google Chrome browser, neither of which must
+    ever be touched. Best-effort: any failure here (WMI unavailable,
+    permission issue, etc.) is swallowed — worst case, this just falls
+    back to relying on installer.iss's own CloseApplications=yes exactly
+    as before this fix existed.
     """
     try:
         import win32com.client
-        bundled_dir = os.path.normcase(os.path.join(engine.BASE, "bundled_browser"))
+        bundled_browser_dir = os.path.normcase(os.path.join(engine.BASE, "bundled_browser"))
+        playwright_driver_dir = os.path.normcase(os.path.join(engine.BASE, "playwright", "driver"))
         wmi = win32com.client.GetObject("winmgmts:")
         procs = wmi.ExecQuery(
             "SELECT ProcessId, ExecutablePath FROM Win32_Process "
-            "WHERE Name='chrome.exe' OR Name='chrome_proxy.exe'"
+            "WHERE Name='chrome.exe' OR Name='chrome_proxy.exe' OR Name='node.exe'"
         )
         killed = 0
         for p in procs:
             exe_path = os.path.normcase(p.ExecutablePath or "")
-            if exe_path.startswith(bundled_dir):
+            if exe_path.startswith(bundled_browser_dir) or exe_path.startswith(playwright_driver_dir):
                 try:
                     os.system("taskkill /F /PID {} >nul 2>&1".format(p.ProcessId))
                     killed += 1
