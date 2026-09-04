@@ -14240,16 +14240,31 @@ if __name__ == "__main__":
         except Exception:
             brand_theme = "dark"
         loading_path = os.path.join(engine.BASE, "static", "splash", "loading.html")
-        start_url = url
-        if os.path.isfile(loading_path):
-            try:
-                import pathlib
-                import urllib.parse as _urlparse
-                query = _urlparse.urlencode({"theme": brand_theme, "target": url})
-                start_url = pathlib.Path(loading_path).as_uri() + "?" + query
-            except Exception:
-                start_url = url
-        window = webview.create_window("Office Tool", start_url, width=1400, height=900, min_size=(1000, 650))
+        start_target = loading_path if os.path.isfile(loading_path) else url
+        window = webview.create_window("Office Tool", start_target, width=1400, height=900, min_size=(1000, 650))
+        if start_target == loading_path:
+            # Hand theme/target to loading.html's own officeToolStart() via
+            # evaluate_js instead of a hand-built file:// URI + query
+            # string (the previous approach — a real user hit an
+            # ERR_FILE_NOT_FOUND on this exact window after updating, and
+            # that custom-URI-with-query-string was the only plausible
+            # source of a file:// nav failure in this whole flow; see
+            # loading.html's own updated comment for the full reasoning).
+            # create_window is handed the plain PATH above — pywebview
+            # builds the file:// URL itself internally, the same already-
+            # well-tested code path every pywebview app relies on — and
+            # evaluate_js is the exact same mechanism already proven
+            # working elsewhere in this app (the tray's Switch Theme/Scan
+            # Now actions), so nothing new or unproven is involved here.
+            def _start_loading_page():
+                try:
+                    window.evaluate_js(
+                        "if(window.officeToolStart)officeToolStart(%s,%s);"
+                        % (json.dumps(brand_theme), json.dumps(url))
+                    )
+                except Exception:
+                    pass
+            window.events.loaded += _start_loading_page
 
         # ---- System tray -----------------------------------------------
         # The X button now MINIMIZES to the system tray instead of quitting

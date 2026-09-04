@@ -12,7 +12,26 @@
      background — background-size:cover on a small square box crops it
      to a square automatically, no separate asset needed. This page's own
      script polls the real app URL and navigates this window there the
-     moment it answers. */
+     moment it answers.
+
+     Theme/target used to arrive as a ?theme=&target= query string on this
+     page's own file:// URL, built in Python with pathlib's as_uri() +
+     urlencode() — a real user hit a "File not found" (ERR_FILE_NOT_FOUND)
+     error on this exact window after updating, and that combination
+     (a hand-built file:// URI carrying a query string, loaded via
+     pywebview's create_window(url=...)) is the only plausible source of
+     a file:// nav failure in this whole flow — every other piece
+     (the file itself, its path, engine.BASE resolution) already works
+     and is used elsewhere. Rather than keep guessing at the exact
+     WebView2/pywebview quirk, this now gets its values a completely
+     different way that has ZERO custom URI construction involved:
+     Python passes this plain file PATH straight to create_window (no
+     manual file:// URI, no query string at all — pywebview builds that
+     URL itself, the same well-tested code path every other pywebview
+     app already relies on), then calls window.evaluate_js() once the
+     `loaded` event fires to invoke officeToolStart() below directly —
+     the exact same evaluate_js mechanism already proven working
+     elsewhere in this app (the tray's Switch Theme / Scan Now actions). */
   html,body{margin:0;padding:0;width:100%;height:100%;background:#14161a;overflow:hidden}
   body{display:flex;align-items:center;justify-content:center;font-family:-apple-system,"Segoe UI",Arial,sans-serif}
   body[data-brand-theme="light"]{background:#f5f4f0}
@@ -32,19 +51,35 @@
 <body>
   <div class="sq"><div class="dots"><span></span><span></span><span></span></div></div>
   <script>
-    var params = new URLSearchParams(location.search);
-    var theme = params.get('theme') === 'light' ? 'light' : 'dark';
-    var target = params.get('target') || '';
-    document.body.setAttribute('data-brand-theme', theme);
-    (function poll(){
-      if (!target) return;
-      fetch(target, {cache:'no-store'}).then(function(r){
-        // Any real HTTP response (even a 4xx/5xx) means Flask is up and
-        // answering — navigate over. Only a network-level failure (server
-        // not listening yet) should keep waiting.
-        location.href = target;
-      }).catch(function(){ setTimeout(poll, 150); });
-    })();
+    var started = false;
+    // Called by Python (window.evaluate_js) once the app's real URL is
+    // known — see app.py's __main__ block. Safe to call more than once
+    // (e.g. a retry); only the first call actually starts polling.
+    window.officeToolStart = function(theme, target){
+      if (started) return;
+      started = true;
+      document.body.setAttribute('data-brand-theme', theme === 'light' ? 'light' : 'dark');
+      (function poll(){
+        if (!target) return;
+        fetch(target, {cache:'no-store'}).then(function(r){
+          // Any real HTTP response (even a 4xx/5xx) means Flask is up and
+          // answering — navigate over. Only a network-level failure
+          // (server not listening yet) should keep waiting.
+          location.href = target;
+        }).catch(function(){ setTimeout(poll, 150); });
+      })();
+    };
+    // Fallback in case evaluate_js is ever missed (belt-and-braces —
+    // should not normally be needed): after 8s with no start, retry is
+    // pointless without a target, but at least stop looking frozen by
+    // surfacing that plainly rather than sitting on a static square
+    // forever with no explanation.
+    setTimeout(function(){
+      if (!started) {
+        var d = document.querySelector('.dots');
+        if (d) d.title = 'Still starting…';
+      }
+    }, 8000);
   </script>
 </body>
 </html>
