@@ -359,6 +359,63 @@ def upload_document(local_path, key_suffix):
         return False
 
 
+def sync_down_documents(local_base_folder, on_progress=None):
+    """
+    Pulls every object under DOCUMENTS_PREFIX into local_base_folder,
+    stripping the "documents/" prefix itself so a key like
+    "documents/SOLOLUCE/CAT/AURA-ECO-Rev0.pdf" lands at
+    local_base_folder/SOLOLUCE/CAT/AURA-ECO-Rev0.pdf — the exact layout
+    app.py's folder_for()/all_doc_folders() now auto-generate paths
+    into (see their own comments), so every existing local-file-based
+    system (All Docs' scan_all(), Submissions' submittal PDF merge,
+    previous_for_company()'s continuation lookups, sidecar read/write)
+    keeps working completely unchanged: this just keeps that local
+    mirror caught up with whatever every OTHER install has generated,
+    the same role sync_down() already plays for the product photo
+    library, and the same skip-if-already-present-with-matching-size
+    freshness check.
+
+    Uses the SAME read access every install already has for documents
+    (no allow_bundled_write needed — this only reads) — every logged-in
+    user already gets bundled read access via the readonly-fallback
+    credential the same way they already read the shared photo library.
+    Never raises for "not configured"/offline — callers (the startup
+    sync and the periodic background loop) should just skip quietly.
+    """
+    if not is_configured():
+        return {"ok": False, "error": "not_configured"}
+    os.makedirs(local_base_folder, exist_ok=True)
+    try:
+        client = _client()
+        bucket = _bucket()
+        downloaded = 0
+        token = None
+        while True:
+            kwargs = {"Bucket": bucket, "Prefix": DOCUMENTS_PREFIX}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = client.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                key = obj["Key"]
+                rest = key[len(DOCUMENTS_PREFIX):]
+                if not rest:
+                    continue
+                dest = os.path.join(local_base_folder, *rest.split("/"))
+                if os.path.isfile(dest) and os.path.getsize(dest) == obj["Size"]:
+                    continue
+                os.makedirs(os.path.dirname(dest) or local_base_folder, exist_ok=True)
+                client.download_file(bucket, key, dest)
+                downloaded += 1
+                if on_progress:
+                    on_progress(downloaded)
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+        return {"ok": True, "downloaded": downloaded}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def sync_down(local_folder, on_progress=None):
     """
     Pulls every photo from R2 into local_folder, skipping files that are
