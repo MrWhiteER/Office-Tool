@@ -244,12 +244,17 @@ def get_bytes(key):
     return resp["Body"].read(), resp.get("ContentType") or "application/octet-stream"
 
 
-def put_bytes(key, data, content_type="application/octet-stream"):
+def put_bytes(key, data, content_type="application/octet-stream", allow_bundled_write=False):
     """Generic write, bypassing the 10GB photo-library check (upload_photo
     enforces that for actual photos; accounts.json is a few KB and isn't
-    part of that budget) — used by accounts.py's publish_to_cloud()."""
-    client = _client(require_write=True)
-    client.put_object(Bucket=_bucket(require_write=True), Key=key, Body=data, ContentType=content_type)
+    part of that budget) — used by accounts.py's publish_to_cloud() (full-
+    file admin publish, allow_bundled_write left False on purpose — see
+    _cfg_block()'s own comment on why that stays admin-only) and by
+    accounts.py's save_user_setting() (allow_bundled_write=True — a
+    regular user persisting their OWN settings is the same narrow, safe
+    case upload_document() already opened this up for)."""
+    client = _client(require_write=True, allow_bundled_write=allow_bundled_write)
+    client.put_object(Bucket=_bucket(require_write=True, allow_bundled_write=allow_bundled_write), Key=key, Body=data, ContentType=content_type)
 
 
 def list_photos():

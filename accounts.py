@@ -177,6 +177,11 @@ def _public(u):
         "role": u.get("role", "user"),
         "brand_lock": u.get("brand_lock"),
         "blocked_tools": u.get("blocked_tools", []),
+        # Per-user preferences (currently just "theme") — see
+        # save_user_setting() below. Included here so login and
+        # /api/current-user hand it to the frontend for free, no extra
+        # round-trip needed to apply it right away.
+        "settings": u.get("settings") or {},
     }
 
 
@@ -235,7 +240,14 @@ def publish_to_cloud():
     up the change (they refresh on every login attempt — see
     verify_login()). Needs a WRITE-capable R2 token (the admin's own —
     see photo_store.py); a read-only token gets a clear permission error
-    back from R2 rather than silently doing nothing.
+    back from R2 rather than silently doing nothing. Deliberately admin-
+    only (allow_bundled_write left False) — this blindly pushes WHATEVER
+    is sitting in this machine's local cache, which only ever legitimately
+    holds real admin edits (upsert_user/delete_user are admin-gated at
+    the app.py route level); letting every install use this would mean
+    any user could push arbitrary tampering just by hand-editing their
+    own local accounts_cache.json first. See save_user_setting() below
+    for the narrow, genuinely-safe-for-everyone alternative.
     """
     if not photo_store.is_configured(require_write=True):
         return {"ok": False, "error": "Set up your Admin key (Admin Tools > Cloud Storage) first — accounts sync uses the same connection."}
@@ -246,4 +258,63 @@ def publish_to_cloud():
             os.remove(DIRTY_FLAG)
         return {"ok": True}
     except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# Whitelist of settings any logged-in user can persist to their OWN
+# account via save_user_setting() below — deliberately explicit rather
+# than accepting an arbitrary key, so this can never become a backdoor
+# for writing something unrelated into the shared accounts.json. "theme"
+# is the first (per explicit request: "let the theme be linked to the
+# user account"); more will be added here once there's a fuller spec for
+# what else should live in per-user settings.
+USER_SETTABLE_KEYS = ("theme",)
+
+
+def save_user_setting(username, key, value):
+    """
+    Lets ANY logged-in user (not just the admin) persist one of their own
+    settings so it follows them to every PC they log into — unlike
+    publish_to_cloud() (a blind push of the whole local file, admin-
+    only), this is safe for a regular user to trigger themselves: it can
+    only ever touch USER_SETTABLE_KEYS inside THEIR OWN user record, and
+    does so by pulling the freshest copy straight from R2 first (not the
+    local cache, which can be up to 8s stale and isn't gated by
+    DIRTY_FLAG here) and merging just that one field in — minimizing the
+    odds of clobbering a concurrent edit from another PC, and never
+    touching any other user's data or any other field of this user's own
+    record (password_hash, role, brand_lock, blocked_tools).
+    """
+    if key not in USER_SETTABLE_KEYS:
+        return {"ok": False, "error": "Unknown setting."}
+    username_norm = (username or "").strip().lower()
+    if not username_norm:
+        return {"ok": False, "error": "Not logged in."}
+    try:
+        data_bytes, _ct = photo_store.get_bytes(ACCOUNTS_KEY)
+        data = json.loads(data_bytes.decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("users"), list):
+            raise ValueError("unexpected shape")
+    except Exception:
+        # Not published yet / offline / R2 not configured — fall back to
+        # whatever's cached locally so this doesn't hard-fail outright;
+        # worst case the value only sticks on this one machine until the
+        # next successful publish.
+        data = load_accounts()
+    users = data.setdefault("users", [])
+    user = next((u for u in users if u.get("username", "").strip().lower() == username_norm), None)
+    if not user:
+        return {"ok": False, "error": "User not found."}
+    settings = user.setdefault("settings", {})
+    settings[key] = value
+    _write_json(LOCAL_CACHE, data)  # apply locally right away regardless of whether the publish below succeeds
+    try:
+        photo_store.put_bytes(
+            ACCOUNTS_KEY, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+            "application/json", allow_bundled_write=True,
+        )
+        return {"ok": True}
+    except Exception as e:
+        # Saved locally at least — this machine keeps the new value even
+        # if the publish itself failed (offline, R2 briefly down, etc.).
         return {"ok": False, "error": str(e)}

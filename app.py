@@ -4710,7 +4710,22 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    fills the space around a video that doesn't match the player's aspect
    ratio — continuous glossy color instead of a hard-edged empty bar. */
 .splashscreen{position:fixed;inset:0;z-index:600;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--canvas);transition:opacity .35s ease}
+/* blur(28px) saturate(1.3) brightness(.8) reads as a rich, moody glow on
+   the DARK banner (already-dark background, strong amber tones to pull
+   from) but on the LIGHT banner — a near-white background with only
+   thin gray linework and a small logo — brightness(.8) just darkens
+   white into flat gray, which is exactly the "gray boxes" a real user
+   reported (screenshot showed plain neutral gray bars, not a glow at
+   all). Confirmed directly: forced the splash visible in light theme at
+   a non-16:9 window size and saw the same flat gray. Light theme needs
+   the opposite adjustment — brighten instead of darken (a light backdrop
+   darkened just grays out; brightened keeps it feeling like glowing
+   paper) and boost saturation harder (there's much less color there to
+   begin with — the small gold logo — so it needs a stronger push to
+   actually bleed noticeable warmth into the blur, not just tint it
+   evenly). */
 .splashscreen::before{content:"";position:absolute;inset:-40px;background-image:var(--splash-banner);background-size:cover;background-position:center;filter:blur(28px) saturate(1.3) brightness(.8);transform:scale(1.1)}
+:root[data-brand-theme="light"] .splashscreen::before{filter:blur(36px) saturate(2.2) brightness(1.08)}
 .splashscreen.hide{opacity:0;pointer-events:none}
 /* width/height computed via min() to the actual "contain"-fitted box size
    instead of `aspect-ratio` + width:100%;height:100% together — that
@@ -14164,6 +14179,38 @@ def _accounts_sync_loop():
 threading.Thread(target=_accounts_sync_loop, daemon=True).start()
 
 if __name__ == "__main__":
+    # Single instance only — per explicit request: "if the software is
+    # already open, don't let another one launch". A named Windows mutex
+    # is the standard way to detect this: the FIRST process to create one
+    # with a given name owns it; every later attempt sees
+    # ERROR_ALREADY_EXISTS instead of a fresh mutex, which is how we tell
+    # "I'm the second launch" from "I'm the first" — cheap, and doesn't
+    # need any file/port of our own. Rather than just silently refuse to
+    # open a second copy (confusing — the user clicked something and
+    # nothing visibly happened), the second launch brings the FIRST
+    # instance's real window to the front (restoring it if it was
+    # minimized/hidden to the tray) before exiting, so it still feels
+    # like "my click worked". Frozen-only (getattr(sys,"frozen")): a
+    # hardcoded systemwide mutex name would also block deliberately
+    # running several `python app.py` dev instances side by side (e.g.
+    # for testing, on different PORTs) — only the real packaged app
+    # needs this, real end users never run it any other way.
+    if getattr(sys, "frozen", False):
+        try:
+            import win32event, win32api, winerror
+            _instance_mutex = win32event.CreateMutex(None, False, "Global\\OfficeToolSingleInstance")
+            if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+                try:
+                    import win32gui, win32con
+                    hwnd = win32gui.FindWindow(None, "Office Tool")
+                    if hwnd:
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                sys.exit(0)
+        except Exception:
+            pass  # pywin32 unavailable for some reason — don't block a normal launch over this
     # The packaged .exe is now built --windowed (no console subsystem at
     # all, see build.bat) — a real desktop app shouldn't pop a black
     # terminal behind it for every regular user. But an admin who
@@ -14315,9 +14362,16 @@ if __name__ == "__main__":
                 except Exception:
                     pass
 
+            # Per explicit request ("make it so the loading square will be
+            # 3 seconds longer"): once everything is genuinely ready, hold
+            # the loading square up for LOADING_MIN_EXTRA_SECONDS more
+            # before swapping, instead of swapping the instant it can —
+            # purely a pacing/branding choice, not a technical wait.
+            LOADING_MIN_EXTRA_SECONDS = 3
+
             def _on_main_loaded():
                 if _state["server_ready"]:
-                    _swap_to_main_once()
+                    threading.Timer(LOADING_MIN_EXTRA_SECONDS, _swap_to_main_once).start()
             window.events.loaded += _on_main_loaded
 
             def _wait_for_server_then_load():
@@ -14336,8 +14390,9 @@ if __name__ == "__main__":
                 # Safety net: if `loaded` never fires for some reason (a
                 # busy/slow first render), don't leave the user stuck
                 # staring at the loading square forever — swap over after
-                # a generous timeout regardless.
-                time.sleep(15)
+                # a generous timeout regardless (already includes the
+                # extra hold above, so this doesn't fire needlessly early).
+                time.sleep(15 + LOADING_MIN_EXTRA_SECONDS)
                 _swap_to_main_once()
             threading.Thread(target=_wait_for_server_then_load, daemon=True).start()
 
