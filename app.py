@@ -4,7 +4,7 @@ Run:  python app.py   then open the browser link it prints.
 Because it runs on your own PC it can read your documents folder and save
 Excel + PDF files there. The on-screen preview is the generated PDF.
 """
-import os, io, re, sys, json, glob, shutil, datetime, traceback, base64, mimetypes, uuid, colorsys, random, threading, queue, time
+import os, io, re, sys, json, glob, shutil, datetime, traceback, base64, mimetypes, uuid, colorsys, random, threading, queue, time, subprocess
 from flask import Flask, request, jsonify, send_file, Response, session
 from openpyxl import load_workbook
 import engine
@@ -6005,7 +6005,13 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button type=button class=btn id=photoadjust-standard-btn style="width:100%;margin-bottom:4px" onclick="setPhotoAdjustCatalogueStandard()"><span id=photoadjust-standard-label>Standard Settings</span></button>
       <div style="display:flex;gap:6px;margin-top:4px">
         <button type=button class=btn style="flex:1" onclick="pickCatImage(PHOTO_ADJUST_SLOT)">Change Photo</button>
-        <button type=button class=btn title="Choose from Cloud Library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(PHOTO_ADJUST_SLOT)"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=9.5/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
+        <!-- Same globe icon as renderCatImages() (CLOUD_GLOBE_ICON) — kept
+             as an inline literal here since PHOTO_ADJUST_SLOT interpolates
+             into the onclick, not because the markup needs to differ. r
+             quoted for the same reason CLOUD_GLOBE_ICON's own comment
+             explains: unquoted + immediately followed by "/>" swallows
+             the slash into the value and never actually self-closes. -->
+        <button type=button class=btn title="Choose from Cloud Library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(PHOTO_ADJUST_SLOT)"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
         <button type=button class=btn style="flex:1" onclick="resetPhotoAdjust()">Reset</button>
       </div>
     </div>
@@ -8601,7 +8607,18 @@ const CAT_IMG_EXTRA_POSITION={extra1:'Top Left',extra2:'Top Right',extra3:'Botto
 // globe (thin stroke, extra latitude lines beyond the plain Feather-icon
 // version) rather than a label, colored bright green so it reads as a
 // distinct action from the plain-text "Choose image…" button beside it.
-const CLOUD_GLOBE_ICON='<svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=9.5/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg>';
+// r="9.5" MUST be quoted — an unquoted numeric value directly followed
+// by the self-closing "/>" (no space) gets its trailing slash silently
+// swallowed into the attribute value itself ("9.5/", not "9.5"), which
+// means the parser never actually sees this as a self-closing tag: every
+// sibling <path> below ends up parsed as a CHILD of <circle> instead,
+// and SVG doesn't render path children of a circle — so the whole icon
+// was rendering as nothing at all. Confirmed directly: read the real
+// parsed DOM back out via innerHTML and found exactly this — every path
+// nested inside an unclosed <circle>. Every other attribute in this
+// string happens to already be quoted or have a space before its own
+// "/>", which is why only this one tag broke.
+const CLOUD_GLOBE_ICON='<svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg>';
 function pickCatImage(slot){
   const inp=document.createElement('input');
   inp.type='file';inp.accept='image/*';
@@ -14160,7 +14177,146 @@ if __name__ == "__main__":
         def _run_server():
             app.run(port=port, debug=False, use_reloader=False)
         threading.Thread(target=_run_server, daemon=True).start()
-        webview.create_window("Office Tool", url, width=1400, height=900, min_size=(1000, 650))
+
+        # Point the window at a tiny local loading page FIRST instead of
+        # straight at `url` — Flask's dev server needs a moment to start
+        # listening (and WebView2 itself needs a moment to spin up), so
+        # aiming directly at `url` left a blank/white window for that whole
+        # gap, before the real page's own #splashscreen ever got a chance
+        # to paint. static/splash/loading.html is a small, self-contained
+        # local file (no server dependency, so it shows instantly): a
+        # small SQUARE crop of the same banner already used for the
+        # splash/login background (background-size:cover on a small box
+        # does the crop on its own — no separate asset needed). Its own
+        # script polls `url` and navigates this same window over the
+        # moment Flask answers, which is when the real page's own full
+        # splash screen (with the actual percentage load bar) takes over
+        # while the SPA's JS finishes booting.
+        try:
+            brand_theme = load_cfg().get("brand_theme", "dark")
+        except Exception:
+            brand_theme = "dark"
+        loading_path = os.path.join(engine.BASE, "static", "splash", "loading.html")
+        start_url = url
+        if os.path.isfile(loading_path):
+            try:
+                import pathlib
+                import urllib.parse as _urlparse
+                query = _urlparse.urlencode({"theme": brand_theme, "target": url})
+                start_url = pathlib.Path(loading_path).as_uri() + "?" + query
+            except Exception:
+                start_url = url
+        window = webview.create_window("Office Tool", start_url, width=1400, height=900, min_size=(1000, 650))
+
+        # ---- System tray -----------------------------------------------
+        # The X button now MINIMIZES to the system tray instead of quitting
+        # — matches every other "real" background-capable Windows app
+        # (Slack, Discord, etc). The window's `closing` event fires
+        # synchronously (pywebview creates this specific event with
+        # should_lock=True — confirmed directly in webview/window.py — so
+        # returning False here is actually seen before Windows destroys
+        # the window, not just after) and returning False cancels the
+        # close; we hide the window instead. The ONLY way to really quit
+        # after this is the tray icon's own "Exit" item (or Task Manager),
+        # by design.
+        def _on_window_closing():
+            window.hide()
+            return False
+        window.events.closing += _on_window_closing
+
+        def _tray_icon_path():
+            try:
+                theme = load_cfg().get("brand_theme", "dark")
+            except Exception:
+                theme = "dark"
+            p = os.path.join(engine.BASE, "branding", f"icon-{theme}.ico")
+            return p if os.path.isfile(p) else os.path.join(engine.BASE, "icon.ico")
+
+        def _run_tray():
+            # Imported lazily, on this dedicated thread, so a missing/broken
+            # pystray install can never take the whole app down with it —
+            # worst case, no tray icon appears but the window/app still work
+            # exactly as before this feature existed.
+            try:
+                import pystray
+                from PIL import Image
+            except Exception as e:
+                print("Tray icon unavailable:", e)
+                return
+
+            def _open(icon=None, item=None):
+                window.show()
+                try:
+                    window.restore()
+                except Exception:
+                    pass
+
+            def _switch_theme(icon=None, item=None):
+                window.show()
+                try:
+                    window.restore()
+                except Exception:
+                    pass
+                try:
+                    window.evaluate_js("if(typeof toggleTheme==='function')toggleTheme();")
+                except Exception:
+                    pass
+
+            def _scan_now(icon=None, item=None):
+                window.show()
+                try:
+                    window.restore()
+                except Exception:
+                    pass
+                try:
+                    window.evaluate_js("if(typeof launcherGoScanner==='function')launcherGoScanner();")
+                except Exception:
+                    pass
+
+            def _restart(icon=None, item=None):
+                icon.stop()
+                try:
+                    window.destroy()
+                except Exception:
+                    pass
+                # Frozen .exe: relaunch the same executable. Dev
+                # (`python app.py`): re-exec the same interpreter+script —
+                # either way a fresh process picks right back up (session/
+                # login persistence already survives this, see the
+                # webview_data storage_path comment above).
+                exe = sys.executable
+                args = [exe] if getattr(sys, "frozen", False) else [exe] + sys.argv
+                subprocess.Popen(args, close_fds=True)
+                os._exit(0)
+
+            def _exit_app(icon=None, item=None):
+                icon.stop()
+                try:
+                    window.destroy()
+                except Exception:
+                    pass
+                os._exit(0)
+
+            try:
+                icon_img = Image.open(_tray_icon_path())
+            except Exception:
+                # Blank fallback so a missing/corrupt .ico still yields a
+                # (blank) tray icon instead of skipping tray setup entirely.
+                icon_img = Image.new("RGBA", (32, 32), (226, 149, 44, 255))
+
+            menu = pystray.Menu(
+                pystray.MenuItem("Open Office Tool", _open, default=True),
+                pystray.MenuItem("Switch Theme (Dark/Light)", _switch_theme),
+                pystray.MenuItem("Scan Now", _scan_now),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Restart", _restart),
+                pystray.MenuItem("Exit", _exit_app),
+            )
+            tray = pystray.Icon("OfficeTool", icon_img, "Office Tool", menu)
+            tray.run()
+
+        threading.Thread(target=_run_tray, daemon=True).start()
+
         # pywebview defaults private_mode=True (incognito-style — wipes ALL
         # cookies the moment the window closes), which silently broke the
         # "Remember me for 30 days" login checkbox: the server-side session

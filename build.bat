@@ -15,7 +15,20 @@ REM it from whatever's in %LOCALAPPDATA%\ms-playwright right now.
 where python >nul 2>nul || (echo Python is not installed. Get it from https://python.org & pause & exit /b)
 python -m pip install -r requirements.txt
 python -m pip show pyinstaller >nul 2>nul || python -m pip install pyinstaller
-if not exist bundled_browser\*\chrome-win64\chrome.exe (
+REM "if exist bundled_browser\*\chrome-win64\chrome.exe" looks reasonable but
+REM is actually always false: cmd's IF EXIST does not expand a wildcard that
+REM sits in a MIDDLE path segment (only a wildcard in the final component is
+REM matched) — confirmed directly (`if not exist ...\*\chrome-win64\chrome.exe`
+REM prints NOTFOUND even with the real file sitting right there). That silent
+REM false-negative meant this step always tried to re-populate on every build
+REM (harmless when nothing was locked) but could also always report "no local
+REM Chromium found" after a successful populate and abort the whole build —
+REM real, reproducible failure, not a one-off. Fixed by using a recursive
+REM `dir /s /b` search (no path-position wildcard limitation) into a
+REM plain variable instead of re-asking IF EXIST the same broken question.
+set "FOUND_CHROME="
+for /f "delims=" %%F in ('dir /s /b "bundled_browser\chrome.exe" 2^>nul') do set "FOUND_CHROME=%%F"
+if not defined FOUND_CHROME (
   echo Populating bundled_browser\ from %LOCALAPPDATA%\ms-playwright ...
   for /d %%D in ("%LOCALAPPDATA%\ms-playwright\chromium-*") do (
     if exist "%%D\chrome-win64\chrome.exe" (
@@ -23,8 +36,9 @@ if not exist bundled_browser\*\chrome-win64\chrome.exe (
       xcopy /e /i /y /q "%%D" "bundled_browser\%%~nxD" >nul
     )
   )
+  for /f "delims=" %%F in ('dir /s /b "bundled_browser\chrome.exe" 2^>nul') do set "FOUND_CHROME=%%F"
 )
-if not exist bundled_browser\*\chrome-win64\chrome.exe (
+if not defined FOUND_CHROME (
   echo No local Chromium install found to bundle — run "playwright install chromium" first.
   pause & exit /b
 )
@@ -48,6 +62,7 @@ pyinstaller --name OfficeTool --noconfirm --clean --windowed ^
   --add-data "bundled_browser;bundled_browser" ^
   --add-data "branding;branding" ^
   --collect-all playwright ^
+  --collect-all pystray ^
   app.py
 echo.
 echo Build complete: dist\OfficeTool\OfficeTool.exe
