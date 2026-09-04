@@ -71,6 +71,17 @@ DIRTY_FLAG = os.path.join(engine.DATA_BASE, "accounts_dirty.flag")
 LOCAL_CACHE = os.path.join(engine.DATA_BASE, "accounts_cache.json")
 
 BLOCKABLE_TOOLS = ("settings", "clients", "submissions", "statement", "alldocs")
+# Per-document-type access, independent of and finer-grained than the
+# "alldocs" tool block above — per explicit request: "if i want for one
+# user to be able to have access to the Invoices folder in all docs i
+# will be able to give him the access or no... for everyone and every
+# documents type". A user with "alldocs" in blocked_tools can't open All
+# Docs at all regardless of this; a user who CAN open All Docs may still
+# have specific document types hidden from it via this list. QTN2 covers
+# both the current Quotation pipeline and legacy QTN (see /api/index's
+# own "QTN2 matches both" comment) — one entry for what's conceptually
+# one filter tab in the UI.
+BLOCKABLE_DOC_TYPES = ("INV", "DO", "QTN2", "PI", "RV", "CN", "EXP", "CAT")
 BRAND_CODES = tuple(engine.BRANDS.keys())
 
 
@@ -85,6 +96,7 @@ def _default_accounts():
         "role": "admin",
         "brand_lock": None,
         "blocked_tools": [],
+        "blocked_doc_types": [],
     }]}
 
 
@@ -177,6 +189,7 @@ def _public(u):
         "role": u.get("role", "user"),
         "brand_lock": u.get("brand_lock"),
         "blocked_tools": u.get("blocked_tools", []),
+        "blocked_doc_types": u.get("blocked_doc_types", []),
         # Per-user preferences (currently just "theme") — see
         # save_user_setting() below. Included here so login and
         # /api/current-user hand it to the frontend for free, no extra
@@ -189,7 +202,7 @@ def list_users():
     return [_public(u) for u in load_accounts().get("users", [])]
 
 
-def upsert_user(username, role, brand_lock, blocked_tools, password=None):
+def upsert_user(username, role, brand_lock, blocked_tools, password=None, blocked_doc_types=None):
     """Create or update a user. password=None on an edit keeps the existing hash."""
     username = (username or "").strip()
     if not username:
@@ -199,6 +212,7 @@ def upsert_user(username, role, brand_lock, blocked_tools, password=None):
     if brand_lock and brand_lock not in BRAND_CODES:
         raise ValueError("Invalid brand.")
     blocked_tools = [t for t in (blocked_tools or []) if t in BLOCKABLE_TOOLS]
+    blocked_doc_types = [t for t in (blocked_doc_types or []) if t in BLOCKABLE_DOC_TYPES]
     data = load_accounts()
     users = data.setdefault("users", [])
     existing = next((u for u in users if u.get("username", "").lower() == username.lower()), None)
@@ -206,6 +220,7 @@ def upsert_user(username, role, brand_lock, blocked_tools, password=None):
         existing["role"] = role
         existing["brand_lock"] = brand_lock or None
         existing["blocked_tools"] = blocked_tools
+        existing["blocked_doc_types"] = blocked_doc_types
         if password:
             existing["password_hash"] = generate_password_hash(password)
     else:
@@ -217,6 +232,7 @@ def upsert_user(username, role, brand_lock, blocked_tools, password=None):
             "role": role,
             "brand_lock": brand_lock or None,
             "blocked_tools": blocked_tools,
+            "blocked_doc_types": blocked_doc_types,
         })
     save_accounts(data)
     return _public(existing or users[-1])

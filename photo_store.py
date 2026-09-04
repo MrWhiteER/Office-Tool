@@ -42,6 +42,7 @@ HARD_LIMIT_BYTES first and is rejected client-side (before any data
 transfer) if it would cross the line — so this never silently becomes a
 paid Cloudflare account.
 """
+import datetime
 import json
 import os
 import sys
@@ -257,6 +258,43 @@ def put_bytes(key, data, content_type="application/octet-stream", allow_bundled_
     client.put_object(Bucket=_bucket(require_write=True, allow_bundled_write=allow_bundled_write), Key=key, Body=data, ContentType=content_type)
 
 
+# Who uploaded each photo — per explicit request: "I want every user to
+# have his own place in cloudflare... the system will see it all in one
+# just somewhere it will be mentioned that its created or imported... by
+# which user" and "it will show as groups, by whom it was uploaded". A
+# single small index file (not per-photo R2 object Metadata, which would
+# need one HEAD request PER PHOTO to read back for a 575+-photo gallery —
+# far too slow) mapping key -> {uploaded_by, uploaded_at}, same
+# read-modify-write-then-reupload shape as accounts.json. Lives under
+# SYSTEM_PREFIX (app bookkeeping, not a photo) so it's excluded from
+# get_usage()/list_photos() the same way accounts.json already is.
+PHOTO_ATTRIBUTION_KEY = SYSTEM_PREFIX + "photo_attribution.json"
+
+
+def _read_photo_attribution():
+    try:
+        data_bytes, _ct = get_bytes(PHOTO_ATTRIBUTION_KEY)
+        data = json.loads(data_bytes.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _record_photo_attribution(key, username):
+    """Best-effort — a failed attribution write should never fail the
+    actual photo upload it's attached to. allow_bundled_write=True: any
+    logged-in user recording who THEY uploaded is the same narrow, safe
+    case documents already opened this up for (see put_bytes' own
+    comment)."""
+    try:
+        attribution = _read_photo_attribution()
+        attribution[key] = {"uploaded_by": username, "uploaded_at": datetime.datetime.now().isoformat()}
+        put_bytes(PHOTO_ATTRIBUTION_KEY, json.dumps(attribution, indent=2, ensure_ascii=False).encode("utf-8"),
+                   "application/json", allow_bundled_write=True)
+    except Exception:
+        pass
+
+
 def list_photos():
     client = _client()
     bucket = _bucket()
@@ -274,14 +312,30 @@ def list_photos():
         if not resp.get("IsTruncated"):
             break
         token = resp.get("NextContinuationToken")
+    # Merge in who-uploaded-what — one read of the small shared index,
+    # not one request per photo. Photos uploaded before this feature
+    # existed (the admin's original 575) simply have no entry, which
+    # callers should treat as "uploaded by the admin" (they were, before
+    # any of this existed) rather than "unknown".
+    attribution = _read_photo_attribution()
+    for o in out:
+        info = attribution.get(o["key"])
+        if info:
+            o["uploaded_by"] = info.get("uploaded_by")
+            o["uploaded_at"] = info.get("uploaded_at")
     return sorted(out, key=lambda o: o["key"].lower())
 
 
-def upload_photo(local_path, filename, running_usage=None):
+def upload_photo(local_path, filename, running_usage=None, uploaded_by=None, allow_bundled_write=False):
     """
-    Admin-only (enforced by the caller, app.py's before_request admin
-    check on this endpoint's URL prefix). Rejects BEFORE transferring any
-    data if the upload would cross HARD_LIMIT_BYTES.
+    Used to be strictly admin-only; per explicit request, any logged-in
+    user can now upload new product photos (allow_bundled_write=True from
+    the caller — see put_bytes()'s own comment on why this is a
+    conscious, narrow choice rather than an accidental hole). Deletion
+    (delete_photo() below) deliberately stays admin-only — "anyone can
+    add, only the admin removes" is a reasonable moderation default that
+    was never asked to change. Rejects BEFORE transferring any data if
+    the upload would cross HARD_LIMIT_BYTES.
 
     running_usage: pass a single mutable {"bytes_used": N} dict shared
     across a whole batch of uploads (a folder upload can be hundreds of
@@ -300,11 +354,13 @@ def upload_photo(local_path, filename, running_usage=None):
             "remove some unused photos first, or this stays a paid Cloudflare "
             "feature which the admin chose not to enable.".format(max(free, 0) / 1024 / 1024)
         )
-    client = _client(require_write=True)
+    client = _client(require_write=True, allow_bundled_write=allow_bundled_write)
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     with open(local_path, "rb") as f:
-        client.put_object(Bucket=_bucket(require_write=True), Key=filename, Body=f, ContentType=content_type)
+        client.put_object(Bucket=_bucket(require_write=True, allow_bundled_write=allow_bundled_write), Key=filename, Body=f, ContentType=content_type)
     running_usage["bytes_used"] += size
+    if uploaded_by:
+        _record_photo_attribution(filename, uploaded_by)
 
 
 def delete_photo(filename):

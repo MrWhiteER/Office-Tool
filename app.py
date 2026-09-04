@@ -92,8 +92,13 @@ def _require_login():
     # comment). /api/photostore-list and -fetch stay open to everyone —
     # read-only browsing (the cloud photo gallery picker — see
     # openCloudPhotoPicker()) is a different thing from managing the
-    # connection itself.
-    _PHOTOSTORE_ADMIN_ONLY = ("/api/photostore-upload", "/api/photostore-delete", "/api/photostore-config")
+    # connection itself. Upload used to be admin-only too — per explicit
+    # request ("I want every user to have his own place in cloudflare...
+    # what he uploads... will be mentioned... by which user"), any
+    # logged-in user can upload now (attributed to them — see
+    # photo_store.py's photo attribution index); delete stays admin-only
+    # (moderation: anyone can add, only the admin removes).
+    _PHOTOSTORE_ADMIN_ONLY = ("/api/photostore-delete", "/api/photostore-config")
     if any(path.startswith(p) for p in _PHOTOSTORE_ADMIN_ONLY) and session.get("role") != "admin":
         return jsonify({"error": "Admin access required."}), 403
     for tool, prefixes in _TOOL_PREFIXES.items():
@@ -111,6 +116,7 @@ def api_login():
     session["role"] = u["role"]
     session["brand_lock"] = u["brand_lock"]
     session["blocked_tools"] = u["blocked_tools"]
+    session["blocked_doc_types"] = u.get("blocked_doc_types", [])
     # "Remember me" checkbox (defaults checked): permanent=True gives the
     # cookie a real expiry (PERMANENT_SESSION_LIFETIME, set below to 30
     # days) so it survives closing/reopening the app; unchecked makes it a
@@ -140,6 +146,7 @@ def api_current_user():
     u = accounts.find_user(session["user"])
     return jsonify({"logged_in": True, "username": session["user"], "role": session["role"],
                      "brand_lock": session.get("brand_lock"), "blocked_tools": session.get("blocked_tools") or [],
+                     "blocked_doc_types": session.get("blocked_doc_types") or [],
                      "settings": ((u.get("settings") or {}) if u else {})})
 
 @app.get("/api/user-settings")
@@ -166,7 +173,8 @@ def api_set_user_settings():
 @app.get("/api/accounts")
 def api_accounts_list():
     return jsonify({"users": accounts.list_users(), "brands": list(engine.BRANDS.keys()),
-                     "blockable_tools": list(accounts.BLOCKABLE_TOOLS)})
+                     "blockable_tools": list(accounts.BLOCKABLE_TOOLS),
+                     "blockable_doc_types": list(accounts.BLOCKABLE_DOC_TYPES)})
 
 @app.post("/api/accounts-save")
 def api_accounts_save():
@@ -174,7 +182,8 @@ def api_accounts_save():
     try:
         u = accounts.upsert_user(data.get("username", ""), data.get("role", "user"),
                                   data.get("brand_lock") or None, data.get("blocked_tools") or [],
-                                  password=data.get("password") or None)
+                                  password=data.get("password") or None,
+                                  blocked_doc_types=data.get("blocked_doc_types") or [])
         return jsonify({"ok": True, "user": u})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -2707,7 +2716,8 @@ def api_photostore_upload():
         tmp_path = os.path.join(engine.DATA_BASE, "_photostore_tmp_" + uuid.uuid4().hex + "_" + parts[-1])
         try:
             f.save(tmp_path)
-            photo_store.upload_photo(tmp_path, key, running_usage=running_usage)
+            photo_store.upload_photo(tmp_path, key, running_usage=running_usage,
+                                      uploaded_by=session.get("user", ""), allow_bundled_write=True)
             uploaded.append(key)
         except Exception as e:
             errors.append(key + ": " + str(e))
@@ -3079,12 +3089,24 @@ def api_index():
     brand = current_brand()
     if not folders:
         return jsonify({"records": [], "companies": [], "note": "No folder set.", "brand": brand})
+    # Per-user, per-document-type access — per explicit request: "if i
+    # want for one user to be able to have access to the Invoices folder
+    # in all docs i will be able to give him the access or no... for
+    # every documents type". Finer-grained than (and independent of) the
+    # "alldocs" tool block, which is all-or-nothing — a user who CAN open
+    # All Docs may still have specific types hidden from it. QTN2 covers
+    # legacy QTN too, matching the same merge /api/index's brand filter
+    # and the frontend's own type filter already do.
+    blocked_doc_types = set(session.get("blocked_doc_types") or [])
     recs = []
     attns, addresses = set(), set()
     for folder in folders:
         if not os.path.isdir(folder):
             continue
         for r in engine.scan_all(folder):
+            rtype = (r.get("type") or "").upper()
+            if (rtype in blocked_doc_types) or (rtype == "QTN" and "QTN2" in blocked_doc_types):
+                continue
             # Sololuce Datasheets are always generated under SOLOLUCE (see
             # all_doc_folders' comment) — they must stay visible in All Docs
             # regardless of whichever brand is currently active elsewhere in
@@ -5838,6 +5860,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <p class=muted style="font-size:11.5px;margin:0 0 8px">Free shared photo library, synced from the cloud into the Product Pictures folder above — every install sees the same photos without a paid server. Connection is set up by your admin; nothing to configure here.</p>
       <div id=photostore-status style="font-size:12.5px" class=muted>Checking status…</div>
       <button class="btn dark" style="width:100%;margin-top:8px" onclick="syncPhotoStore(this)">Sync Now — Download New Photos</button>
+      <!-- Any logged-in user can add new product photos now, not just
+           the admin (per explicit request) — attributed to whoever
+           uploads (see photo_store.py's photo attribution index),
+           visible everywhere the shared library shows up (this settings
+           card, Admin Tools' own management view, and the cloud photo
+           picker in the Sololuce Datasheet builder). -->
+      <div class=f style="margin-top:10px"><label>Add photos to the shared library</label><input type=file id=ps-upload-general multiple accept=".png"></div>
+      <button class=btn style="width:100%" onclick="uploadPhotosToStore('ps-upload-general',this,'photostore-upload-progress-general')">Upload Photos</button>
+      <div id=photostore-upload-progress-general class="muted hide" style="font-size:11.5px;margin-top:6px"></div>
     </div></div>
     <div class=card><div class=ch>Product Datasheets (Generated)</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0">Separate from the "Datasheets" folder above — that one is the existing lookup catalog scanned for the Quotation builder. Generated Sololuce Datasheets now save straight to the cloud automatically, same as every other document type (see Document storage above). The catalogue's colored index tabs and page numbers are set in Full Catalog Builder, which computes them from the real assembled book.</p>
@@ -5910,6 +5941,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <div id=user-restrict-fields>
         <div class=f><label>Locked to brand</label><select id=user-brand-lock><option value="">— none, sees brand switcher —</option></select></div>
         <div class=f><label>Blocked tools</label><div id=user-blocked-tools style="display:flex;flex-wrap:wrap;gap:10px"></div></div>
+        <div class=f><label>Blocked document types (All Docs)</label><div id=user-blocked-doctypes style="display:flex;flex-wrap:wrap;gap:10px"></div>
+          <p class=muted style="font-size:10.5px;margin:4px 0 0">Finer-grained than blocking All Docs entirely above — e.g. this user can open All Docs but not see Invoices.</p></div>
       </div>
       <div style="display:flex;gap:8px;margin-top:8px">
         <button class="btn dark" style="flex:1" onclick=saveUserForm()>+ Add / Save User</button>
@@ -5919,7 +5952,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <p class=muted id=users-publish-note style="font-size:11px;margin:6px 0 0"></p>
     </div></div>
     <div class=card><div class=ch>Manage Cloud Photo Library</div><div class=cb>
-      <p class=muted style="font-size:11.5px;margin:0 0 8px">Add to or remove from the shared photo library everyone syncs from (Settings > Shared Product Photos). Needs the read/write R2 key — see photo_store.py's own comment on why non-admins get a separate read-only one.</p>
+      <p class=muted style="font-size:11.5px;margin:0 0 8px">Add to or remove from the shared photo library everyone syncs from (any logged-in user can add photos too now — see Settings > Shared Product Photos for the everyday upload control; this is the admin view, and the only place photos can be removed).</p>
       <div class=f><label>Add individual photos (filename = product code, e.g. STAGNA-MS.png)</label><input type=file id=ps-upload-files multiple accept=".png"></div>
       <button class=btn style="width:100%" onclick="uploadPhotosToStore('ps-upload-files',this)">Upload Files</button>
       <!-- webkitdirectory: lets the native file picker select a whole
@@ -5979,9 +6012,20 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
   <div class=clientmodalbox style="max-width:640px">
     <div class=clientmodalbar><b>Choose from Cloud Library</b><button class=btn onclick=closeCloudPhotoPicker()>Cancel</button></div>
     <div class=clientmodalbody>
-      <input id=cloudphoto-search placeholder="Search by product code…" oninput=renderCloudPhotoGrid() style="width:100%;margin-bottom:12px">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input id=cloudphoto-search placeholder="Search by product code…" oninput=renderCloudPhotoGrid() style="flex:1">
+        <!-- Any logged-in user can add photos now, not just the admin
+             (see photo_store.py's photo attribution index) — grouping by
+             uploader is how "the system will see it all in one just...
+             it will show as groups, by whom it was uploaded" surfaces in
+             this picker specifically. -->
+        <select id=cloudphoto-groupby onchange=renderCloudPhotoGrid() style="width:auto">
+          <option value="">All photos</option>
+          <option value="uploader">Group by uploader</option>
+        </select>
+      </div>
       <div id=cloudphoto-status class=muted style="font-size:12px;margin-bottom:8px"></div>
-      <div id=cloudphoto-grid style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px"></div>
+      <div id=cloudphoto-grid></div>
     </div>
   </div>
 </div>
@@ -6894,7 +6938,7 @@ async function actuallyDeletePhotoFromStore(name){
 // progress line, and skips anything that isn't a .png up front since
 // that's all engine.load_photo_catalog() ever matches against.
 const UPLOAD_BATCH_SIZE=15;
-async function uploadPhotosToStore(inputId,btn){
+async function uploadPhotosToStore(inputId,btn,progressId){
   const input=$(inputId);
   const all=[...input.files];
   const pngs=all.filter(f=>f.name.toLowerCase().endsWith('.png'));
@@ -6902,7 +6946,7 @@ async function uploadPhotosToStore(inputId,btn){
   if(!pngs.length){toast(all.length?'None of those were .png files — only .png is matched by the app':'Choose at least one photo first');return}
   const origLabel=btn.textContent;
   btn.disabled=true;
-  const prog=$('photostore-upload-progress');prog.classList.remove('hide');
+  const prog=$(progressId||'photostore-upload-progress');prog.classList.remove('hide');
   let uploadedTotal=0,errorList=[];
   for(let i=0;i<pngs.length;i+=UPLOAD_BATCH_SIZE){
     const batch=pngs.slice(i,i+UPLOAD_BATCH_SIZE);
@@ -8910,6 +8954,7 @@ async function openCloudPhotoPicker(slot){
   CLOUD_PHOTO_SLOT=slot;
   $('cloudphotomodal').classList.remove('hide');
   $('cloudphoto-search').value='';
+  $('cloudphoto-groupby').value='';
   $('cloudphoto-status').textContent='Loading…';
   $('cloudphoto-grid').innerHTML='';
   const r=await fetch('/api/photostore-list').then(r=>r.json()).catch(e=>({error:e.message}));
@@ -8919,15 +8964,32 @@ async function openCloudPhotoPicker(slot){
 function closeCloudPhotoPicker(){$('cloudphotomodal').classList.add('hide');CLOUD_PHOTO_SLOT=null}
 function renderCloudPhotoGrid(){
   const q=($('cloudphoto-search').value||'').trim().toLowerCase();
+  const groupBy=$('cloudphoto-groupby').value;
   const list=(CLOUD_PHOTO_LIST||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
   $('cloudphoto-status').textContent=(CLOUD_PHOTO_LIST||[]).length
     ?list.length+' of '+CLOUD_PHOTO_LIST.length+' photo'+(CLOUD_PHOTO_LIST.length!==1?'s':'')
     :'The cloud library is empty — an admin can add photos from Settings > Shared Product Photos.';
-  $('cloudphoto-grid').innerHTML=list.map(p=>{
+  const tile=p=>{
     const name=p.key.split('/').pop().replace(/\.png$/i,'');
     return '<div class=cloudphototile onclick="selectCloudPhoto(\''+p.key.replace(/'/g,"\\'")+'\')" title="'+escHtml(p.key)+'">'+
       '<img src="/api/photostore-fetch?key='+encodeURIComponent(p.key)+'" loading=lazy>'+
-      '<span>'+escHtml(name)+'</span></div>'}).join('')}
+      '<span>'+escHtml(name)+'</span></div>'};
+  const gridStyle='display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px';
+  if(groupBy!=='uploader'){
+    $('cloudphoto-grid').innerHTML='<div style="'+gridStyle+'">'+list.map(tile).join('')+'</div>';
+    return}
+  // Photos uploaded before this feature existed (the admin's original
+  // library) have no attribution entry — that's not "unknown", they
+  // really were all uploaded by the admin before per-user tracking
+  // existed, so they group there rather than in a confusing separate
+  // bucket.
+  const groups={};
+  list.forEach(p=>{const who=p.uploaded_by||'Admin (original library)';(groups[who]=groups[who]||[]).push(p)});
+  const names=Object.keys(groups).sort((a,b)=>a.localeCompare(b));
+  $('cloudphoto-grid').innerHTML=names.map(who=>
+    '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin:10px 0 6px;color:var(--muted)">'+escHtml(who)+' <span style="font-weight:400;text-transform:none;letter-spacing:0">('+groups[who].length+')</span></div>'+
+    '<div style="'+gridStyle+'">'+groups[who].map(tile).join('')+'</div>'
+  ).join('')}
 function selectCloudPhoto(key){
   const slot=CLOUD_PHOTO_SLOT;if(!slot)return;
   $('cloudphoto-status').textContent='Downloading…';
@@ -14301,15 +14363,19 @@ async function doLogout(){
 // ---- Admin: Users & Access (Settings) ----
 let USERS_LIST=[],USERS_BLOCKABLE=[],USERS_BRANDS=[],EDITING_USERNAME=null;
 const TOOL_LABEL={settings:'Settings',clients:'Clients',submissions:'Submissions',statement:'Statement',alldocs:'All Docs'};
+const DOCTYPE_LABEL={INV:'Tax Invoices',DO:'Delivery Orders',QTN2:'Quotations',PI:'Proforma Invoices',RV:'Payment Receipts',CN:'Credit Notes',EXP:'Expense Reports',CAT:'Sololuce Datasheets'};
+let USERS_BLOCKABLE_DOCTYPES=[];
 async function loadUsersAdmin(){
   const r=await fetch('/api/accounts').then(r=>r.json()).catch(()=>null);
   if(!r)return;
-  USERS_LIST=r.users;USERS_BLOCKABLE=r.blockable_tools;USERS_BRANDS=r.brands;
+  USERS_LIST=r.users;USERS_BLOCKABLE=r.blockable_tools;USERS_BRANDS=r.brands;USERS_BLOCKABLE_DOCTYPES=r.blockable_doc_types||[];
   const sel=$('user-brand-lock');
   sel.innerHTML='<option value="">— none, sees brand switcher —</option>'+
     USERS_BRANDS.map(b=>'<option value="'+b+'">'+escHtml(engineBrandLabel(b))+'</option>').join('');
   $('user-blocked-tools').innerHTML=USERS_BLOCKABLE.map(t=>
     '<label class=usertoolchip><input type=checkbox value="'+t+'" class=user-tool-cb> '+TOOL_LABEL[t]+'</label>').join('');
+  $('user-blocked-doctypes').innerHTML=USERS_BLOCKABLE_DOCTYPES.map(t=>
+    '<label class=usertoolchip><input type=checkbox value="'+t+'" class=user-doctype-cb> '+(DOCTYPE_LABEL[t]||t)+'</label>').join('');
   renderUsersList()}
 function engineBrandLabel(code){
   const b=BRAND_LIST.find(x=>x.code===code);return b?b.label:code}
@@ -14328,6 +14394,7 @@ function editUser(username){
   $('user-role').value=u.role;
   $('user-brand-lock').value=u.brand_lock||'';
   document.querySelectorAll('.user-tool-cb').forEach(cb=>cb.checked=(u.blocked_tools||[]).includes(cb.value));
+  document.querySelectorAll('.user-doctype-cb').forEach(cb=>cb.checked=(u.blocked_doc_types||[]).includes(cb.value));
   renderUserRoleFields()}
 function resetUserForm(){
   EDITING_USERNAME=null;
@@ -14335,6 +14402,7 @@ function resetUserForm(){
   $('user-password').value='';$('user-password-label').textContent='Password';
   $('user-role').value='user';$('user-brand-lock').value='';
   document.querySelectorAll('.user-tool-cb').forEach(cb=>cb.checked=false);
+  document.querySelectorAll('.user-doctype-cb').forEach(cb=>cb.checked=false);
   renderUserRoleFields()}
 function renderUserRoleFields(){
   $('user-restrict-fields').style.display=$('user-role').value==='admin'?'none':''}
@@ -14342,8 +14410,9 @@ async function saveUserForm(){
   const username=$('user-username').value.trim();
   if(!username){toast('Username required');return}
   const blocked=[...document.querySelectorAll('.user-tool-cb:checked')].map(cb=>cb.value);
+  const blockedDocTypes=[...document.querySelectorAll('.user-doctype-cb:checked')].map(cb=>cb.value);
   const body={username,password:$('user-password').value||undefined,role:$('user-role').value,
-    brand_lock:$('user-brand-lock').value||null,blocked_tools:blocked};
+    brand_lock:$('user-brand-lock').value||null,blocked_tools:blocked,blocked_doc_types:blockedDocTypes};
   const r=await fetch('/api/accounts-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   if(!r.ok){toast(r.error||'Could not save user');return}
   toast('Saved '+username+' — remember to Publish so other installs see it');
