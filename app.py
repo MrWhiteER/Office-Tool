@@ -4582,6 +4582,46 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .fmupdatenotes{font-size:12px;color:var(--ink);padding:0 12px 10px;max-height:140px;overflow-y:auto;white-space:pre-wrap;line-height:1.4}
 .loginoverlay{position:fixed;inset:0;z-index:500;display:flex;align-items:center;justify-content:center;background:var(--brand-dark);background-image:radial-gradient(circle at 30% 20%,rgba(226,149,44,.14),transparent 55%)}
 .loginoverlay.hide{display:none}
+/* Launch splash — shown first, above even #loginoverlay (z-index 500),
+   until checkLogin() resolves (see bootApp()/checkLogin() near the end of
+   the page script) AND a minimum display time has passed, so the brand
+   moment is never just a flicker on a fast machine. #splash-frame keeps
+   the SAME aspect ratio as the source artwork (1920x1080) via
+   aspect-ratio + max-width/max-height instead of a plain full-bleed
+   background-size:cover — cover would crop unevenly depending on the
+   window's own aspect ratio, silently shifting the loading bar out from
+   under the artwork's own decorative line it's meant to align with.
+   Letterboxing (top/bottom or left/right, whichever the window's aspect
+   ratio calls for) is filled with the theme's own canvas color, which is
+   close enough to the artwork's own near-black/near-white background
+   that the letterbox edge is barely visible in practice. */
+.splashscreen{position:fixed;inset:0;z-index:600;display:flex;align-items:center;justify-content:center;background:var(--canvas);transition:opacity .35s ease}
+.splashscreen.hide{opacity:0;pointer-events:none}
+/* width/height computed via min() to the actual "contain"-fitted box size
+   instead of `aspect-ratio` + width:100%;height:100% together — that
+   combination doesn't do what it looks like it does: an explicit
+   width AND height both overriding aspect-ratio entirely, leaving
+   #splash-frame sized to the raw (non-16:9) viewport rectangle instead
+   of the true letterboxed image area, which silently broke the loading
+   bar's percentage-based position (correct relative to the artwork,
+   landed nowhere near it in the actual rendered page — caught by
+   forcing the splash to stay visible and screenshotting it, not
+   visible from reading the CSS alone). min() here computes the same
+   box a real `background-size:contain` fit would occupy, so percentage
+   positioning of children lands exactly where it visually should. */
+#splash-frame{position:relative;width:min(100vw,100vh * 16 / 9);height:min(100vh,100vw * 9 / 16);background-image:var(--splash-banner);background-size:contain;background-repeat:no-repeat;background-position:center}
+:root{--splash-banner:url(/static/splash/launch-dark.png)}
+:root[data-theme="light"]{--splash-banner:url(/static/splash/launch-light.png)}
+@media(prefers-color-scheme:light){:root:not([data-theme="dark"]){--splash-banner:url(/static/splash/launch-light.png)}}
+/* Positioned relative to the two small crosshair marks in the artwork
+   itself (measured directly off the actual shipped dark-theme PNG's
+   pixels: x=530/1129 of 1672, y=~801 of 941 -> ~31.7%/67.5% and
+   ~85.1%), inset ~2% in from each mark rather than touching them —
+   this bar is the app's own animated element drawn on top of the
+   artwork, not a crop of it. */
+.splash-loadbar-track{position:absolute;left:33.7%;width:31.8%;top:85.1%;height:3px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden}
+:root[data-theme="light"] .splash-loadbar-track{background:rgba(0,0,0,.1)}
+.splash-loadbar-fill{height:100%;width:0%;border-radius:2px;background:linear-gradient(90deg,var(--amber),var(--amber2));box-shadow:0 0 10px rgba(226,149,44,.7);transition:width .3s ease}
 .loginbox{width:320px;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-xl);padding:28px 26px;animation:brandOpen .25s cubic-bezier(.24,.9,.32,1.24)}
 .loginbox h1{margin:0 0 2px;font-size:19px;color:var(--ink)}
 .loginbulb{width:36px;height:36px;border-radius:50%;margin:0 auto 14px;background:radial-gradient(circle at 38% 32%,#ffe6b3,var(--amber) 58%,var(--amber2));box-shadow:0 0 16px rgba(226,149,44,.55)}
@@ -4598,6 +4638,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .scanpagetile img{width:100%;height:100%;object-fit:cover}
 .scanpagetile span{position:absolute;bottom:2px;right:3px;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 4px;border-radius:3px}
 </style></head><body>
+<!-- Launch splash — the very first thing shown, above even the login
+     overlay (see its own CSS comment for the z-index/aspect-ratio
+     reasoning). Hidden by hideSplash() once checkLogin() resolves and a
+     minimum display timer has both finished — see the bottom of the
+     page script. -->
+<div class=splashscreen id=splashscreen>
+  <div id=splash-frame>
+    <div class=splash-loadbar-track><div class=splash-loadbar-fill id=splash-loadbar-fill></div></div>
+  </div>
+</div>
 <!-- Shown until /api/current-user confirms a session (or a login succeeds)
      — see checkLogin()/bootApp() near the bottom of the page script. The
      rest of the app (.app below) still renders behind it so nothing has
@@ -13591,7 +13641,33 @@ async function checkLogin(){
   const r=await fetch('/api/current-user').then(r=>r.json()).catch(()=>({logged_in:false}));
   if(r.logged_in){applySession(r);$('loginoverlay').classList.add('hide');bootApp()}
   else{$('loginoverlay').classList.remove('hide');setTimeout(()=>$('login-username').focus(),50)}
+  hideSplash()
 }
+// Launch splash — see its own HTML/CSS comments for the z-index/aspect-
+// ratio reasoning. Shown by default (no JS needed to display it — it's
+// just there in the initial HTML); this is the ONLY thing responsible
+// for ever hiding it. Runs the fill bar up toward ~85% on a fixed timer
+// (there's no real "boot progress" signal to tie it to — checkLogin() is
+// one fast fetch, not a multi-step load) purely so the bar visibly moves
+// rather than sitting static, then snaps to 100% and fades the whole
+// overlay out once checkLogin() has ACTUALLY resolved and at least
+// MIN_SPLASH_MS has passed — the max() of the two, so a slow first
+// request never gets cut off mid-way, and a fast one never just flickers.
+const MIN_SPLASH_MS=1400;
+const _splashStart=Date.now();
+(function animateSplashFill(){
+  const el=$('splash-loadbar-fill');if(!el)return;
+  const elapsed=Date.now()-_splashStart;
+  const pct=Math.min(85,elapsed/MIN_SPLASH_MS*85);
+  el.style.width=pct+'%';
+  if(pct<85)requestAnimationFrame(animateSplashFill)
+})();
+function hideSplash(){
+  const wait=Math.max(0,MIN_SPLASH_MS-(Date.now()-_splashStart));
+  setTimeout(()=>{
+    const fill=$('splash-loadbar-fill');if(fill)fill.style.width='100%';
+    setTimeout(()=>{const s=$('splashscreen');if(s)s.classList.add('hide')},150)
+  },wait)}
 function applySession(u){
   LOGGED_IN=true;CURRENT_USER=u.username;CURRENT_ROLE=u.role;BRAND_LOCK=u.brand_lock;BLOCKED_TOOLS=u.blocked_tools||[];
   applyAccessRestrictions()}

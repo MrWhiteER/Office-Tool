@@ -300,14 +300,20 @@ _tls = threading.local()
 
 def _get_browser():
     """One persistent headless Chromium, launched lazily and kept alive for
-    the process's lifetime, instead of a fresh launch (~1s) per render —
-    every preview/Generate reuses it, only paying for a new tab (~10s of ms).
+    the process's lifetime, instead of a fresh launch (~1s) per render.
     Playwright's sync API is pinned to whichever thread starts it, so this
-    is cached per-thread (threading.local) rather than as a single module
-    global; Flask's dev server runs single-threaded here (no threaded=True
-    passed to app.run), so in practice there's exactly one, ever — but this
-    stays correct even if that ever changes, just with one browser per
-    thread instead of a shared one."""
+    is cached thread-local — safe and effective ONLY because every caller
+    now goes through the dedicated worker thread below (_worker_loop),
+    which is the single, real, long-lived thread that ever calls this.
+    That distinction mattered in practice: confirmed directly (live
+    timing + a thread-name/id print) that Flask's dev/request threads are
+    NOT stable across requests — each /api/preview-draft call landed on a
+    genuinely different Thread-N, so a naive threading.local() cache here
+    was silently useless (a "cache" that's never hit twice is just
+    overhead with extra steps) and every render was paying full
+    browser.new_page() cost (~600-750ms) regardless. Funneling all
+    rendering through one dedicated thread is what makes this cache
+    (and _get_page()'s) actually pay off."""
     browser = getattr(_tls, "browser", None)
     if browser is not None:
         try:
@@ -367,6 +373,29 @@ def _get_browser():
     atexit.register(_close_thread_browser, _tls)
     return _tls.browser
 
+def _get_page():
+    """One persistent tab, reused across every render on this thread,
+    instead of browser.new_page() + page.close() around each one —
+    measured directly (live timing added while chasing a real "the
+    preview feels slow" report): new_page() alone was costing
+    ~600-750ms PER RENDER, not the "~10s of ms" this module used to
+    (wrongly, never actually measured) claim — by far the single
+    biggest cost in the whole pipeline, ahead of the actual PDF export
+    itself (~270ms). set_content() fully replaces a page's DOM/state on
+    every call, so reusing one tab is safe — there's nothing left over
+    from the previous render for a fresh set_content() not to already
+    overwrite."""
+    browser = _get_browser()
+    page = getattr(_tls, "page", None)
+    if page is not None:
+        try:
+            if not page.is_closed():
+                return page
+        except Exception:
+            pass
+    _tls.page = browser.new_page()
+    return _tls.page
+
 def _close_thread_browser(tls):
     try:
         tls.browser.close()
@@ -377,6 +406,41 @@ def _close_thread_browser(tls):
     except Exception:
         pass
 
+import queue as _queue
+
+# Every actual Playwright call (browser/page creation, set_content, pdf())
+# happens on exactly ONE dedicated background thread, started lazily on
+# first use and kept alive for the process's lifetime — never on whichever
+# Flask request thread happened to receive the HTTP call. This is what
+# makes _get_browser()/_get_page()'s thread-local caching above actually
+# work: confirmed directly (a thread-name print, live) that Flask's own
+# request threads are a fresh Thread-N every single call, so caching
+# Playwright objects against THAT thread was never going to hit twice —
+# every render was silently paying full browser.new_page() cost
+# regardless of the cache. Request threads never touch Playwright
+# directly; they submit a job here and block on its own result queue.
+_render_job_queue = _queue.Queue()
+_render_worker_lock = threading.Lock()
+_render_worker_started = False
+
+def _render_worker_loop():
+    while True:
+        html, out_path, result_q = _render_job_queue.get()
+        try:
+            _render_html_to_pdf(html, out_path)
+            result_q.put((True, out_path))
+        except Exception as e:
+            result_q.put((False, e))
+
+def _ensure_render_worker():
+    global _render_worker_started
+    if _render_worker_started:
+        return
+    with _render_worker_lock:
+        if not _render_worker_started:
+            threading.Thread(target=_render_worker_loop, daemon=True, name="html-render-worker").start()
+            _render_worker_started = True
+
 def render_pdf(template_name, context, out_path):
     """Render a templates_html/<template_name> Jinja2 template with context,
     then print it to PDF via headless Chromium. Logo, doc-page.js, and every
@@ -385,7 +449,14 @@ def render_pdf(template_name, context, out_path):
     regardless of which fonts the specific template actually references
     (an unused @font-face costs nothing; browsers only fetch a font when
     something on the page actually uses it, and here there's no fetch at
-    all since it's already inlined)."""
+    all since it's already inlined).
+
+    The Jinja2 render itself happens right here, on the CALLING (Flask
+    request) thread — cheap, thread-safe, no reason to hop threads for it.
+    Only the actual browser work is handed off to the dedicated worker
+    thread (see _ensure_render_worker()/_render_worker_loop() above);
+    this call blocks until that finishes, so callers see it as a normal
+    synchronous function either way."""
     context = dict(context)
     context.setdefault("logo_src", _logo_data_uri())
     context.setdefault("doc_page_js", _doc_page_js_data_uri())
@@ -398,9 +469,19 @@ def render_pdf(template_name, context, out_path):
     context.setdefault("gothambook_src", _font_data_uri("gotham-book.woff2"))
     context.setdefault("gothambold_src", _font_data_uri("gotham-bold.woff2"))
     html = _jinja_env.get_template(template_name).render(**context)
+    _ensure_render_worker()
+    result_q = _queue.Queue()
+    _render_job_queue.put((html, out_path, result_q))
+    ok, payload = result_q.get()
+    if not ok:
+        raise payload
+    return payload
 
-    browser = _get_browser()
-    page = browser.new_page()
+def _render_html_to_pdf(html, out_path):
+    """The actual Chromium work — ONLY ever called from the dedicated
+    worker thread (_render_worker_loop above), never directly. See
+    render_pdf()'s own docstring for why this split exists."""
+    page = _get_page()
     try:
         # emulate_media("print") — page.pdf() itself always switches to print
         # CSS internally right before it rasterizes, but everything else
@@ -423,7 +504,7 @@ def render_pdf(template_name, context, out_path):
         # print divergence already called out below for `ch`-based grid
         # metrics, just hitting a JS measurement instead of a pure-CSS one.
         page.emulate_media(media="print")
-        page.set_content(html, wait_until="networkidle")
+        page.set_content(html, wait_until="load")
         # Viewport-vs-print-page-width mismatch — a second, distinct
         # divergence from the screen-vs-print MEDIA one already handled
         # above (that one's about which CSS rules apply; this one's about
@@ -473,23 +554,27 @@ def render_pdf(template_name, context, out_path):
             }""")
             if page_px and page_px.get("w") and page_px.get("h"):
                 page.set_viewport_size({"width": page_px["w"], "height": page_px["h"]})
-                page.set_content(html, wait_until="networkidle")
-        # "networkidle" only means no network requests are in flight — the
-        # self-hosted @font-face fonts are inlined as data: URIs
-        # specifically so they need no network fetch at all (see
-        # _font_data_uri's own docstring), so they never register as
-        # "network activity" in the first place, and Chromium's own font
-        # parsing/shaping happens on a separate async timeline networkidle
-        # says nothing about. Anything whose LAYOUT depends on real
-        # character metrics — `ch`-based grid tracks in particular, see
-        # the Ordering Table's col_template — can get computed against
-        # fallback-font metrics if page.pdf() fires first, which resolves
-        # `ch` slightly differently than the real webfont: confirmed
-        # directly, screen-mode layout (after fonts had visibly settled)
-        # and print-mode layout of the exact same HTML disagreed on
-        # column widths widely enough to push a table's last two columns
-        # fully off the page in print while screen showed all of them
-        # comfortably fitting. document.fonts.ready is the real signal.
+                page.set_content(html, wait_until="load")
+        # Was wait_until="networkidle" on both set_content() calls above —
+        # measured directly (chasing a real "the preview feels slow"
+        # report) at costing ~500ms per call for zero actual benefit: every
+        # resource this app's templates use (logo, doc-page.js, every
+        # @font-face, even user-picked photos — see _font_data_uri's own
+        # docstring and render_pdf's own docstring) is inlined as a data:
+        # URI specifically so there's no real network fetch to ever wait
+        # for, which is exactly why networkidle's mandatory "500ms of no
+        # network activity" quiet-window was pure dead time here rather
+        # than protecting against anything. "load" only waits for the
+        # page's own load event — real font-shaping/layout completion
+        # still gets its own explicit, correct wait right below
+        # (document.fonts.ready), which is the actual signal that matters
+        # for `ch`-based grid metrics (see that comment, unchanged) — this
+        # was never networkidle's job to begin with, confirmed directly:
+        # screen-mode layout (after fonts had visibly settled) and print-
+        # mode layout of the exact same HTML disagreed on column widths
+        # widely enough to push a table's last two columns fully off the
+        # page in print while screen showed all of them comfortably
+        # fitting, well before this switch away from networkidle existed.
         page.evaluate("document.fonts.ready")
         # window.__panReady: sololuce_datasheet.html's own photo-pan-fix
         # <script> (see its comment there) — re-measures every pannable
@@ -513,8 +598,20 @@ def render_pdf(template_name, context, out_path):
         # this app generates was really coming out as Letter (612x792pt)
         # regardless of what the template said.
         page.pdf(path=out_path, print_background=True, prefer_css_page_size=True)
-    finally:
-        page.close()
+    except Exception:
+        # Discard the page rather than reuse it after a failed render —
+        # _get_page() normally keeps one tab alive across every call (see
+        # its own docstring for why), but a page that broke mid-render is
+        # a bad bet to hand back out on the next call. Closing it here
+        # just means the next _get_page() call opens a fresh one instead
+        # of reusing a possibly-wedged tab; the happy path below never
+        # pays this cost.
+        try:
+            page.close()
+        except Exception:
+            pass
+        _tls.page = None
+        raise
     return out_path
 
 def render_quotation_pdf(data, out_path, brand=None):
