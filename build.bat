@@ -46,6 +46,7 @@ pyinstaller --name OfficeTool --noconfirm --clean --windowed ^
   --add-data "VERSION;." ^
   --add-data "r2_readonly.json;." ^
   --add-data "bundled_browser;bundled_browser" ^
+  --add-data "branding;branding" ^
   --collect-all playwright ^
   app.py
 echo.

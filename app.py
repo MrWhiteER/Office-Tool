@@ -49,7 +49,7 @@ app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 # login screen has something to render into), static assets, login itself,
 # and update-checking (harmless to expose, and the update banner should
 # still work pre-login).
-_PUBLIC_PATHS = {"/", "/api/login", "/api/current-user", "/api/check-update"}
+_PUBLIC_PATHS = {"/", "/api/login", "/api/current-user", "/api/check-update", "/api/apply-update", "/api/apply-update-progress", "/api/get-brand-theme"}
 # Tool-block enforcement: which URL prefixes are hard-blocked server-side
 # for each blockable view (see accounts.py's BLOCKABLE_TOOLS). This list is
 # deliberately narrow — audited call-site by call-site — because this
@@ -1006,6 +1006,74 @@ def set_settings():
     save_cfg(cfg)
     _maybe_migrate_clients_to_file(brand, old_clients_file, bucket.get("clients_file", ""))
     return jsonify(bucket)
+
+# ---------------------------------------------------------------- Branding (Settings > Appearance)
+# Deliberately separate from the light/dark THEME (which lives entirely
+# client-side in localStorage, see toggleTheme()) — this is a whole-app
+# preference (one PC, not one browser profile) because half of what it
+# controls, the Desktop/Start Menu shortcut icon, is a real Windows
+# file-system change that only the backend can make. The other half
+# (which login/launch banner shows) is purely a CSS variable swap client-
+# side (see data-brand-theme in the page's own <style>).
+@app.get("/api/get-brand-theme")
+def api_get_brand_theme():
+    cfg = load_cfg()
+    return jsonify({"theme": cfg.get("brand_theme", "dark")})
+
+@app.post("/api/set-brand-theme")
+def api_set_brand_theme():
+    data = request.json or {}
+    theme = (data.get("theme") or "").strip()
+    if theme not in ("dark", "light"):
+        return jsonify({"ok": False, "error": "Invalid theme."}), 400
+    cfg = load_cfg()
+    cfg["brand_theme"] = theme
+    save_cfg(cfg)
+    return jsonify({"ok": True, "shortcut_updated": _update_shortcut_icons(theme)})
+
+def _update_shortcut_icons(theme):
+    """Best-effort: point the Desktop/Start Menu shortcuts' own icon at
+    the matching bundled branding/icon-<theme>.ico, via a real Windows
+    Shell COM call (win32com — same pywin32 dependency scanner.py
+    already uses for WIA). Deliberately NOT the .exe's own embedded
+    icon — that's baked into the binary at build time (see build.bat's
+    --icon flag) and can't change at runtime; a shortcut's own
+    IconLocation is a separate, independent override Explorer respects
+    regardless of what icon the target .exe itself carries. Only ever
+    touches a shortcut that already exists — the desktop one is opt-in
+    at install time, so it may genuinely not be there, and that's not
+    an error, just nothing to update. A real icon-cache refresh
+    sometimes lags a moment behind (a known, general Windows Explorer
+    behavior, not something this call can force) — the caller's own
+    toast/status text sets that expectation rather than promising an
+    instant visual change."""
+    ico_path = os.path.join(engine.BASE, "branding", f"icon-{theme}.ico")
+    if not os.path.isfile(ico_path):
+        return False
+    candidates = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(os.path.join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Office Tool", "Office Tool.lnk"))
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile:
+        candidates.append(os.path.join(userprofile, "Desktop", "Office Tool.lnk"))
+    updated_any = False
+    try:
+        import win32com.client
+        shell = win32com.client.Dispatch("WScript.Shell")
+        for path in candidates:
+            if not os.path.isfile(path):
+                continue
+            try:
+                shortcut = shell.CreateShortcut(path)
+                shortcut.IconLocation = ico_path + ",0"
+                shortcut.save()
+                updated_any = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return updated_any
 
 @app.get("/api/brands")
 def api_brands():
@@ -4002,7 +4070,16 @@ def home():
 PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Office Tool</title>
-<script>(function(){try{var t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})()</script>
+<script>(function(){try{
+  var t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);
+  // Branding (data-brand-theme) is a SEPARATE preference from the UI
+  // theme above — see setBrandTheme()'s own comment. The server (not
+  // localStorage) is the real source of truth for it, since it also
+  // drives a real Windows shortcut-icon change on this PC; this cached
+  // copy just avoids a flash of the wrong banner before that async
+  // fetch (loadBrandTheme(), called at boot) resolves.
+  var bt=localStorage.getItem('brandTheme');if(bt==='light'||bt==='dark')document.documentElement.setAttribute('data-brand-theme',bt);
+}catch(e){}})()</script>
 <style>
 :root{
   --ink:#1a1d24;--amber:#e2952c;--amber2:#c97d16;--line:#e4e1da;--muted:#74716a;--canvas:#f5f4f0;--tint:#fbf2e3;
@@ -4580,7 +4657,19 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 @keyframes updatePulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:.7}}
 .fmupdatever{font-size:12px;color:var(--muted);padding:0 12px 6px}
 .fmupdatenotes{font-size:12px;color:var(--ink);padding:0 12px 10px;max-height:140px;overflow-y:auto;white-space:pre-wrap;line-height:1.4}
-.loginoverlay{position:fixed;inset:0;z-index:500;display:flex;align-items:center;justify-content:center;background:var(--brand-dark);background-image:radial-gradient(circle at 30% 20%,rgba(226,149,44,.14),transparent 55%)}
+/* Same launch-banner artwork as the splash screen (--splash-banner, see
+   its own definition further down), but glossy/blurred behind the login
+   card instead of shown crisp full-screen. The blur/tint/sheen all live
+   on ::before/::after — NOT on .loginoverlay itself — because CSS
+   filter() applies to an element's children too, and the login FORM on
+   top needs to stay perfectly sharp. ::before is oversized (inset:-40px)
+   and scaled up slightly so the blur's own soft edge never peeks in from
+   the container's real edge. */
+.loginoverlay{position:fixed;inset:0;z-index:500;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--canvas)}
+.loginoverlay::before{content:"";position:absolute;inset:-40px;background-image:var(--splash-banner);background-size:cover;background-position:center;filter:blur(13px) saturate(1.25) brightness(.75);transform:scale(1.08)}
+.loginoverlay::after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 30% 20%,rgba(226,149,44,.16),transparent 55%),rgba(10,10,12,.38)}
+:root[data-brand-theme="light"] .loginoverlay::after{background:radial-gradient(circle at 30% 20%,rgba(226,149,44,.12),transparent 55%),rgba(255,255,255,.42)}
+.loginbox{position:relative;z-index:1}
 .loginoverlay.hide{display:none}
 /* Launch splash — shown first, above even #loginoverlay (z-index 500),
    until checkLogin() resolves (see bootApp()/checkLogin() near the end of
@@ -4610,9 +4699,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    box a real `background-size:contain` fit would occupy, so percentage
    positioning of children lands exactly where it visually should. */
 #splash-frame{position:relative;width:min(100vw,100vh * 16 / 9);height:min(100vh,100vw * 9 / 16);background-image:var(--splash-banner);background-size:contain;background-repeat:no-repeat;background-position:center}
-:root{--splash-banner:url(/static/splash/launch-dark.png)}
-:root[data-theme="light"]{--splash-banner:url(/static/splash/launch-light.png)}
-@media(prefers-color-scheme:light){:root:not([data-theme="dark"]){--splash-banner:url(/static/splash/launch-light.png)}}
+/* Branding (this banner, the login logo, the app's own shortcut icon) is
+   driven by data-brand-theme, a SEPARATE attribute from data-theme (the
+   rail's light/dark UI-colors toggle) — set via the Appearance tab in
+   Settings (see setBrandTheme()/loadBrandTheme()), not the theme
+   switcher. Dark is the default (bare :root) since that's this app's
+   own established default elsewhere. */
+:root{--splash-banner:url(/static/splash/launch-dark.png);--login-logo:url(/static/splash/logo-horizontal-dark.png)}
+:root[data-brand-theme="light"]{--splash-banner:url(/static/splash/launch-light.png);--login-logo:url(/static/splash/logo-horizontal-light.png)}
 /* Positioned relative to the two small crosshair marks in the artwork
    itself (measured directly off the actual shipped dark-theme PNG's
    pixels: x=530/1129 of 1672, y=~801 of 941 -> ~31.7%/67.5% and
@@ -4620,11 +4714,34 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    this bar is the app's own animated element drawn on top of the
    artwork, not a crop of it. */
 .splash-loadbar-track{position:absolute;left:33.7%;width:31.8%;top:85.1%;height:3px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden}
-:root[data-theme="light"] .splash-loadbar-track{background:rgba(0,0,0,.1)}
+:root[data-brand-theme="light"] .splash-loadbar-track{background:rgba(0,0,0,.1)}
 .splash-loadbar-fill{height:100%;width:0%;border-radius:2px;background:linear-gradient(90deg,var(--amber),var(--amber2));box-shadow:0 0 10px rgba(226,149,44,.7);transition:width .3s ease}
-.loginbox{width:320px;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-xl);padding:28px 26px;animation:brandOpen .25s cubic-bezier(.24,.9,.32,1.24)}
-.loginbox h1{margin:0 0 2px;font-size:19px;color:var(--ink)}
-.loginbulb{width:36px;height:36px;border-radius:50%;margin:0 auto 14px;background:radial-gradient(circle at 38% 32%,#ffe6b3,var(--amber) 58%,var(--amber2));box-shadow:0 0 16px rgba(226,149,44,.55)}
+.loginbox{width:360px;background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-xl);padding:28px 26px;animation:brandOpen .25s cubic-bezier(.24,.9,.32,1.24)}
+/* A div with background-image (not an <img src>), specifically so it can
+   swap via the same --login-logo CSS variable the theme toggle already
+   drives for --splash-banner — an <img>'s src attribute can't reference
+   a CSS custom property. aspect-ratio matches the real source file
+   (2089x753) so the box never needs a fixed pixel height. */
+.loginlogo{width:100%;aspect-ratio:2089/753;background-image:var(--login-logo);background-size:contain;background-repeat:no-repeat;background-position:center;border-radius:var(--r-sm);margin:0 0 18px}
+.login-update-chip{display:flex;align-items:center;justify-content:center;gap:7px;margin:0 0 16px;padding:8px 12px;border-radius:10px;background:rgba(226,149,44,.14);border:1px solid rgba(226,149,44,.4);color:var(--amber2);font-size:12.5px;font-weight:600;cursor:pointer;transition:background .15s ease}
+.login-update-chip:hover{background:rgba(226,149,44,.24)}
+.login-update-chip.hide{display:none}
+/* Below the card, near the bottom of the login window — a compact glass
+   card (same treatment as .loginbox itself, so it reads as part of the
+   same UI rather than a bolted-on overlay) holding a big Steam-style
+   progress bar: a real percentage fill with a soft glow and a subtle
+   sheen sweeping across it while active. */
+/* Fixed to the bottom of the login WINDOW itself (.loginoverlay is
+   position:fixed;inset:0, i.e. the whole viewport), not flowing next to
+   .loginbox — .loginoverlay is a flex ROW container, so a plain sibling
+   here would sit beside the card instead of below it. */
+.login-update-progress{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:1;width:360px;max-width:88vw;padding:14px 18px;border-radius:var(--r-lg);background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--line);box-shadow:var(--shadow-lg)}
+.login-update-progress.hide{display:none}
+.login-update-progress-track{height:11px;border-radius:6px;background:rgba(120,120,120,.28);overflow:hidden}
+.login-update-progress-fill{position:relative;height:100%;width:0%;border-radius:6px;overflow:hidden;background:linear-gradient(90deg,var(--amber),var(--amber2));box-shadow:0 0 14px rgba(226,149,44,.6);transition:width .25s ease}
+.login-update-progress-fill::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.4) 50%,transparent 70%);background-size:200% 100%;animation:loginUpdateSheen 1.6s linear infinite}
+@keyframes loginUpdateSheen{from{background-position:200% 0}to{background-position:-200% 0}}
+.login-update-progress-text{margin-top:9px;text-align:center;font-size:12.5px;color:var(--ink);font-weight:600}
 .usercard{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:11px;border:1px solid var(--line);margin-bottom:6px}
 .usercard b{font-size:13px;flex:1}
 .userbadge{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--tint);color:var(--muted)}
@@ -4656,8 +4773,18 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
      nothing real can happen while this is up. -->
 <div class=loginoverlay id=loginoverlay>
   <form class=loginbox onsubmit="return doLogin(event)">
-    <div class=loginbulb></div>
-    <h1>Office Tool</h1>
+    <div class=loginlogo role=img aria-label="Office Tool by Artemis Group"></div>
+    <!-- Update available while signed out — checkForAppUpdate() (called
+         unconditionally at the bottom of the page script, not gated
+         behind login) toggles this; /api/check-update and
+         /api/apply-update(-progress) are all public specifically so
+         this works before anyone's signed in. Same double-click-to-
+         confirm pattern as installUpdate() elsewhere — see
+         loginInstallUpdate() below. -->
+    <div id=login-update-chip class="login-update-chip hide" onclick="loginInstallUpdate(this)">
+      <span style="position:relative;display:inline-flex"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round style="width:15px;height:15px"><path d="M21 12a9 9 0 1 1-3.02-6.74"/><path d="M21 3v6h-6"/></svg><span class=updatedot></span></span>
+      <span id=login-update-chip-text>Update available</span>
+    </div>
     <p class=muted style="margin:0 0 18px;font-size:13px">Sign in to continue</p>
     <div class=f><label>Username</label><input id=login-username autocomplete=username autofocus></div>
     <div class=f><label>Password</label><input id=login-password type=password autocomplete=current-password></div>
@@ -4665,6 +4792,13 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <p id=login-error class="muted hide" style="color:#e0464f;font-size:12.5px;margin:2px 0 10px"></p>
     <button class="btn dark" style="width:100%" type=submit id=login-submit>Sign In</button>
   </form>
+  <!-- Steam-style download/install progress — sits below the card,
+       anchored near the bottom of the login window, hidden until
+       loginInstallUpdate() actually starts a download. -->
+  <div id=login-update-progress class="login-update-progress hide">
+    <div class=login-update-progress-track><div id=login-update-progress-fill class=login-update-progress-fill></div></div>
+    <div id=login-update-progress-text class=login-update-progress-text>Starting…</div>
+  </div>
 </div>
 <div class=app>
  <div class=watermark id=watermark></div>
@@ -5431,6 +5565,20 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <h2 style="margin:0;font-size:16px">Settings — <span id=set-brandname>Artemis Lightings</span></h2>
     </div>
     <p class=muted style="font-size:12px;margin-top:-10px;margin-bottom:16px">Each company has its own folders — switch brands from the top-left to edit a different one's settings.</p>
+    <!-- Top tabs — one per category, so switching between them doesn't
+         mean scrolling past everything else (this page used to be one
+         long stack of cards). Save Settings stays OUTSIDE the tab
+         switching (always rendered, just hidden on tabs that have
+         nothing to save) since saveSettings() reads every set-* field
+         by id regardless of which tab is currently visible — a hidden
+         input's .value is still real and still gets sent. -->
+    <div class=seg id=settings-tabs style="margin-bottom:16px">
+      <button type=button class=on data-tab=folders onclick="showSettingsTab('folders')">Folders</button>
+      <button type=button data-tab=clients onclick="showSettingsTab('clients')">Clients</button>
+      <button type=button data-tab=lists onclick="showSettingsTab('lists')">Lists</button>
+      <button type=button data-tab=appearance onclick="showSettingsTab('appearance')">Appearance</button>
+    </div>
+    <div class=settings-tab-panel id=settings-tab-folders>
     <div class=card><div class=ch>Document folders</div><div class=cb>
       <div class=f><label>Tax Invoices (INV)</label><div class=setrow><input id=set-inv_folder placeholder="e.g. F:\Documents\Invoices"><button class=btn onclick="browseSetting('inv_folder')">Choose…</button></div></div>
       <div class=f><label>Delivery Orders (DO)</label><div class=setrow><input id=set-do_folder placeholder="e.g. F:\Documents\Delivery Orders"><button class=btn onclick="browseSetting('do_folder')">Choose…</button></div></div>
@@ -5468,12 +5616,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <div class=f><label>Templates folder (optional)</label><div class=setrow><input id=set-templates_folder placeholder="Leave blank to use the templates built into the app"><button class=btn onclick="browseSetting('templates_folder')">Choose…</button></div></div>
       <p class=muted style="font-size:11.5px;margin:0">Expects &lt;folder&gt;\&lt;BRAND&gt;\INV.xlsx / DO.xlsx per brand, same layout as the app's bundled templates.</p>
     </div></div>
+    </div>
+    <div class="settings-tab-panel hide" id=settings-tab-clients>
     <div class=card><div class=ch>Company Profiles</div><div class=cb>
       <div class=f><label>Clients spreadsheet</label><div class=setrow><input id=set-clients_file placeholder="e.g. F:\Documents\Clients.xlsx"><button class=btn onclick="browseSetting('clients_file')">Choose…</button></div></div>
       <p class=muted style="font-size:11.5px;margin:0 0 11px">Your client list lives in this one file, like every other document folder here — point it at an existing spreadsheet to use that, or a new filename to start fresh. Leave blank to keep using the app's built-in storage.</p>
       <button class=btn style="width:100%" onclick="exportAllClients()">Export All Client Profiles (Excel)</button>
     </div></div>
-    <button class="btn dark" style="width:100%" onclick=saveSettings()>Save Settings</button>
+    </div>
+    <button class="btn dark" style="width:100%" id=settings-save-btn onclick=saveSettings()>Save Settings</button>
+    <div class="settings-tab-panel hide" id=settings-tab-lists>
     <div class=card style="margin-top:14px"><div class=ch>Manage Lists</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0 0 4px">Every dropdown across the app that remembers what you type lives here. Removing an item won't change documents already generated with it.</p>
       <div id=managelists-body></div>
@@ -5482,6 +5634,19 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <p class=muted style="font-size:11.5px;margin:0 0 4px">Every preset added or removed anywhere in the app, most recent first.</p>
       <div id=auditlog-body style="max-height:320px;overflow:auto"></div>
     </div></div>
+    </div>
+    <div class="settings-tab-panel hide" id=settings-tab-appearance>
+    <div class=card><div class=ch>Appearance</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 10px">Purely visual — separate from the light/dark theme toggle in the rail, which changes the whole app's colors. This only picks which version of the Office Tool branding (login screen, launch screen, and the app's own shortcut icon) is shown.</p>
+      <div class=f><label>Branding</label>
+        <div class=seg id=set-brand-theme-seg>
+          <button type=button data-bt=dark onclick="setBrandTheme('dark')">Dark</button>
+          <button type=button data-bt=light onclick="setBrandTheme('light')">Light</button>
+        </div>
+      </div>
+      <p id=set-brand-theme-status class=muted style="font-size:11.5px;margin:8px 0 0"></p>
+    </div></div>
+    </div>
    </div>
    <!-- The Admin sub-page — hidden until showSettingsAdminPanel() runs
         (from the entry card above), only ever reachable at all when
@@ -6036,6 +6201,13 @@ async function checkForAppUpdate(manual){
     UPDATE_INFO=r;
     $('n-update').classList.toggle('hide',!r.available);
     renderUpdateCenter();
+    // Login-page chip — visible regardless of whether anyone's signed in
+    // yet (see checkForAppUpdate()'s own call at the bottom of the page
+    // script). Only touches its own elements, never LOGGED_IN state.
+    const chip=$('login-update-chip');
+    if(chip){
+      chip.classList.toggle('hide',!r.available);
+      if(r.available)$('login-update-chip-text').textContent='Update to v'+r.latest+' available'}
     if(r.available&&UPDATE_PREFS.auto_update&&!manual){
       toast('Installing update automatically…');
       const fakeBtn=document.createElement('button');fakeBtn.dataset.confirm='1';
@@ -6130,6 +6302,56 @@ async function actuallyInstallUpdate(btn){
       clearInterval(poll);bar.remove();btn.disabled=false;btn.textContent='Install & Restart';
       toast('Update failed: '+(p.error||'unknown error'))}
   },400)}
+
+// The login-page half of the update flow — same double-click-to-confirm
+// pattern as installUpdate(), same /api/apply-update(-progress) backend,
+// but its own Steam-style progress card (see #login-update-progress'
+// own CSS) instead of a bar inserted next to whatever button was
+// clicked, since the login page has no rail/modal button to anchor to.
+function loginInstallUpdate(chip){
+  if(chip.dataset.confirm!=='1'){
+    chip.dataset.confirm='1';
+    $('login-update-chip-text').textContent='Click again to install & restart';
+    chip._confirmTimer=setTimeout(()=>{
+      if(chip.dataset.confirm==='1'){
+        chip.dataset.confirm='';
+        $('login-update-chip-text').textContent='Update to v'+(UPDATE_INFO?UPDATE_INFO.latest:'')+' available';
+        toast('Confirmation timed out — click again to install')}
+    },8000);
+    return}
+  clearTimeout(chip._confirmTimer);
+  chip.dataset.confirm='';
+  actuallyInstallLoginUpdate(chip)}
+async function actuallyInstallLoginUpdate(chip){
+  chip.onclick=null;chip.style.cursor='default';
+  $('login-update-chip-text').textContent='Starting…';
+  const box=$('login-update-progress'),fill=$('login-update-progress-fill'),text=$('login-update-progress-text');
+  box.classList.remove('hide');fill.style.width='0%';text.textContent='Starting…';
+  try{
+    const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({download_url:UPDATE_INFO.download_url})}).then(r=>r.json());
+    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));box.classList.add('hide');resetLoginUpdateChip();return}
+  }catch(e){toast('Update failed: '+e.message);box.classList.add('hide');resetLoginUpdateChip();return}
+  chip.classList.add('hide');
+  const poll=setInterval(async()=>{
+    const p=await fetch('/api/apply-update-progress').then(r=>r.json()).catch(()=>null);
+    if(!p)return;
+    if(p.status==='downloading'){
+      const pct=p.total?Math.round(p.done/p.total*100):0;
+      fill.style.width=pct+'%';
+      text.textContent=p.total?(pct+'% — '+fmtMB(p.done)+' / '+fmtMB(p.total)):'Downloading…'
+    }else if(p.status==='launched'){
+      clearInterval(poll);fill.style.width='100%';
+      text.textContent='Installing — this app will close and reopen automatically (can take a few minutes)…'
+    }else if(p.status==='error'){
+      clearInterval(poll);box.classList.add('hide');
+      toast('Update failed: '+(p.error||'unknown error'));
+      resetLoginUpdateChip()}
+  },400)}
+function resetLoginUpdateChip(){
+  const chip=$('login-update-chip');
+  chip.onclick=()=>loginInstallUpdate(chip);chip.style.cursor='pointer';
+  $('login-update-chip-text').textContent='Update to v'+(UPDATE_INFO?UPDATE_INFO.latest:'')+' available'}
 
 // Reads the saved prefs before deciding whether to auto-check at all —
 // unlike openUpdateCenter() (which always checks, since the user just
@@ -6255,6 +6477,7 @@ function refreshCatSectionResize(id){
 const SETTINGS_FIELDS=['inv_folder','do_folder','qtn2_folder','pi_folder','rv_folder','cn_folder','scanned_do_folder','product_photos_folder','datasheets_folder','templates_folder','clients_file','catalogue_folder','expense_folder'];
 async function loadSettings(){
   showSettingsMainPanel();  // always land on the main panel, not wherever the admin sub-page was left
+  showSettingsTab('folders');  // ditto for the tabs — always start on the first one
   const r=await fetch('/api/settings').then(r=>r.json());
   SETTINGS_FIELDS.forEach(k=>{const el=$('set-'+k);if(el)el.value=r[k]||''});
   const b=BRAND_LIST.find(x=>x.code===BRAND)||{code:BRAND,label:BRAND};
@@ -6275,6 +6498,44 @@ function showSettingsAdminPanel(){
 function showSettingsMainPanel(){
   $('settings-admin-panel').classList.add('hide');
   $('settings-main-panel').classList.remove('hide')}
+const SETTINGS_TABS=['folders','clients','lists','appearance'];
+function showSettingsTab(name){
+  document.querySelectorAll('#settings-tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===name));
+  SETTINGS_TABS.forEach(t=>$('settings-tab-'+t).classList.toggle('hide',t!==name));
+  // Save Settings only does anything on the two tabs that actually hold
+  // set-* fields — showing it on Lists/Appearance (nothing there is a
+  // saveSettings() field) would just be a button that does nothing
+  // visible.
+  $('settings-save-btn').style.display=(name==='folders'||name==='clients')?'':'none'}
+// Branding (login/launch screen art + the app's own shortcut icon) is
+// deliberately separate from the rail's light/dark THEME toggle — someone
+// running the app in dark mode all day might still prefer the light
+// branding art, or vice versa, so this doesn't just piggyback on
+// data-theme. Persisted server-side (not localStorage) because the
+// shortcut-icon half of this is a real file-system change on THIS PC,
+// not just a per-browser-profile preference — see /api/set-brand-theme.
+async function setBrandTheme(theme){
+  const seg=$('set-brand-theme-seg');
+  seg.querySelectorAll('button').forEach(b=>b.disabled=true);
+  $('set-brand-theme-status').textContent='Applying…';
+  try{
+    const r=await fetch('/api/set-brand-theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}).then(r=>r.json());
+    if(!r.ok){$('set-brand-theme-status').textContent='Could not update: '+(r.error||'unknown error');seg.querySelectorAll('button').forEach(b=>b.disabled=false);return}
+    document.documentElement.setAttribute('data-brand-theme',theme);
+    try{localStorage.setItem('brandTheme',theme)}catch(e){}
+    seg.querySelectorAll('button').forEach(b=>{b.classList.toggle('on',b.dataset.bt===theme);b.disabled=false});
+    $('set-brand-theme-status').textContent=r.shortcut_updated
+      ?'Applied — the desktop/Start Menu shortcut icon updates next time Explorer refreshes it.'
+      :'Applied to the app itself; the desktop/Start Menu shortcut icon could not be updated (it may not exist yet, or this is a portable copy).';
+  }catch(e){$('set-brand-theme-status').textContent='Could not update: '+e.message;seg.querySelectorAll('button').forEach(b=>b.disabled=false)}}
+async function loadBrandTheme(){
+  try{
+    const r=await fetch('/api/get-brand-theme').then(r=>r.json());
+    const theme=r.theme||'dark';
+    document.documentElement.setAttribute('data-brand-theme',theme);
+    try{localStorage.setItem('brandTheme',theme)}catch(e){}
+    document.querySelectorAll('#set-brand-theme-seg button').forEach(b=>b.classList.toggle('on',b.dataset.bt===theme));
+  }catch(e){/* keep the CSS default (dark), or the cached localStorage value the inline <head> script already applied */}}
 async function browseSetting(field){
   const r=await fetch('/api/browse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field})}).then(r=>r.json());
   if(r.error){alert(r.error);return}
@@ -13812,6 +14073,17 @@ initResizer('resizer', renderPreviewPages);
 initResizer('fcresizer', fcRenderPreviewPages);
 window.addEventListener('resize',()=>{renderPreviewPages();fcRenderPreviewPages()});
 checkLogin();
+// Both /api/check-update and /api/apply-update(-progress) are public
+// (see _PUBLIC_PATHS) specifically so this can run before anyone's
+// signed in — see checkForAppUpdate()'s own login-chip handling and
+// loginInstallUpdate() below for the login-page half of the update
+// flow. Not gated behind UPDATE_PREFS.check_on_start (that preference
+// is about whether an already-signed-in session bothers you about
+// updates while you're working; the login screen only ever shows a
+// quiet chip, never auto-installs, so it's a fundamentally lower-
+// friction moment to always check).
+checkForAppUpdate();
+loadBrandTheme();
 </script></body></html>"""
 
 # Best-effort sync of accounts.json from R2 — see accounts.py's own
