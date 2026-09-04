@@ -14260,8 +14260,22 @@ if __name__ == "__main__":
         loading_path = os.path.join(engine.BASE, "static", "splash", "loading.html")
         loading_window = None
         if os.path.isfile(loading_path):
+            # 228 * 1.5 = 342 — per explicit request ("make the box 50%
+            # bigger"). x/y computed explicitly against the PRIMARY
+            # screen's own size rather than left to pywebview's own
+            # default placement, so "always in the middle of the screen"
+            # is guaranteed rather than assumed — matters most on a
+            # multi-monitor setup (webview.screens[0] is the primary).
+            _loading_size = 342
+            try:
+                _screen = webview.screens[0]
+                _loading_x = _screen.x + (_screen.width - _loading_size) // 2
+                _loading_y = _screen.y + (_screen.height - _loading_size) // 2
+            except Exception:
+                _loading_x = _loading_y = None
             loading_window = webview.create_window(
-                "", loading_path, width=228, height=228, resizable=False,
+                "", loading_path, width=_loading_size, height=_loading_size,
+                x=_loading_x, y=_loading_y, resizable=False,
                 frameless=True, easy_drag=True, on_top=True,
                 background_color="#14161a" if brand_theme != "light" else "#f5f4f0",
             )
