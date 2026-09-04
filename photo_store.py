@@ -93,17 +93,24 @@ def _readonly_cfg_block():
 _REQUIRED_KEYS = ("account_id", "access_key_id", "secret_access_key", "bucket")
 
 
-def _cfg_block(require_write=False):
+def _cfg_block(require_write=False, allow_bundled_write=False):
     """The admin's own local (write-capable) config always wins if fully
     filled in — including on the admin's OWN machine for read operations,
     so they're always working against their own real credentials rather
-    than a possibly-stale bundled fallback. require_write=True never
-    falls back to the bundled read-only key (which by definition can't
-    write anyway — R2 would just reject the call)."""
+    than a possibly-stale bundled fallback. require_write=True normally
+    never falls back to the bundled key — but allow_bundled_write=True
+    (document backups, see upload_document() below) deliberately opts
+    back in: per this module's own docstring, the bundled r2_readonly.json
+    holds the SAME value as the admin's write key today (there's only
+    ever one key, mirrored to both places), so this isn't opening a new
+    hole, it's a conscious choice to let every install use write access
+    that's already technically sitting in their own install folder,
+    specifically for the one feature (document backup) that needs every
+    install — not just the admin's — to be able to write."""
     admin = _admin_cfg_block()
     if all(admin.get(k) for k in _REQUIRED_KEYS):
         return admin
-    if require_write:
+    if require_write and not allow_bundled_write:
         return {}
     return _readonly_cfg_block()
 
@@ -169,9 +176,9 @@ def save_readonly_config(account_id, access_key_id, secret_access_key, bucket):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def _client(require_write=False):
+def _client(require_write=False, allow_bundled_write=False):
     import boto3
-    c = _cfg_block(require_write=require_write)
+    c = _cfg_block(require_write=require_write, allow_bundled_write=allow_bundled_write)
     if not all(c.get(k) for k in _REQUIRED_KEYS):
         raise RuntimeError(
             "No write-capable R2 key is set up (Admin Tools)." if require_write
@@ -187,8 +194,8 @@ def _client(require_write=False):
     )
 
 
-def _bucket(require_write=False):
-    return _cfg_block(require_write=require_write)["bucket"]
+def _bucket(require_write=False, allow_bundled_write=False):
+    return _cfg_block(require_write=require_write, allow_bundled_write=allow_bundled_write)["bucket"]
 
 
 def get_usage():
@@ -298,6 +305,53 @@ def upload_photo(local_path, filename, running_usage=None):
 def delete_photo(filename):
     client = _client(require_write=True)
     client.delete_object(Bucket=_bucket(require_write=True), Key=filename)
+
+
+# Generated documents (Quotations, Tax Invoices, Delivery Orders, Sololuce
+# Datasheets, Expense Reports) live under this prefix — separate from both
+# the photo keys (SYSTEM_PREFIX is excluded above) and the accounts.json
+# system data (SYSTEM_PREFIX), so none of the existing photo-library
+# listings/usage/gallery code picks these up by accident. Unlike photos
+# (admin-curated, uploaded deliberately through Admin Tools) every install
+# writes here automatically right after generating a document — see
+# upload_document()'s own docstring for why that needs allow_bundled_write.
+DOCUMENTS_PREFIX = "documents/"
+
+
+def upload_document(local_path, key_suffix):
+    """
+    Best-effort cloud backup of ONE generated document (called from
+    app.py's /api/generate on a background thread right after the local
+    save succeeds — see that call site's own comment for why it's
+    fire-and-forget). key_suffix is the caller-built logical path under
+    DOCUMENTS_PREFIX, e.g. "SOLOLUCE/CAT/AURA-ECO-Rev0.pdf" — a clean,
+    brand/doctype/filename key, NOT the user's real local folder path
+    (which is an arbitrary, potentially identifying Windows path chosen
+    in Settings and different on every install).
+
+    Uses allow_bundled_write=True: this is the one write path every
+    install needs, not just the admin's, so it deliberately falls back to
+    the bundled r2_readonly.json key when there's no local admin config —
+    see _cfg_block()'s own comment for why that's a conscious choice, not
+    an accidental hole (the bundled key already holds the same value as
+    the admin's write key). Never raises — the caller doesn't want a
+    document's local save to look like it failed just because this
+    machine is offline or R2 is briefly down; it just tries again next
+    time that same document is generated.
+    """
+    try:
+        client = _client(require_write=True, allow_bundled_write=True)
+        bucket = _bucket(require_write=True, allow_bundled_write=True)
+    except Exception:
+        return False
+    key = DOCUMENTS_PREFIX + key_suffix.replace(os.sep, "/")
+    content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
+    try:
+        with open(local_path, "rb") as f:
+            client.put_object(Bucket=bucket, Key=key, Body=f, ContentType=content_type)
+        return True
+    except Exception:
+        return False
 
 
 def sync_down(local_folder, on_progress=None):

@@ -3413,6 +3413,26 @@ def api_generate():
                     entries = [e for e in load_ledger(brand) if e["rel"] != old_rel]
                     save_ledger(brand, entries)
         rel = os.path.relpath(res.get("pdf", res.get("xlsx")), folder)
+
+        # Cloud backup — every generated document (Quotation/Invoice/DO/
+        # Datasheet/Expense Report) gets a copy pushed to the shared R2
+        # bucket right after its local save succeeds, per explicit
+        # request: "Datasheets, Invoice, Quotation, DO... should be
+        # uploaded and saved to Cloudflare after their generation." Runs
+        # on a background thread — Generate must stay exactly as fast as
+        # before, and a slow/offline connection must never make document
+        # generation itself look like it failed. Key is a clean logical
+        # path (brand/doctype/filename), not the user's real local
+        # folder (see upload_document()'s own docstring on why).
+        _doc_pdf = res.get("pdf")
+        _doc_xlsx = res.get("xlsx")
+        def _backup_to_cloud(pdf_path=_doc_pdf, xlsx_path=_doc_xlsx, brand=gen_brand, doctype=dtype):
+            if pdf_path and os.path.isfile(pdf_path):
+                photo_store.upload_document(pdf_path, f"{brand}/{doctype}/{os.path.basename(pdf_path)}")
+            if xlsx_path and os.path.isfile(xlsx_path):
+                photo_store.upload_document(xlsx_path, f"{brand}/{doctype}/{os.path.basename(xlsx_path)}")
+        threading.Thread(target=_backup_to_cloud, daemon=True).start()
+
         return jsonify({"ok": True, "xlsx": os.path.basename(res.get("xlsx", "")),
                         "pdf": os.path.basename(res.get("pdf", "")),
                         "preview_url": "/preview?f=" + rel})
