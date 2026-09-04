@@ -14221,50 +14221,111 @@ if __name__ == "__main__":
             app.run(port=port, debug=False, use_reloader=False)
         threading.Thread(target=_run_server, daemon=True).start()
 
-        # Point the window at a tiny local loading page FIRST instead of
-        # straight at `url` — Flask's dev server needs a moment to start
-        # listening (and WebView2 itself needs a moment to spin up), so
-        # aiming directly at `url` left a blank/white window for that whole
-        # gap, before the real page's own #splashscreen ever got a chance
-        # to paint. static/splash/loading.html is a small, self-contained
-        # local file (no server dependency, so it shows instantly): a
-        # small SQUARE crop of the same banner already used for the
-        # splash/login background (background-size:cover on a small box
-        # does the crop on its own — no separate asset needed). Its own
-        # script polls `url` and navigates this same window over the
-        # moment Flask answers, which is when the real page's own full
-        # splash screen (with the actual percentage load bar) takes over
-        # while the SPA's JS finishes booting.
+        # Show a tiny, borderless, EXACTLY-square loading window FIRST
+        # instead of the real 1400x900 app window — per explicit feedback
+        # on the first version of this (which opened the full-size window
+        # immediately, with the small loading square just floating in a
+        # sea of empty black window/title-bar around it): "the red box
+        # [the whole 1400x900 window+titlebar] means I don't want that
+        # window, the green box [just the square] means I want only that
+        # to be visible for app loading screen". So this is now genuinely
+        # its OWN small frameless window (no title bar, no resize
+        # borders, sized to match the square) — not the main window
+        # showing a small thing inside it. static/splash/loading.html is
+        # a small, self-contained local file (no server dependency, so it
+        # shows instantly): a small SQUARE crop of the same banner
+        # already used for the splash/login background (background-
+        # size:cover does the crop on its own — no separate asset
+        # needed).
+        #
+        # The real 1400x900 app window is created too, right away, but
+        # hidden=True — and pointed at `url` immediately so WebView2
+        # starts warming it up in the background while the loading
+        # square is showing, rather than only starting that work once the
+        # square disappears. A background thread here (not loading.html's
+        # own JS — simpler, and sidesteps entirely the file:// URI+fetch
+        # class of bug that caused a real ERR_FILE_NOT_FOUND on the
+        # previous version of this, see loading.html's own comment)
+        # polls `url` directly with urllib; the instant Flask answers, it
+        # forces one fresh load_url(url) (guaranteed to succeed now,
+        # unlike whatever the hidden window's very first attempt did if
+        # Flask wasn't listening yet at create_window() time), waits for
+        # that to actually finish loading, THEN destroys the loading
+        # square and shows the real window — so the swap is instant and
+        # clean, never a flash of a half-loaded page.
         try:
             brand_theme = load_cfg().get("brand_theme", "dark")
         except Exception:
             brand_theme = "dark"
         loading_path = os.path.join(engine.BASE, "static", "splash", "loading.html")
-        start_target = loading_path if os.path.isfile(loading_path) else url
-        window = webview.create_window("Office Tool", start_target, width=1400, height=900, min_size=(1000, 650))
-        if start_target == loading_path:
-            # Hand theme/target to loading.html's own officeToolStart() via
-            # evaluate_js instead of a hand-built file:// URI + query
-            # string (the previous approach — a real user hit an
-            # ERR_FILE_NOT_FOUND on this exact window after updating, and
-            # that custom-URI-with-query-string was the only plausible
-            # source of a file:// nav failure in this whole flow; see
-            # loading.html's own updated comment for the full reasoning).
-            # create_window is handed the plain PATH above — pywebview
-            # builds the file:// URL itself internally, the same already-
-            # well-tested code path every pywebview app relies on — and
-            # evaluate_js is the exact same mechanism already proven
-            # working elsewhere in this app (the tray's Switch Theme/Scan
-            # Now actions), so nothing new or unproven is involved here.
-            def _start_loading_page():
+        loading_window = None
+        if os.path.isfile(loading_path):
+            loading_window = webview.create_window(
+                "", loading_path, width=228, height=228, resizable=False,
+                frameless=True, easy_drag=True, on_top=True,
+                background_color="#14161a" if brand_theme != "light" else "#f5f4f0",
+            )
+            def _set_loading_theme():
                 try:
-                    window.evaluate_js(
-                        "if(window.officeToolStart)officeToolStart(%s,%s);"
-                        % (json.dumps(brand_theme), json.dumps(url))
+                    loading_window.evaluate_js(
+                        "if(window.officeToolSetTheme)officeToolSetTheme(%s);" % json.dumps(brand_theme)
                     )
                 except Exception:
                     pass
-            window.events.loaded += _start_loading_page
+            loading_window.events.loaded += _set_loading_theme
+
+        window = webview.create_window("Office Tool", url, width=1400, height=900,
+                                        min_size=(1000, 650), hidden=bool(loading_window))
+
+        if loading_window:
+            # server_ready guards against a real race: `window` was handed
+            # `url` immediately at create_window() above, before Flask is
+            # necessarily listening yet, so that very first navigation
+            # attempt can itself fire a `loaded` event on whatever error
+            # page WebView2 shows for a refused connection — swapping to
+            # THAT would just trade one broken-looking window for another.
+            # Only a `loaded` that fires AFTER the poll below has
+            # confirmed Flask is actually answering (and forced its own
+            # fresh load_url) is trusted to mean the real app is showing.
+            _state = {"swapped": False, "server_ready": False}
+            def _swap_to_main_once():
+                if _state["swapped"]:
+                    return
+                _state["swapped"] = True
+                try:
+                    loading_window.destroy()
+                except Exception:
+                    pass
+                try:
+                    window.show()
+                except Exception:
+                    pass
+
+            def _on_main_loaded():
+                if _state["server_ready"]:
+                    _swap_to_main_once()
+            window.events.loaded += _on_main_loaded
+
+            def _wait_for_server_then_load():
+                import urllib.request
+                while True:
+                    try:
+                        urllib.request.urlopen(url, timeout=1)
+                        break
+                    except Exception:
+                        time.sleep(0.15)
+                _state["server_ready"] = True
+                try:
+                    window.load_url(url)  # fresh load — Flask is confirmed up now
+                except Exception:
+                    pass
+                # Safety net: if `loaded` never fires for some reason (a
+                # busy/slow first render), don't leave the user stuck
+                # staring at the loading square forever — swap over after
+                # a generous timeout regardless.
+                time.sleep(15)
+                _swap_to_main_once()
+            threading.Thread(target=_wait_for_server_then_load, daemon=True).start()
 
         # ---- System tray -----------------------------------------------
         # The X button now MINIMIZES to the system tray instead of quitting
