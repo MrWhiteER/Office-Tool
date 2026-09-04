@@ -1,57 +1,69 @@
 # Office Tool
 
-A small program that runs on **your own PC**. It builds your Quotations, Tax
-Invoices and Delivery Orders straight from the company Excel templates, saves
-each one as **both Excel and PDF** into your documents folder, names them using
-the company convention, and shows you the **last 3 quotations** for whichever
-company you're quoting.
+A desktop app for Artemis Group that generates the company's documents —
+Quotations, Tax Invoices, Delivery Orders, Expense Reports, and Sololuce
+Datasheets — as pixel-accurate PDFs, and keeps track of the paperwork
+around each job from quote to signed delivery.
 
-The preview you see on screen is the PDF.
+It's a real installed Windows app (not a website, no browser tab to keep
+open) with a live preview, so what you see on screen while you're typing is
+exactly the PDF you'll get.
 
----
+## Install
 
-## What you need once
-1. **Python** — free from https://python.org/downloads (during install on
-   Windows, tick "Add Python to PATH").
-2. **LibreOffice** — free from https://libreoffice.org. This is what turns the
-   Excel into a PDF. (If your PC has Microsoft Excel only, the Excel files still
-   save fine; install LibreOffice to also get the automatic PDF + preview.)
+Download the latest installer from
+**[Releases](https://github.com/MrWhiteER/Office-Tool/releases/latest)** —
+`OfficeTool-Setup.exe`. Run it, then open **Office Tool** from the Start
+Menu or your desktop. That's it; nothing else to install alongside it.
 
-## How to start it
-- **Windows:** double-click **run.bat**
-- **Mac:** double-click **run.command**
+Already have it installed? It checks for updates on its own and installs
+them with one click from the **Update** button in Settings — no need to
+download a fresh installer each time.
 
-The first run installs two small Python add-ons, then your browser opens the
-app at http://127.0.0.1:5000. Leave the little black window open while you work;
-close it to stop the app.
+## What it does
 
-## How to use it
-1. Click **Choose folder…** and pick the folder where all your documents live.
-   The app reads everything there and sorts it by the file name.
-2. Pick **Quotation / Tax Invoice / Delivery Order**.
-3. The document number is suggested automatically (next in sequence). Fill the
-   header and the line items.
-4. Type the **Company** name — if you've quoted them before, the last 3
-   quotations appear with their items.
-5. Press **Generate Excel + PDF**. Both files are saved into your folder and the
-   PDF shows on the right.
+**Documents.** Quotation, Tax Invoice, Delivery Order, and Expense Report,
+each with a live preview pane that renders as you type. Every document is
+auto-numbered, saved as PDF into the right folder, and shows up in **All
+Docs** and the client's own history automatically.
 
-## File naming convention
+**Submissions.** Once a quotation is approved, it becomes a Submission —
+one place that tracks the Delivery Order, the signed/scanned copy of it,
+the Invoice, the client's LPO, and the final submittal pack, all tied
+together for that one job.
+
+**Scanner.** A physically connected scanner can be driven straight from the
+app — scan a page, add more, and either save the result as a plain file or
+link it directly to a Submission's Delivery Order.
+
+**Sololuce Datasheets & Full Catalog Builder.** Product datasheets for the
+Sololuce brand, plus a tool that combines a set of datasheets into one
+paginated catalog with a cover, index, and reorderable page order.
+
+**Multi-user accounts.** Each person signs in with their own account. An
+admin manages who has access to what — which brands, which tools — from
+one place, and everyone's account list stays in sync across every install.
+
+**Records.** All Docs, Statement, and Clients give a searchable view across
+everything that's been generated, with each client's history and totals in
+one place.
+
+## Your data
+
+Everything you generate is saved locally, into folders you choose (set once
+in Settings). The shared pieces — the account list and the product photo
+library — sync through a private cloud store so every install sees the same
+thing; nothing else leaves your PC unless you explicitly export or send it.
+
+## For developers
+
+This is a Flask app wrapped as a native window (via `pywebview`), packaged
+with PyInstaller and Inno Setup. To run it from source:
+
+```bash
+pip install -r requirements.txt
+python app.py
 ```
-TYPE_NUMBER_REV_COMPANY_PROJECT_DATE.ext
-QTN_0042_R0_Resinal-Developments_Facade-Lighting_2026-06-30.xlsx
-```
-The app both **creates** names in this format and **reads** existing files that
-follow it, so the "All Docs" tab and the company history work automatically.
-Files that don't follow the convention are ignored (they won't be touched).
 
-## Adding more document types or templates
-Drop a new template into the `templates/` folder and tell me the field
-positions — I'll add it. Current types: QTN, INV, DO.
-
-## Note on the "always connected to AI" idea
-This tool sorts and fills documents with plain logic — it doesn't need an AI
-connection for everyday use, so it works offline and your files never leave your
-PC. If you later want AI help for the messy cases (e.g. reading old scanned PDFs
-to pull their items, or auto-tidying oddly-named files), that can be added as an
-optional step that calls the Claude API only when you ask it to.
+To build the installer yourself, see `build.bat` — it also explains the
+one-time setup (`playwright install chromium`) the build needs.
