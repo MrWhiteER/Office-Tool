@@ -4680,11 +4680,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    background-size:cover — cover would crop unevenly depending on the
    window's own aspect ratio, silently shifting the loading bar out from
    under the artwork's own decorative line it's meant to align with.
-   Letterboxing (top/bottom or left/right, whichever the window's aspect
-   ratio calls for) is filled with the theme's own canvas color, which is
-   close enough to the artwork's own near-black/near-white background
-   that the letterbox edge is barely visible in practice. */
-.splashscreen{position:fixed;inset:0;z-index:600;display:flex;align-items:center;justify-content:center;background:var(--canvas);transition:opacity .35s ease}
+   Whatever the window's own aspect ratio leaves uncovered (top/bottom or
+   left/right) used to just be a flat canvas-color letterbox — visibly a
+   plain empty bar, not part of the artwork. Same ambient-glow fix as the
+   login page's own blurred background (::before, see .loginoverlay's own
+   comment for why it's a separate layer and not a filter on the
+   container itself): a blurred, scaled-up copy of the SAME banner fills
+   the whole window behind the crisp centered artwork, the way YouTube
+   fills the space around a video that doesn't match the player's aspect
+   ratio — continuous glossy color instead of a hard-edged empty bar. */
+.splashscreen{position:fixed;inset:0;z-index:600;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--canvas);transition:opacity .35s ease}
+.splashscreen::before{content:"";position:absolute;inset:-40px;background-image:var(--splash-banner);background-size:cover;background-position:center;filter:blur(28px) saturate(1.3) brightness(.8);transform:scale(1.1)}
 .splashscreen.hide{opacity:0;pointer-events:none}
 /* width/height computed via min() to the actual "contain"-fitted box size
    instead of `aspect-ratio` + width:100%;height:100% together — that
@@ -4698,7 +4704,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    visible from reading the CSS alone). min() here computes the same
    box a real `background-size:contain` fit would occupy, so percentage
    positioning of children lands exactly where it visually should. */
-#splash-frame{position:relative;width:min(100vw,100vh * 16 / 9);height:min(100vh,100vw * 9 / 16);background-image:var(--splash-banner);background-size:contain;background-repeat:no-repeat;background-position:center}
+#splash-frame{position:relative;z-index:1;width:min(100vw,100vh * 16 / 9);height:min(100vh,100vw * 9 / 16);background-image:var(--splash-banner);background-size:contain;background-repeat:no-repeat;background-position:center}
 /* Branding (this banner, the login logo, the app's own shortcut icon) is
    driven by data-brand-theme, a SEPARATE attribute from data-theme (the
    rail's light/dark UI-colors toggle) — set via the Appearance tab in
