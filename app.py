@@ -2438,7 +2438,11 @@ def api_apply_update():
     url = data.get("download_url", "")
     if not url:
         return jsonify({"ok": False, "error": "Missing download_url."}), 400
-    update_checker.start_update_async(url)
+    # target_version names the cached download (see update_checker's
+    # UPDATE_CACHE_DIR) so a failed install attempt doesn't cost another
+    # 80MB+ download next time — optional/backward-compatible, an older
+    # frontend that doesn't send it just always downloads fresh.
+    update_checker.start_update_async(url, target_version=data.get("target_version"))
     return jsonify({"ok": True})
 
 @app.get("/api/apply-update-progress")
@@ -4729,31 +4733,21 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    window's own aspect ratio, silently shifting the loading bar out from
    under the artwork's own decorative line it's meant to align with.
    Whatever the window's own aspect ratio leaves uncovered (top/bottom or
-   left/right) used to just be a flat canvas-color letterbox — visibly a
-   plain empty bar, not part of the artwork. Same ambient-glow fix as the
-   login page's own blurred background (::before, see .loginoverlay's own
-   comment for why it's a separate layer and not a filter on the
-   container itself): a blurred, scaled-up copy of the SAME banner fills
-   the whole window behind the crisp centered artwork, the way YouTube
-   fills the space around a video that doesn't match the player's aspect
-   ratio — continuous glossy color instead of a hard-edged empty bar. */
-.splashscreen{position:fixed;inset:0;z-index:600;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--canvas);transition:opacity .35s ease}
-/* blur(28px) saturate(1.3) brightness(.8) reads as a rich, moody glow on
-   the DARK banner (already-dark background, strong amber tones to pull
-   from) but on the LIGHT banner — a near-white background with only
-   thin gray linework and a small logo — brightness(.8) just darkens
-   white into flat gray, which is exactly the "gray boxes" a real user
-   reported (screenshot showed plain neutral gray bars, not a glow at
-   all). Confirmed directly: forced the splash visible in light theme at
-   a non-16:9 window size and saw the same flat gray. Light theme needs
-   the opposite adjustment — brighten instead of darken (a light backdrop
-   darkened just grays out; brightened keeps it feeling like glowing
-   paper) and boost saturation harder (there's much less color there to
-   begin with — the small gold logo — so it needs a stronger push to
-   actually bleed noticeable warmth into the blur, not just tint it
-   evenly). */
-.splashscreen::before{content:"";position:absolute;inset:-40px;background-image:var(--splash-banner);background-size:cover;background-position:center;filter:blur(28px) saturate(1.3) brightness(.8);transform:scale(1.1)}
-:root[data-brand-theme="light"] .splashscreen::before{filter:blur(36px) saturate(2.2) brightness(1.08)}
+   left/right) is filled with a FLAT solid color matching the artwork's
+   own background tone — not a blur/glow. That was tried first (a
+   blurred, scaled-up copy of the same banner, YouTube-ambient-mode
+   style) and corrected on direct feedback with a reference screenshot:
+   any blur — even brightened/saturated for the near-white light banner —
+   still reads as a visibly distinct "rectangle" that doesn't match the
+   crisp artwork's own flat background, not the seamless continuation
+   that was wanted. A flat fill in the artwork's own base tone is both
+   simpler and actually seamless: since the banner's own corners are
+   themselves a near-uniform flat tone, an exact color match there has no
+   visible edge at all. --splash-letterbox (set alongside --splash-banner
+   below, one per brand theme) is a separate variable so each theme's
+   fill can be tuned independently of general UI colors even if
+   --canvas ever diverges from the artwork's own tone. */
+.splashscreen{position:fixed;inset:0;z-index:600;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--splash-letterbox);transition:opacity .35s ease}
 .splashscreen.hide{opacity:0;pointer-events:none}
 /* width/height computed via min() to the actual "contain"-fitted box size
    instead of `aspect-ratio` + width:100%;height:100% together — that
@@ -4774,8 +4768,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    Settings (see setBrandTheme()/loadBrandTheme()), not the theme
    switcher. Dark is the default (bare :root) since that's this app's
    own established default elsewhere. */
-:root{--splash-banner:url(/static/splash/launch-dark.png);--login-logo:url(/static/splash/logo-horizontal-dark.png)}
-:root[data-brand-theme="light"]{--splash-banner:url(/static/splash/launch-light.png);--login-logo:url(/static/splash/logo-horizontal-light.png)}
+:root{--splash-banner:url(/static/splash/launch-dark.png);--login-logo:url(/static/splash/logo-horizontal-dark.png);--splash-letterbox:#141519}
+:root[data-brand-theme="light"]{--splash-banner:url(/static/splash/launch-light.png);--login-logo:url(/static/splash/logo-horizontal-light.png);--splash-letterbox:#f7f4ee}
 /* Positioned relative to the two small crosshair marks in the artwork
    itself (measured directly off the actual shipped dark-theme PNG's
    pixels: x=530/1129 of 1672, y=~801 of 941 -> ~31.7%/67.5% and
@@ -6351,7 +6345,7 @@ async function actuallyInstallUpdate(btn){
   btn.insertAdjacentElement('afterend',bar);
   try{
     const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({download_url:UPDATE_INFO.download_url})}).then(r=>r.json());
+      body:JSON.stringify({download_url:UPDATE_INFO.download_url,target_version:UPDATE_INFO.latest})}).then(r=>r.json());
     if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));bar.remove();btn.disabled=false;btn.textContent='Install & Restart';return}
   }catch(e){toast('Update failed: '+e.message);bar.remove();btn.disabled=false;btn.textContent='Install & Restart';return}
   btn.textContent='Downloading…';
@@ -6404,7 +6398,7 @@ async function actuallyInstallLoginUpdate(chip){
   box.classList.remove('hide');fill.style.width='0%';text.textContent='Starting…';
   try{
     const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({download_url:UPDATE_INFO.download_url})}).then(r=>r.json());
+      body:JSON.stringify({download_url:UPDATE_INFO.download_url,target_version:UPDATE_INFO.latest})}).then(r=>r.json());
     if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));box.classList.add('hide');resetLoginUpdateChip();return}
   }catch(e){toast('Update failed: '+e.message);box.classList.add('hide');resetLoginUpdateChip();return}
   chip.classList.add('hide');
@@ -14203,6 +14197,12 @@ loadBrandTheme();
 # single-admin default).
 accounts.refresh_from_cloud()
 
+# A successful launch IS the confirmation that whatever update brought us
+# to this version actually worked — this is where a cached installer for
+# an already-reached (or surpassed) version gets cleaned up. See
+# update_checker.cleanup_update_cache()'s own docstring.
+update_checker.cleanup_update_cache()
+
 # Keep the local accounts cache continuously fresh, not just at login —
 # per explicit request: "always update with the Cloudflare data... let
 # the update be each 8 seconds, so new users added or edited accounts
@@ -14387,6 +14387,21 @@ if __name__ == "__main__":
                                         min_size=(1000, 650), hidden=bool(loading_window))
 
         if loading_window:
+            # LOADING_MIN_SECONDS is a floor on how long the loading square
+            # stays up, measured from the moment it first appeared — per
+            # explicit correction: "the loading box should be minimum 3
+            # seconds or longer, before that the software main page should
+            # not be shown! even if the software is already loaded." The
+            # earlier version of this always added 3 EXTRA seconds on top
+            # of however long startup actually took (so a slow startup got
+            # padded even more, on top of already being slow) — this is a
+            # genuine minimum instead: a fast/warm startup still waits out
+            # the full 3s, but a startup that's already slower than that
+            # swaps over the moment it's ready, with no extra padding on
+            # top of an already-long wait.
+            LOADING_MIN_SECONDS = 3
+            _loading_shown_at = time.time()
+
             # server_ready guards against a real race: `window` was handed
             # `url` immediately at create_window() above, before Flask is
             # necessarily listening yet, so that very first navigation
@@ -14410,16 +14425,16 @@ if __name__ == "__main__":
                 except Exception:
                     pass
 
-            # Per explicit request ("make it so the loading square will be
-            # 3 seconds longer"): once everything is genuinely ready, hold
-            # the loading square up for LOADING_MIN_EXTRA_SECONDS more
-            # before swapping, instead of swapping the instant it can —
-            # purely a pacing/branding choice, not a technical wait.
-            LOADING_MIN_EXTRA_SECONDS = 3
+            def _swap_respecting_minimum():
+                remaining = LOADING_MIN_SECONDS - (time.time() - _loading_shown_at)
+                if remaining > 0:
+                    threading.Timer(remaining, _swap_to_main_once).start()
+                else:
+                    _swap_to_main_once()
 
             def _on_main_loaded():
                 if _state["server_ready"]:
-                    threading.Timer(LOADING_MIN_EXTRA_SECONDS, _swap_to_main_once).start()
+                    _swap_respecting_minimum()
             window.events.loaded += _on_main_loaded
 
             def _wait_for_server_then_load():
@@ -14438,10 +14453,9 @@ if __name__ == "__main__":
                 # Safety net: if `loaded` never fires for some reason (a
                 # busy/slow first render), don't leave the user stuck
                 # staring at the loading square forever — swap over after
-                # a generous timeout regardless (already includes the
-                # extra hold above, so this doesn't fire needlessly early).
-                time.sleep(15 + LOADING_MIN_EXTRA_SECONDS)
-                _swap_to_main_once()
+                # a generous timeout regardless.
+                time.sleep(15)
+                _swap_respecting_minimum()
             threading.Thread(target=_wait_for_server_then_load, daemon=True).start()
 
         # ---- System tray -----------------------------------------------
