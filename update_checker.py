@@ -30,6 +30,7 @@ import time
 import urllib.request
 
 import engine
+import runtime_manager
 from version import APP_VERSION
 
 GITHUB_REPO = "MrWhiteER/Office-Tool"
@@ -171,7 +172,19 @@ def _kill_bundled_browser_processes():
     """
     try:
         import win32com.client
-        bundled_browser_dir = os.path.normcase(os.path.join(engine.BASE, "bundled_browser"))
+        # As of v1.1.27 (see runtime_manager.py), the real Chromium moved
+        # OUT of engine.BASE\bundled_browser (inside _internal\, which
+        # this installer replaces) and into
+        # runtime_manager.BUNDLED_BROWSER_DIR (engine.DATA_BASE\runtime\
+        # bundled_browser\, outside _internal\ entirely, never touched by
+        # a normal app update at all). Checking BOTH here: the new
+        # location for any install actually running the split runtime,
+        # the old one as a harmless no-op fallback for anyone somehow
+        # still on the pre-split layout mid-upgrade.
+        bundled_browser_dirs = tuple(os.path.normcase(d) for d in (
+            runtime_manager.BUNDLED_BROWSER_DIR,
+            os.path.join(engine.BASE, "bundled_browser"),
+        ))
         playwright_driver_dir = os.path.normcase(os.path.join(engine.BASE, "playwright", "driver"))
         wmi = win32com.client.GetObject("winmgmts:")
         procs = wmi.ExecQuery(
@@ -181,9 +194,22 @@ def _kill_bundled_browser_processes():
         killed = 0
         for p in procs:
             exe_path = os.path.normcase(p.ExecutablePath or "")
-            if exe_path.startswith(bundled_browser_dir) or exe_path.startswith(playwright_driver_dir):
+            if exe_path.startswith(bundled_browser_dirs) or exe_path.startswith(playwright_driver_dir):
                 try:
-                    os.system("taskkill /F /PID {} >nul 2>&1".format(p.ProcessId))
+                    # p.Terminate() (WMI's own Win32_Process method) — NOT
+                    # os.system("taskkill ...") like this used to be. On a
+                    # --windowed PyInstaller build (no console of its own
+                    # at all), os.system() spawns a real cmd.exe /c child
+                    # for every single call, and each one briefly flashes
+                    # its own console window — exactly what was reported
+                    # live: "multiple times the console opens and closes,
+                    # and there is no text there" (empty because the old
+                    # command redirected its own output to nul, but the
+                    # window itself still flashed). Calling Terminate()
+                    # straight through the existing WMI COM object kills
+                    # the process with zero new processes spawned at all,
+                    # so there's nothing left to flash a window.
+                    p.Terminate()
                     killed += 1
                 except Exception:
                     pass
@@ -198,16 +224,67 @@ def _kill_bundled_browser_processes():
 
 
 def _launch_installer(dest):
-    """Kills any lock-holding bundled_browser processes, then runs the
-    installer. /LOG= writes a real install log even under fully silent
-    mode — previously a failure here was invisible even to us; this
-    gives a concrete file to check next time something goes wrong,
-    without changing the silent user experience at all."""
+    """Kills any lock-holding bundled_browser processes, then schedules the
+    installer to run — NOT immediately. Real /LOG= from a fresh reproduced
+    failure (v1.1.28, "again the same issue... Rolling Back Changes"):
+
+        RestartManager found an application using one of our files: OfficeTool.exe
+        Some applications could not be shut down.
+        User canceled the installation process. Rolling back changes.
+
+    ...timestamped under half a second after Setup.exe started. The old
+    code here launched Setup.exe via Popen FIRST, and only THEN had the
+    caller (start_update_async) sleep 3s before os._exit(0) — so Setup's
+    RestartManager check, which fires almost instantly, was GUARANTEED to
+    still find this app's own process alive every single time, no matter
+    how reliably chrome.exe/node.exe get killed above. RestartManager's
+    own "ask it to close" mechanism (CloseApplications=yes in
+    installer.iss) evidently isn't fast/reliable enough either — it's
+    what actually reported "some applications could not be shut down."
+
+    Fix: launch Setup.exe from a detached helper that waits for THIS
+    process's own PID to actually disappear (capped at 10s as a safety
+    net, in case this process somehow never exits on its own — better to
+    install late than hang forever) before starting it, so Setup's very
+    first RestartManager check always runs after this process has
+    already fully exited — never racing it. PowerShell's Get-Process,
+    not a hand-rolled tasklist/findstr/goto batch loop: far less fragile
+    to get right as a single-line invocation, and Get-Process -Id
+    <pid> -ErrorAction SilentlyContinue is a clean, direct "does this PID
+    still exist" check rather than parsing tasklist's text table.
+    -WindowStyle Hidden + CREATE_NO_WINDOW below: this helper (and
+    whatever it briefly spawns) must never itself flash a visible window
+    — see _kill_bundled_browser_processes()'s own comment on the exact
+    live symptom that pattern caused elsewhere in this same fix.
+    /LOG= writes a real install log even under fully silent mode —
+    previously a failure here was invisible even to us; this gives a
+    concrete file to check next time something goes wrong, without
+    changing the silent user experience at all."""
     _kill_bundled_browser_processes()
     log_path = os.path.join(engine.DATA_BASE, "last_update_install.log")
+    pid = os.getpid()
+
+    def _pq(s):
+        # Single-quoted PowerShell string literal — doubling any literal
+        # single quote is PowerShell's own escape for that, not related
+        # to cmd.exe's separate (and much hairier) quoting rules.
+        return "'" + s.replace("'", "''") + "'"
+
+    # Deliberately NO -WindowStyle Hidden on THIS Start-Process call — that
+    # would hide Setup.exe's own small native progress window, undoing the
+    # whole point of /SILENT (not /VERYSILENT) established back in v1.1.7:
+    # a completely silent multi-minute install with zero visible feedback
+    # reads exactly like a hang/failure. Hidden is only for the PowerShell
+    # host wrapping this wait — see the Popen call below.
+    ps_script = (
+        "$n=0; while ((Get-Process -Id {pid} -ErrorAction SilentlyContinue) -and ($n -lt 40)) "
+        "{{ Start-Sleep -Milliseconds 250; $n++ }}; "
+        "Start-Process -FilePath {dest} -ArgumentList "
+        "'/SILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG=' + {log}),('/DIR=' + {dir})"
+    ).format(pid=pid, dest=_pq(dest), log=_pq(log_path), dir=_pq(engine.DATA_BASE))
     subprocess.Popen(
-        [dest, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
-         "/LOG=" + log_path, "/DIR=" + engine.DATA_BASE],
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
+        creationflags=subprocess.CREATE_NO_WINDOW,
         close_fds=True,
     )
 
