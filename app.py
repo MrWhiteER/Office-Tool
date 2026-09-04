@@ -6328,6 +6328,31 @@ function installUpdate(btn){
   btn.dataset.confirm='';
   actuallyInstallUpdate(btn)}
 function fmtMB(n){return (n/1048576).toFixed(1)+' MB'}
+// Called from the tray's "Update" menu item (see app.py's __main__/
+// _run_tray — the Python side already knows download_url/target_version
+// from its own independent background check, so this doesn't depend on
+// UPDATE_INFO ever having been populated by this page's own JS first).
+// One click there = show the window + start immediately, per explicit
+// request, so no confirm step here unlike installUpdate()'s double-click
+// pattern — that one guards a full-size button sitting in the normal UI
+// where a stray click is easy; a tray menu item is a deliberate action
+// to begin with.
+async function startUpdateFromTray(downloadUrl,targetVersion){
+  toast('Update starting…');
+  try{
+    const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({download_url:downloadUrl,target_version:targetVersion})}).then(r=>r.json());
+    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));return}
+  }catch(e){toast('Update failed: '+e.message);return}
+  const poll=setInterval(async()=>{
+    const p=await fetch('/api/apply-update-progress').then(r=>r.json()).catch(()=>null);
+    if(!p)return;
+    if(p.status==='launched'){
+      clearInterval(poll);
+      toast('Installer launching — this app will close, and the update can take a few minutes. It reopens on its own when done.')
+    }else if(p.status==='error'){
+      clearInterval(poll);toast('Update failed: '+(p.error||'unknown error'))}
+  },400)}
 // Downloads a real installer (80MB+) — the OLD version just said
 // "Downloading…" with zero feedback for however long that took, which
 // (combined with the confirm-timing bug just above) is exactly why this
@@ -14523,6 +14548,56 @@ if __name__ == "__main__":
                 except Exception:
                     pass
 
+            # ---- Tray "Update" item: greyed out with no update, live
+            # label + one-click install when there is one — per explicit
+            # request. A background thread (not the enabled/text
+            # callables themselves) does the actual GitHub check, since
+            # those callables run SYNCHRONOUSLY right as the user right-
+            # clicks the tray icon — a real network call there would make
+            # the context menu visibly lag open every time. Checked every
+            # 5 minutes in the background, independent of the page's own
+            # checkForAppUpdate() (4h interval, JS-side) — the tray needs
+            # this state even before the page has ever loaded once (e.g.
+            # the first few seconds of startup, while still showing the
+            # loading square, or before the window has ever been shown).
+            _tray_update_state = {"available": False, "download_url": None, "latest": None}
+
+            def _tray_update_checker_loop():
+                while True:
+                    try:
+                        info = update_checker.check_for_update()
+                        _tray_update_state["available"] = bool(info.get("available"))
+                        _tray_update_state["download_url"] = info.get("download_url")
+                        _tray_update_state["latest"] = info.get("latest")
+                    except Exception:
+                        pass
+                    time.sleep(5 * 60)
+            threading.Thread(target=_tray_update_checker_loop, daemon=True).start()
+
+            def _update_label(item=None):
+                if _tray_update_state["available"] and _tray_update_state["latest"]:
+                    return "Update to v" + _tray_update_state["latest"]
+                return "Update (up to date)"
+
+            def _update_enabled(item=None):
+                return _tray_update_state["available"] and bool(_tray_update_state["download_url"])
+
+            def _update_now(icon=None, item=None):
+                if not _tray_update_state["available"] or not _tray_update_state["download_url"]:
+                    return
+                window.show()
+                try:
+                    window.restore()
+                except Exception:
+                    pass
+                try:
+                    window.evaluate_js(
+                        "if(typeof startUpdateFromTray==='function')startUpdateFromTray(%s,%s);"
+                        % (json.dumps(_tray_update_state["download_url"]), json.dumps(_tray_update_state["latest"]))
+                    )
+                except Exception:
+                    pass
+
             def _restart(icon=None, item=None):
                 icon.stop()
                 try:
@@ -14558,6 +14633,7 @@ if __name__ == "__main__":
                 pystray.MenuItem("Open Office Tool", _open, default=True),
                 pystray.MenuItem("Switch Theme (Dark/Light)", _switch_theme),
                 pystray.MenuItem("Scan Now", _scan_now),
+                pystray.MenuItem(_update_label, _update_now, enabled=_update_enabled),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Restart", _restart),
                 pystray.MenuItem("Exit", _exit_app),
