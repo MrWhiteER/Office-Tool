@@ -205,13 +205,14 @@ def api_accounts_publish():
     return jsonify(accounts.publish_to_cloud())
 
 SETTINGS_FIELDS = ("product_photos_folder", "datasheets_folder", "templates_folder",
-                    "clients_file", "full_catalog_folder")
+                    "full_catalog_folder")
 # The former per-doc-type folder settings (inv_folder, do_folder, qtn2_folder,
 # pi_folder, rv_folder, cn_folder, scanned_do_folder, catalogue_folder,
-# expense_folder) are gone — see folder_for()'s own comment. A config.json
-# saved before this change may still have those keys sitting in it
-# (harmless, just unused dead data — nothing reads them anymore).
-FILE_SETTINGS_FIELDS = {"clients_file"}  # picks a file, not a folder (native dialog + validation differ)
+# expense_folder) are gone — see folder_for()'s own comment. clients_file is
+# gone too as of the shared cloud client list (see _migrate_clients_to_cloud())
+# — a config.json saved before either change may still have those keys sitting
+# in it (harmless, just unused dead data — nothing reads them anymore).
+FILE_SETTINGS_FIELDS = set()  # nothing left that picks a FILE rather than a folder
 
 def _empty_brand_settings():
     return {k: "" for k in SETTINGS_FIELDS}
@@ -718,28 +719,30 @@ def brand_settings(brand=None):
     return load_cfg()["brand_settings"].get(brand or current_brand(), _empty_brand_settings())
 
 # ---------------------------------------------------------------- client database
-# Same philosophy as every document folder in this app: the data lives
-# outside the app, in a real file the user points to (Settings > Company
-# Profiles > Clients Spreadsheet, the `clients_file` setting) — not inside
-# some internal store. `clients/<BRAND>.json` still exists as a fallback for
-# brands that haven't configured a spreadsheet location yet (keeps the
-# feature usable out of the box, and is also the one-time migration source
-# — see api_set_settings) but is never the source of truth once a location
-# is set.
+# ONE shared client list across every brand profile, stored on R2 like
+# documents/photos — per explicit request: clients used to be siloed
+# per-brand (a separate spreadsheet-or-JSON file per brand, each brand's
+# Clients tab showing a completely different list), and the actual bug
+# report was "clients list is visible only to Artemis profile, it should
+# be available for all the profiles". `brand` is kept as a parameter on
+# load_clients()/save_clients() below purely so every existing call site
+# doesn't need touching — it's ignored; there is exactly one client list.
 CLIENTS_DIR = os.path.join(engine.DATA_BASE, "clients")
-
-def _legacy_clients_json_path(brand):
-    return os.path.join(CLIENTS_DIR, f"{brand}.json")
+CLIENTS_CACHE_FILE = os.path.join(CLIENTS_DIR, "clients.json")  # local read-fast cache, synced from R2
+# Under photo_store.SYSTEM_PREFIX ("system/"), like accounts.json and
+# photo_attribution.json — this is one small bookkeeping JSON blob, not a
+# document or a photo, and both list_photos() and get_usage() already
+# exclude SYSTEM_PREFIX from the photo gallery / 10GB budget. A bare
+# "clients/..." key would otherwise show up as a stray non-photo entry in
+# the cloud photo picker the same way documents/ objects already do (a
+# pre-existing gap unrelated to this change — list_photos() has no
+# extension/prefix filter of its own).
+CLIENTS_KEY = photo_store.SYSTEM_PREFIX + "clients.json"  # R2 — the real source of truth across every PC
 
 CLIENT_FIELDS = ("id", "name", "category", "attn", "address", "po_box", "city", "country",
                   "phone", "landline", "email", "website", "trn", "notes", "logo", "updated")
 
-def _load_legacy_clients_json(brand):
-    try:
-        with open(_legacy_clients_json_path(brand), encoding="utf-8") as f:
-            clients = json.load(f)
-    except (OSError, ValueError):
-        return []
+def _fill_client_defaults(clients):
     # older records (saved before category/landline/website/trn existed)
     # won't have those keys yet — fill them in so every caller can rely on
     # the full field set being present, instead of scattering .get(...,'')
@@ -749,40 +752,86 @@ def _load_legacy_clients_json(brand):
             c.setdefault(f, "")
     return clients
 
-def clients_file_path(brand=None):
-    return (brand_settings(brand).get("clients_file") or "").strip()
+def _load_clients_cache_file():
+    try:
+        with open(CLIENTS_CACHE_FILE, encoding="utf-8") as f:
+            return _fill_client_defaults(json.load(f))
+    except (OSError, ValueError):
+        return []
+
+def _legacy_per_brand_json_path(brand):
+    # Pre-cloud location (every version through v1.1.26): one JSON file
+    # PER BRAND — see _migrate_clients_to_cloud() below, migration source only.
+    return os.path.join(CLIENTS_DIR, f"{brand}.json")
+
+def _load_legacy_per_brand_clients(brand):
+    try:
+        with open(_legacy_per_brand_json_path(brand), encoding="utf-8") as f:
+            return _fill_client_defaults(json.load(f))
+    except (OSError, ValueError):
+        return []
 
 def load_clients(brand=None):
-    brand = (brand or current_brand()).upper()
-    path = clients_file_path(brand)
-    if path:
-        return engine.read_clients_workbook(path) if os.path.exists(path) else []
-    return _load_legacy_clients_json(brand)
+    return _load_clients_cache_file()
 
 def save_clients(brand, clients):
-    brand = brand.upper()
-    path = clients_file_path(brand)
-    if path:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        engine.build_clients_workbook(clients).save(path)
+    os.makedirs(CLIENTS_DIR, exist_ok=True)
+    payload = json.dumps(clients, indent=2, ensure_ascii=False)
+    with open(CLIENTS_CACHE_FILE, "w", encoding="utf-8") as f:
+        f.write(payload)
+    try:
+        photo_store.put_bytes(CLIENTS_KEY, payload.encode("utf-8"), "application/json", allow_bundled_write=True)
+    except Exception:
+        pass  # offline / R2 not configured yet — local cache still has it; the next sync reconciles
+
+def _sync_clients_from_cloud():
+    """Best-effort pull of the shared list from R2 into the local cache —
+    same shape as photo_store.sync_down_documents(), called at startup and
+    on a background timer (see the loop near the bottom of this file)."""
+    try:
+        data_bytes, _ct = photo_store.get_bytes(CLIENTS_KEY)
+        clients = _fill_client_defaults(json.loads(data_bytes.decode("utf-8")))
+    except Exception:
         return
     os.makedirs(CLIENTS_DIR, exist_ok=True)
-    with open(_legacy_clients_json_path(brand), "w", encoding="utf-8") as f:
-        json.dump(clients, f, indent=2)
+    with open(CLIENTS_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(clients, f, indent=2, ensure_ascii=False)
 
-def _maybe_migrate_clients_to_file(brand, old_path, new_path):
-    """The first time a brand's Clients Spreadsheet location gets set: if
-    the target file doesn't exist yet, seed it from the legacy JSON store
-    so switching to file-based storage doesn't look like data loss. If the
-    target already exists (the user pointed at a spreadsheet they already
-    had — e.g. from a previous Export), leave it alone; that file is the
-    authoritative data now."""
-    if not new_path or new_path == old_path or os.path.exists(new_path):
+def _migrate_clients_to_cloud():
+    """One-time, per install: every brand used to keep its OWN separate
+    client list (a configured Clients Spreadsheet, or the legacy
+    clients/<BRAND>.json) — multiple PCs each had their own separate set
+    of real client records. Collapsing to one shared list must not
+    silently drop any of that: this merges every brand's old local data
+    into the shared list, ADDING only — a name already present in the
+    cloud list (found by a prior sync, or added by this same pass on
+    another PC) is never overwritten. Marker file makes this a no-op on
+    every later launch."""
+    marker = os.path.join(CLIENTS_DIR, ".migrated_shared_v1")
+    if os.path.exists(marker):
         return
-    existing = _load_legacy_clients_json(brand)
-    if existing:
-        os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
-        engine.build_clients_workbook(existing).save(new_path)
+    legacy = []
+    for brand in engine.BRANDS:
+        old_path = (brand_settings(brand).get("clients_file") or "").strip()
+        if old_path and os.path.exists(old_path):
+            legacy.extend(_fill_client_defaults(engine.read_clients_workbook(old_path)))
+        else:
+            legacy.extend(_load_legacy_per_brand_clients(brand))
+    if legacy:
+        current = _load_clients_cache_file()
+        existing_names = {(c.get("name") or "").strip().lower() for c in current}
+        added = False
+        for c in legacy:
+            key = (c.get("name") or "").strip().lower()
+            if key and key not in existing_names:
+                current.append(c)
+                existing_names.add(key)
+                added = True
+        if added:
+            save_clients(None, current)
+    os.makedirs(CLIENTS_DIR, exist_ok=True)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(datetime.date.today().isoformat())
 
 # ---------------------------------------------------------------- drafts (save in-progress work before Generate, any doc type)
 DRAFTS_DIR = os.path.join(engine.DATA_BASE, "drafts")
@@ -1069,9 +1118,12 @@ def _run_on_tk_thread(job_fn, timeout=180):
 # ---------------------------------------------------------------- native folder picker
 @app.post("/api/browse")
 def browse():
-    """Open a native folder (or, for clients_file, file) dialog on the
-    machine running this app, and save the chosen path into the current
-    brand's settings field that asked for it."""
+    """Open a native folder dialog on the machine running this app, and
+    save the chosen path into the current brand's settings field that
+    asked for it. (FILE_SETTINGS_FIELDS is currently empty — kept as a
+    hook in case a future setting needs asksaveasfilename instead of
+    askdirectory again, the way clients_file used to before the shared
+    cloud client list replaced it — see _migrate_clients_to_cloud().)"""
     field = (request.json or {}).get("field", "")
     if field not in SETTINGS_FIELDS:
         return jsonify({"error": "Unknown settings field."}), 400
@@ -1080,12 +1132,7 @@ def browse():
         def job(root):
             root.attributes("-topmost", True)
             if field in FILE_SETTINGS_FIELDS:
-                # asksaveasfilename (not askopenfilename) so the user can either
-                # pick an existing spreadsheet or type a brand-new filename to
-                # create one — both are valid here, unlike a normal "open" dialog.
-                p = filedialog.asksaveasfilename(
-                    parent=root, title="Choose or create a Clients spreadsheet", defaultextension=".xlsx",
-                    filetypes=[("Excel workbook", "*.xlsx")], confirmoverwrite=False)
+                p = filedialog.asksaveasfilename(parent=root, title="Choose or create a file", confirmoverwrite=False)
             else:
                 p = filedialog.askdirectory(parent=root, title="Choose a folder")
             root.attributes("-topmost", False)
@@ -1094,11 +1141,8 @@ def browse():
         if path:
             brand = current_brand()
             cfg = load_cfg()
-            old_path = cfg["brand_settings"][brand].get(field, "")
             cfg["brand_settings"][brand][field] = path
             save_cfg(cfg)
-            if field == "clients_file":
-                _maybe_migrate_clients_to_file(brand, old_path, path)
         return jsonify({"field": field, "value": path or ""})
     except Exception as e:
         return jsonify({"error": f"Could not open dialog: {e}. Paste the path instead."}), 200
@@ -1117,7 +1161,6 @@ def set_settings():
     brand = current_brand()
     cfg = load_cfg()
     bucket = cfg["brand_settings"][brand]
-    old_clients_file = bucket.get("clients_file", "")
     for key, val in data.items():
         if key not in SETTINGS_FIELDS:
             continue
@@ -1129,7 +1172,6 @@ def set_settings():
             return jsonify({"error": f"This folder doesn't exist: {val}"}), 400
         bucket[key] = val
     save_cfg(cfg)
-    _maybe_migrate_clients_to_file(brand, old_clients_file, bucket.get("clients_file", ""))
     return jsonify(bucket)
 
 # ---------------------------------------------------------------- Branding (Settings > Appearance)
@@ -5881,8 +5923,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     </div>
     <div class="settings-tab-panel hide" id=settings-tab-clients>
     <div class=card><div class=ch>Company Profiles</div><div class=cb>
-      <div class=f><label>Clients spreadsheet</label><div class=setrow><input id=set-clients_file placeholder="e.g. F:\Documents\Clients.xlsx"><button class=btn onclick="browseSetting('clients_file')">Choose…</button></div></div>
-      <p class=muted style="font-size:11.5px;margin:0 0 11px">Your client list lives in this one file, like every other document folder here — point it at an existing spreadsheet to use that, or a new filename to start fresh. Leave blank to keep using the app's built-in storage.</p>
+      <p class=muted style="font-size:12px;margin:0 0 11px">One shared client list, saved automatically to the cloud — the same clients show up from every brand profile and every install, no folder or spreadsheet to set up.</p>
       <button class=btn style="width:100%" onclick="exportAllClients()">Export All Client Profiles (Excel)</button>
     </div></div>
     </div>
@@ -6789,7 +6830,7 @@ function refreshCatSectionResize(id){
     const run=()=>refreshCatSectionResize(id);
     new MutationObserver(()=>{clearTimeout(el._resizeT);el._resizeT=setTimeout(run,50)}).observe(el,{childList:true,subtree:true,characterData:true});
     run()})})();
-const SETTINGS_FIELDS=['product_photos_folder','datasheets_folder','templates_folder','clients_file'];
+const SETTINGS_FIELDS=['product_photos_folder','datasheets_folder','templates_folder'];
 async function loadSettings(){
   showSettingsMainPanel();  // always land on the main panel, not wherever the admin sub-page was left
   showSettingsTab('folders');  // ditto for the tabs — always start on the first one
@@ -14539,6 +14580,25 @@ def _documents_sync_loop():
             pass
         time.sleep(30)
 threading.Thread(target=_documents_sync_loop, daemon=True).start()
+
+# Shared client list (see _migrate_clients_to_cloud()'s own comment — fixes
+# "clients list is visible only to Artemis profile, it should be available
+# for all the profiles"): pull the real cloud copy down first (best-effort,
+# safe to no-op if R2 isn't configured or this is the very first install to
+# ever run this), THEN migrate — so the migration's "already in the shared
+# list" de-dupe check is comparing against the actual latest cloud state,
+# not a stale/empty local cache.
+_sync_clients_from_cloud()
+_migrate_clients_to_cloud()
+
+def _clients_sync_loop():
+    while True:
+        time.sleep(30)
+        try:
+            _sync_clients_from_cloud()
+        except Exception:
+            pass
+threading.Thread(target=_clients_sync_loop, daemon=True).start()
 
 if __name__ == "__main__":
     # Single instance only — per explicit request: "if the software is

@@ -37,6 +37,12 @@ dist/
 bundled_browser/
 _internal/
 installer_output/
+
+# runtime_manager.py's own local cache (engine.DATA_BASE/runtime/) — where
+# a dev checkout's Chromium ends up after the one-time legacy migration
+# (see _migrate_legacy_runtime()), same "not source, just local runtime
+# state" category as bundled_browser/ above.
+runtime/
 *.spec
 *.exe
 

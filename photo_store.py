@@ -60,6 +60,13 @@ HARD_LIMIT_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB — see module docstring
 # excludes this prefix so app bookkeeping never shows up as a "photo".
 SYSTEM_PREFIX = "system/"
 
+# Image extensions actual photos can have — used by list_photos() below as
+# defense in depth alongside the SYSTEM_PREFIX/DOCUMENTS_PREFIX exclusions,
+# so any FUTURE top-level key prefix (another non-photo feature added later
+# and forgetting to update this list) still can't leak into the photo
+# gallery just by not matching a known non-photo prefix.
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
 # Bundled read-only fallback — see module docstring's "Two credential
 # tiers". Lives at the project root (like VERSION) so build.bat's
 # --add-data picks it up; NOT in .gitignore's sense of "never commit" the
@@ -215,7 +222,7 @@ def get_usage():
             kwargs["ContinuationToken"] = token
         resp = client.list_objects_v2(**kwargs)
         for obj in resp.get("Contents", []):
-            if obj["Key"].startswith(SYSTEM_PREFIX):
+            if obj["Key"].startswith(SYSTEM_PREFIX) or obj["Key"].startswith(DOCUMENTS_PREFIX):
                 continue
             total += obj["Size"]
             count += 1
@@ -306,9 +313,12 @@ def list_photos():
             kwargs["ContinuationToken"] = token
         resp = client.list_objects_v2(**kwargs)
         for obj in resp.get("Contents", []):
-            if obj["Key"].startswith(SYSTEM_PREFIX):
+            key = obj["Key"]
+            if key.startswith(SYSTEM_PREFIX) or key.startswith(DOCUMENTS_PREFIX):
                 continue
-            out.append({"key": obj["Key"], "size": obj["Size"], "modified": obj["LastModified"].isoformat()})
+            if not key.lower().endswith(IMAGE_EXTENSIONS):
+                continue
+            out.append({"key": key, "size": obj["Size"], "modified": obj["LastModified"].isoformat()})
         if not resp.get("IsTruncated"):
             break
         token = resp.get("NextContinuationToken")
