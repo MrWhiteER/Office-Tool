@@ -67,8 +67,22 @@ Name: "desktopicon"; Description: "Create a &Desktop shortcut"; GroupDescription
 [Files]
 ; Everything PyInstaller produced (the .exe + its _internal runtime/
 ; bundled-resources folder) — the ONLY files this installer ever manages.
+; Does NOT include bundled_browser\ (the ~400MB Chromium payload) as of
+; RUNTIME_VERSION/runtime_manager.py — see build.bat's own comment for
+; why that's now a separate, rarely-changing download instead of part of
+; every single app update.
 Source: "dist\OfficeTool\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\OfficeTool\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Anyone updating from a version that still shipped Chromium inside
+; _internal\ (every version through v1.1.26) has a real, already-
+; downloaded ~400MB sitting at {app}\_internal\bundled_browser\ — this is
+; deliberately NOT deleted here. runtime_manager.py's own startup check
+; MOVES it into the new {app}\runtime\ location instead of re-downloading
+; it from scratch (and cleans up the old empty folder itself once
+; that's done) — see its own module docstring. Forcibly deleting it here,
+; before the app ever gets a chance to migrate it, would just force a
+; redundant ~400MB re-download for every single existing install, which
+; is exactly the problem this whole feature exists to avoid.
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

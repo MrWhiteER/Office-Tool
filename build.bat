@@ -4,44 +4,23 @@ REM Produces dist\OfficeTool\OfficeTool.exe — a real native-window app (no
 REM browser needed), built from the same app.py/engine.py/html_engine.py
 REM this project runs in dev with `python app.py`.
 REM
-REM Requires `playwright install chromium` to have been run at least once on
-REM THIS machine already — NOT so the .exe can use that shared cache at
-REM runtime (an earlier design; confirmed unreliable — see html_engine.py's
-REM _get_browser() for the full story) but so build.bat below can copy the
-REM real chrome.exe from it INTO bundled_browser\, which then ships inside
-REM the installer itself. bundled_browser\ is gitignored (400MB+, and a
-REM real build input regenerated here, not source) — this step (re)builds
-REM it from whatever's in %LOCALAPPDATA%\ms-playwright right now.
+REM As of RUNTIME_VERSION/runtime_manager.py, this build does NOT bundle
+REM bundled_browser\ (the ~400MB Chromium Playwright needs for live-
+REM preview rendering) into the app installer at all anymore — per
+REM explicit request: shipping a ~400MB payload that almost never changes
+REM inside the SAME installer as the app's own code (which changes almost
+REM every release) meant every single app update re-downloaded and
+REM re-installed the whole browser for nothing. The app now downloads
+REM that separately, ONCE, the first time it's needed (see
+REM runtime_manager.py's own module docstring) — this build only needs
+REM `playwright install chromium` locally so build_runtime.bat can package
+REM THAT as its own separate, rarely-rebuilt release asset; the main app
+REM build below only bundles RUNTIME_VERSION (a one-line text file naming
+REM which Chromium build this app expects), not the Chromium files
+REM themselves.
 where python >nul 2>nul || (echo Python is not installed. Get it from https://python.org & pause & exit /b)
 python -m pip install -r requirements.txt
 python -m pip show pyinstaller >nul 2>nul || python -m pip install pyinstaller
-REM "if exist bundled_browser\*\chrome-win64\chrome.exe" looks reasonable but
-REM is actually always false: cmd's IF EXIST does not expand a wildcard that
-REM sits in a MIDDLE path segment (only a wildcard in the final component is
-REM matched) — confirmed directly (`if not exist ...\*\chrome-win64\chrome.exe`
-REM prints NOTFOUND even with the real file sitting right there). That silent
-REM false-negative meant this step always tried to re-populate on every build
-REM (harmless when nothing was locked) but could also always report "no local
-REM Chromium found" after a successful populate and abort the whole build —
-REM real, reproducible failure, not a one-off. Fixed by using a recursive
-REM `dir /s /b` search (no path-position wildcard limitation) into a
-REM plain variable instead of re-asking IF EXIST the same broken question.
-set "FOUND_CHROME="
-for /f "delims=" %%F in ('dir /s /b "bundled_browser\chrome.exe" 2^>nul') do set "FOUND_CHROME=%%F"
-if not defined FOUND_CHROME (
-  echo Populating bundled_browser\ from %LOCALAPPDATA%\ms-playwright ...
-  for /d %%D in ("%LOCALAPPDATA%\ms-playwright\chromium-*") do (
-    if exist "%%D\chrome-win64\chrome.exe" (
-      mkdir "bundled_browser\%%~nxD" 2>nul
-      xcopy /e /i /y /q "%%D" "bundled_browser\%%~nxD" >nul
-    )
-  )
-  for /f "delims=" %%F in ('dir /s /b "bundled_browser\chrome.exe" 2^>nul') do set "FOUND_CHROME=%%F"
-)
-if not defined FOUND_CHROME (
-  echo No local Chromium install found to bundle — run "playwright install chromium" first.
-  pause & exit /b
-)
 REM --clean (plus deleting any leftover dist\build folders first) — found
 REM the hard way: an incremental PyInstaller build can silently keep a
 REM STALE cached copy of a module even after its source changed, with no
@@ -58,8 +37,8 @@ pyinstaller --name OfficeTool --noconfirm --clean --windowed ^
   --add-data "templates;templates" ^
   --add-data "static;static" ^
   --add-data "VERSION;." ^
+  --add-data "RUNTIME_VERSION;." ^
   --add-data "r2_readonly.json;." ^
-  --add-data "bundled_browser;bundled_browser" ^
   --add-data "branding;branding" ^
   --collect-all playwright ^
   --collect-all pystray ^

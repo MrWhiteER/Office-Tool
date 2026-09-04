@@ -12,6 +12,7 @@ import html_engine
 import pdf_extract
 import catalog_builder
 import update_checker
+import runtime_manager
 import accounts
 import photo_store
 import scanner
@@ -14724,7 +14725,16 @@ if __name__ == "__main__":
             # Only a `loaded` that fires AFTER the poll below has
             # confirmed Flask is actually answering (and forced its own
             # fresh load_url) is trusted to mean the real app is showing.
-            _state = {"swapped": False, "server_ready": False}
+            # runtime_ready gates the swap too, alongside server_ready —
+            # per the separate-runtime-download feature (see
+            # runtime_manager.py's own module docstring): on an ordinary
+            # launch this is already true instantly (a local file check,
+            # no network), but on a first install or the rare occasion
+            # Playwright's own Chromium build moves on, this is where
+            # that download actually happens, with real progress shown
+            # on the loading square itself rather than silently blocking
+            # the first live-preview render later with no explanation.
+            _state = {"swapped": False, "server_ready": False, "runtime_ready": False}
             def _swap_to_main_once():
                 if _state["swapped"]:
                     return
@@ -14745,9 +14755,12 @@ if __name__ == "__main__":
                 else:
                     _swap_to_main_once()
 
-            def _on_main_loaded():
-                if _state["server_ready"]:
+            def _try_swap():
+                if _state["server_ready"] and _state["runtime_ready"]:
                     _swap_respecting_minimum()
+
+            def _on_main_loaded():
+                _try_swap()
             window.events.loaded += _on_main_loaded
 
             def _wait_for_server_then_load():
@@ -14765,11 +14778,40 @@ if __name__ == "__main__":
                     pass
                 # Safety net: if `loaded` never fires for some reason (a
                 # busy/slow first render), don't leave the user stuck
-                # staring at the loading square forever — swap over after
-                # a generous timeout regardless.
+                # staring at the loading square forever — try the swap
+                # anyway after a generous timeout (still gated on
+                # runtime_ready — if a runtime download is genuinely
+                # still in progress, that thread's own completion is
+                # what finally triggers the real swap, however long it
+                # takes).
                 time.sleep(15)
-                _swap_respecting_minimum()
+                _try_swap()
             threading.Thread(target=_wait_for_server_then_load, daemon=True).start()
+
+            def _ensure_runtime_then_ready():
+                try:
+                    if not runtime_manager.is_runtime_ready():
+                        def _on_runtime_progress(done, total):
+                            pct = int(done * 100 / total) if total else 0
+                            try:
+                                loading_window.evaluate_js("if(window.officeToolSetProgress)officeToolSetProgress(%d);" % pct)
+                            except Exception:
+                                pass
+                        runtime_manager.ensure_runtime(on_progress=_on_runtime_progress)
+                        try:
+                            loading_window.evaluate_js("if(window.officeToolSetProgress)officeToolSetProgress(-1);")
+                        except Exception:
+                            pass
+                except Exception:
+                    # Best-effort — a failed runtime download shouldn't
+                    # hang startup forever. The app still opens; live
+                    # preview will just fail with its own real error
+                    # (html_engine.py's _get_browser()) rather than this
+                    # ever silently pretending everything's fine.
+                    pass
+                _state["runtime_ready"] = True
+                _try_swap()
+            threading.Thread(target=_ensure_runtime_then_ready, daemon=True).start()
 
         # ---- System tray -----------------------------------------------
         # The X button now MINIMIZES to the system tray instead of quitting

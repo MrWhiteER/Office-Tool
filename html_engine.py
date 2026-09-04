@@ -33,6 +33,7 @@ from collections import Counter
 from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup, escape
 import engine
+import runtime_manager
 
 # Reuses engine.BASE (not its own recomputation) so both modules agree on
 # one resource root — see engine.py's own comment on why this can't just
@@ -339,22 +340,44 @@ def _get_browser():
     # cause, depending on anything outside the app's own installed files
     # is the actual problem.
     #
-    # Fix: bundle the real chrome.exe INTO the app itself (see
-    # bundled_browser/ + build.bat's --add-data), read through
-    # engine.BASE the same proven-reliable way templates_html/static
-    # already are, and prefer that over the external cache entirely.
-    # Falls back to the external cache (then Playwright's own default
-    # resolution) only for a dev checkout that never populated
-    # bundled_browser/ locally — see build.bat's own comment for how to
-    # populate it.
+    # Fix: bundle the real chrome.exe INTO the app itself, read through a
+    # known local path the same proven-reliable way templates_html/static
+    # already are, rather than depending on anything outside the app's
+    # own installed files. Falls back to Playwright's own default
+    # resolution only for a dev checkout that's never populated a local
+    # runtime at all.
+    #
+    # Checked in order:
+    # 1. runtime_manager.BUNDLED_BROWSER_DIR — engine.DATA_BASE/runtime/
+    #    bundled_browser, OUTSIDE {app}\_internal\, so ordinary app
+    #    updates never touch it (see runtime_manager.py's own module
+    #    docstring for the full "why split this out" reasoning: the
+    #    ~400MB Chromium payload almost never changes between app
+    #    releases, so shipping it in the SAME installer as the app's own
+    #    code — which changes almost every release — meant re-downloading
+    #    and re-installing the whole browser on every single app update
+    #    for nothing). app.py's startup calls
+    #    runtime_manager.ensure_runtime() before this is ever reached, so
+    #    in the normal case this is already populated by the time any
+    #    render happens.
+    # 2. BASE/bundled_browser — the OLD bundled-at-PyInstaller-build-time
+    #    location. Kept as a fallback (not removed) for a dev checkout
+    #    that populated it the old way and hasn't set up RUNTIME_VERSION/
+    #    the separate runtime download yet.
     candidate = None
-    bundled_root = os.path.join(BASE, "bundled_browser")
-    if os.path.isdir(bundled_root):
+    for bundled_root in (
+        runtime_manager.BUNDLED_BROWSER_DIR,
+        os.path.join(BASE, "bundled_browser"),
+    ):
+        if not os.path.isdir(bundled_root):
+            continue
         for name in os.listdir(bundled_root):
             p = os.path.join(bundled_root, name, "chrome-win64", "chrome.exe")
             if os.path.isfile(p):
                 candidate = p
                 break
+        if candidate:
+            break
     if candidate:
         _tls.browser = _tls.playwright.chromium.launch(executable_path=candidate)
     else:
