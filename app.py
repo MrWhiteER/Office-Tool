@@ -131,8 +131,36 @@ def api_logout():
 def api_current_user():
     if not session.get("user"):
         return jsonify({"logged_in": False})
+    # settings is looked up fresh here (not cached in the session, unlike
+    # role/brand_lock/blocked_tools) specifically so a preference changed
+    # on ANOTHER PC shows up here without needing to log out/in again —
+    # accounts.find_user() reads the local accounts cache, which the
+    # background sync loop (see bottom of this file) already refreshes
+    # every 8 seconds on its own, so this just rides that for free.
+    u = accounts.find_user(session["user"])
     return jsonify({"logged_in": True, "username": session["user"], "role": session["role"],
-                     "brand_lock": session.get("brand_lock"), "blocked_tools": session.get("blocked_tools") or []})
+                     "brand_lock": session.get("brand_lock"), "blocked_tools": session.get("blocked_tools") or [],
+                     "settings": ((u.get("settings") or {}) if u else {})})
+
+@app.get("/api/user-settings")
+def api_get_user_settings():
+    if not session.get("user"):
+        return jsonify({"settings": {}})
+    u = accounts.find_user(session["user"])
+    return jsonify({"settings": ((u.get("settings") or {}) if u else {})})
+
+@app.post("/api/user-settings")
+def api_set_user_settings():
+    # Any logged-in user — not just the admin — can save their OWN
+    # settings (currently just "theme"). See accounts.save_user_setting()
+    # for why this is safe to leave open to every user, unlike the
+    # admin-only /api/accounts-publish.
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Not logged in."}), 401
+    data = request.json or {}
+    key = (data.get("key") or "").strip()
+    result = accounts.save_user_setting(session["user"], key, data.get("value"))
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 # ---- Admin-only user management (Settings > Users) — see accounts.py ----
 @app.get("/api/accounts")
@@ -6453,7 +6481,16 @@ function toggleTheme(){
   const next=effectiveTheme()==='dark'?'light':'dark';
   document.documentElement.setAttribute('data-theme',next);
   try{localStorage.setItem('theme',next)}catch(e){}
-  syncThemeIcon()}
+  syncThemeIcon();
+  // Persist to the account too (not just this device) — best-effort,
+  // fire-and-forget: the toggle itself already applied instantly above,
+  // so a slow/offline save here should never hold up the UI. Only once
+  // actually logged in — the pre-login theme toggle on the login page
+  // itself has no account yet to attach this to.
+  if(LOGGED_IN){
+    fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:'theme',value:next})}).catch(()=>{})
+  }}
 syncThemeIcon();
 // Every document type is its own sidebar entry with its own view name, all
 // sharing the one #v-build DOM underneath — which card set is visible is
@@ -13989,6 +14026,17 @@ function hideSplash(){
   },wait)}
 function applySession(u){
   LOGGED_IN=true;CURRENT_USER=u.username;CURRENT_ROLE=u.role;BRAND_LOCK=u.brand_lock;BLOCKED_TOOLS=u.blocked_tools||[];
+  // Per-user theme — "let the theme be linked to the user account": this
+  // account's own saved choice (settings.theme, synced via the same R2
+  // connection as the rest of the account) wins over whatever this ONE
+  // device's own localStorage happened to have, so the same person sees
+  // their own theme on every PC they sign into, not a per-device one.
+  const savedTheme=(u.settings||{}).theme;
+  if(savedTheme==='dark'||savedTheme==='light'){
+    document.documentElement.setAttribute('data-theme',savedTheme);
+    try{localStorage.setItem('theme',savedTheme)}catch(e){}
+    syncThemeIcon()
+  }
   applyAccessRestrictions()}
 function applyAccessRestrictions(){
   // Brand lock: hide the brand switcher entirely and pin BRAND once
