@@ -5077,6 +5077,20 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .altime{color:var(--muted);flex:0 0 auto;white-space:nowrap;font-variant-numeric:tabular-nums}
 .ordmovebtn{border:none;background:var(--surface-2);color:var(--muted);font-size:8px;line-height:1;cursor:pointer;padding:2px 4px;border-radius:3px;transition:background .15s}.ordmovebtn:hover{background:var(--tint);color:var(--amber2)}.ordmovebtn:disabled{opacity:.3;cursor:default;background:var(--surface-2);color:var(--muted)}.ordmovebtn+.ordmovebtn{margin-top:1px}
 .catordfieldicon{border:none;background:none;color:var(--ink);cursor:pointer;padding:3px;border-radius:5px;display:flex;transition:background .12s}.catordfieldicon:hover{background:var(--tint)}.catordfieldicon svg{width:16px;height:16px}
+/* Ordering Table variant tabs — small, symmetric, numbered boxes (per
+   explicit request: "this can be also like tablet boxes... named as the
+   table quantity from 1 to how many rows there is") replacing the old
+   single <select>+▲▼ variant switcher — see renderCatOrdTable's own
+   comment for the full "why". flex-wrap on their shared row (not a
+   fixed-width grid) is what keeps every wrapped row starting flush at
+   the container's own left edge no matter how many variants there are —
+   plain flex-wrap always restarts each new line at the start edge, so
+   this needs no extra alignment rule of its own to stay "standard for
+   1+ rows of tabs" the way the old nav bar's flex:1 spacer + dropdown
+   combination did not. */
+.ordvarpill{display:inline-flex;align-items:center;gap:4px;min-width:26px;justify-content:center;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--muted);background:var(--surface-2);border:1.5px solid var(--border);border-radius:8px;padding:4px 8px;cursor:pointer;transition:background .12s,border-color .12s,color .12s}
+.ordvarpill:hover{border-color:#e0c48f;color:var(--amber2)}
+.ordvarpill.on{background:var(--tint);border-color:var(--amber);color:var(--amber2)}
 /* Shared drag-to-reorder feedback — every draggable row across Category/
    Section/Index Order, front matter, and the datasheet form's own
    reorderable rows (spec values, ordering table) gets this same class.
@@ -5108,7 +5122,18 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .permzonebody.permzone-over{background:var(--tint);border-color:var(--amber);border-style:solid}
 .permzoneempty{font-size:10px;color:var(--muted);font-style:italic;padding:2px}
 @keyframes permPop{0%{transform:scale(.5);opacity:0}60%{transform:scale(1.12);opacity:1}100%{transform:scale(1);opacity:1}}
-.permpill{animation:permPop .32s cubic-bezier(.34,1.56,.64,1);cursor:grab}
+/* Real, confirmed bug fixed here — per explicit report, screenshotted:
+   this rule only ever set `animation`/`cursor`, nothing that actually
+   makes a pill LOOK like a pill (no background/border/padding at all),
+   so every item just rendered as bare flowing text with no visible
+   separation between them. Boxed to match the Ordering Table's own
+   field-pill convention exactly (dragrow + draghandle "⠿" + a small
+   var(--surface-2)/var(--border) rounded box — see renderCatOrdTable's
+   fieldsHtml for the original) per explicit "something like this just
+   not with the emoji but with the text" — same box, text instead of an
+   icon inside it. */
+.permpill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--ink);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:4px 9px;white-space:nowrap;user-select:none;animation:permPop .32s cubic-bezier(.34,1.56,.64,1);cursor:grab}
+.permpill:hover{border-color:#e0c48f;color:var(--amber2)}
 .permpill:active{cursor:grabbing}
 .draghandle:active{cursor:grabbing}
 .dragrow:hover .draghandle{color:var(--amber2)}
@@ -10746,6 +10771,41 @@ function moveCatOrdVariant(vi,dir){
   recomputeCatOrdSizeDNumbers();
   recomputeOrderingCodeExample();
   renderCatOrdTable();schedulePreview()}
+// Drag-drop counterpart of moveCatOrdVariant — reordering the variant
+// TABS above the fields panel (renderCatOrdTable's own comment), brought
+// back now that more than one variant is genuinely visible at once again.
+// Unlike the ▲▼ version this can land anywhere in one move, splicing
+// every lockstepped column's value out of index vi and back in at the
+// drop position — same before/after-the-pointer math as ordFieldDrop,
+// applied to catOrdLockstepCols() (Finish Options/Lumen stay out of this,
+// same scope moveCatOrdVariant already uses — they track their own
+// independent length, not one shared per-variant index).
+function ordVariantDrop(e,targetVi){
+  e.preventDefault();
+  e.currentTarget.classList.remove('dragover-left','dragover-right');
+  if(!DRAG_KEY||DRAG_KEY.kind!=='variant')return;
+  const vi=DRAG_KEY.vi;
+  if(vi===targetVi)return;
+  const rect=e.currentTarget.getBoundingClientRect();
+  const before=(e.clientX-rect.left)<rect.width/2;
+  let insertAt=targetVi+(before?0:1);
+  if(vi<insertAt)insertAt--;
+  if(vi===insertAt)return;
+  catOrdLockstepCols().forEach(c=>{
+    if(vi>=c.values.length)return;
+    const item=c.values.splice(vi,1)[0];
+    c.values.splice(insertAt,0,item)});
+  // Keep the fields panel showing whichever variant was open, now at its
+  // new index — same "follow the moved/shifted item" reasoning
+  // moveCatOrdVariantCurrent already applied to the old ▲▼ buttons.
+  if(CAT_ORD_CURRENT_VARIANT===vi)CAT_ORD_CURRENT_VARIANT=insertAt;
+  else if(vi<CAT_ORD_CURRENT_VARIANT&&insertAt>=CAT_ORD_CURRENT_VARIANT)CAT_ORD_CURRENT_VARIANT--;
+  else if(vi>CAT_ORD_CURRENT_VARIANT&&insertAt<=CAT_ORD_CURRENT_VARIANT)CAT_ORD_CURRENT_VARIANT++;
+  const pow=findCatOrdPowerCol();
+  if(pow)syncSpecPowerFromOrdering(pow.values);
+  recomputeCatOrdSizeDNumbers();
+  recomputeOrderingCodeExample();
+  renderCatOrdTable();schedulePreview()}
 // Drag-drop counterpart of moveCatOrdField — unlike the arrow version this
 // can land anywhere in one move, so it splices the whole field out of
 // CAT_ORD_COLS and back in at the drop position (before/after read off
@@ -10764,11 +10824,6 @@ function ordFieldDrop(e,targetCi){
   if(ci<insertAt)insertAt--;
   CAT_ORD_COLS.splice(insertAt,0,item);
   renderCatOrdTable();schedulePreview()}
-// (The old ordVariantDrop — drag-drop counterpart to moveCatOrdVariant —
-// was removed when the Ordering Table moved to showing one variant at a
-// time: with only one variant visible there's no second card to drop onto
-// anymore. moveCatOrdVariant's ▲▼ buttons, exposed via
-// moveCatOrdVariantCurrent, are now the only reorder path.)
 // Shared by every value-cell builder below (generic/CCT/Size/Controls/
 // Voltage/Power) instead of each hand-rolling its own flex wrapper. Move/
 // remove chrome is per-cell plumbing left over from the old column-major
@@ -12053,22 +12108,29 @@ function renderCatOrdTable(){
       '</div>'}).join('')+
     '<button type=button class=btn style="font-size:11px;padding:6px 10px" onclick="openCatOrdColMenu(event)">+ Add Field</button>'+
   '</div>';
-  // One variant shown at a time (Technical Specifications' own sidebar
-  // layout, label-left/value-right full-width rows, not the old wrap of
-  // small boxes) — jump between variants via the dropdown, or step through
-  // sequentially with Complete. Drag-reordering variants (ordVariantDrop)
-  // doesn't apply anymore: with only one variant visible there's no second
-  // card to drop onto, so ▲▼ (already fully functional, already existing)
-  // is the reorder mechanism here — a deliberate, narrow exception to this
-  // app's usual "reorder tools must be draggable" rule, specific to this
-  // view no longer showing more than one item at once.
+  // One variant shown at a time below (Technical Specifications' own
+  // sidebar layout, label-left/value-right full-width rows) — but WHICH
+  // one is picked via a real row of small draggable tabs, one per variant,
+  // each just its own running position number, per explicit request
+  // ("this can be also like tablet boxes, which can be re-aranged if
+  // required and it will be named as the table quantity from 1 to how
+  // many rows there is") — replaces the old <select>+▲▼ combo, which had
+  // been a deliberate, narrow exception to this app's usual "reorder
+  // tools must be draggable" rule (see ordFieldDrop's own comment on the
+  // old ordVariantDrop this brings back, now that more than one variant
+  // is visible again at once to actually drop onto). Plain flex-wrap (no
+  // fixed grid) is what keeps a wrapped second/third row of tabs starting
+  // flush at the same left edge as the first row with zero extra CSS —
+  // exactly the "starting point" consistency asked for, however many
+  // variants there are.
   const vi=CAT_ORD_CURRENT_VARIANT;
-  const navHtml='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px">'+
-    '<select style="font-size:12px;padding:6px 8px;border-radius:6px;font-weight:600" onchange="setCatOrdCurrentVariant(parseInt(this.value,10))">'+
-      Array.from({length:n},(_,i)=>'<option value="'+i+'"'+(i===vi?' selected':'')+'>'+escHtml(catOrdVariantDropdownLabel(i))+'</option>').join('')+
-    '</select>'+
-    '<button type=button class=ordmovebtn'+(vi===0?' disabled':'')+' onclick="moveCatOrdVariantCurrent(-1)" title="Move this variant earlier">▲</button>'+
-    '<button type=button class=ordmovebtn'+(vi===n-1?' disabled':'')+' onclick="moveCatOrdVariantCurrent(1)" title="Move this variant later">▼</button>'+
+  const variantTabsHtml='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">'+
+    Array.from({length:n},(_,i)=>
+      '<div class="dragrow ordvarpill'+(i===vi?' on':'')+'" draggable="'+(n>1)+'" ondragstart="dragRowStart(event,{kind:\'variant\',vi:'+i+'})" ondragover="dragColOver(event)" ondragleave="dragColLeave(event)" ondrop="ordVariantDrop(event,'+i+')" ondragend="dragRowEnd(event)" onclick="setCatOrdCurrentVariant('+i+')" title="'+escHtml(catOrdVariantLabel(i))+'">'+
+        (n>1?'<span class=draghandle title="Drag to reorder">⠿</span>':'')+(i+1)+
+      '</div>').join('')+
+  '</div>';
+  const navHtml=variantTabsHtml+'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px">'+
     (n>1?'<button type=button class=rm onclick="removeCatOrdVariantCurrent()" title="Remove this variant">×</button>':'')+
     '<div style="flex:1"></div>'+
     catOrdSortHtml()+
@@ -15481,7 +15543,7 @@ function permRender(group){
   const off=g.items.filter(v=>!g.selected.has(v));
   const on=g.items.filter(v=>g.selected.has(v));
   const esc=v=>String(v).replace(/'/g,"\\'");
-  const pill=v=>'<span class=permpill draggable=true ondragstart="permDragStart(event,\''+group+'\',\''+esc(v)+'\')" ondragend="dragRowEnd(event)" onclick="permToggle(\''+group+'\',\''+esc(v)+'\')" title="Click, or drag to the other side">'+escHtml(g.labelFn(v))+'</span>';
+  const pill=v=>'<span class="dragrow permpill" draggable=true ondragstart="permDragStart(event,\''+group+'\',\''+esc(v)+'\')" ondragend="dragRowEnd(event)" onclick="permToggle(\''+group+'\',\''+esc(v)+'\')" title="Click, or drag to the other side"><span class=draghandle>⠿</span>'+escHtml(g.labelFn(v))+'</span>';
   const zone=(list,emptyMsg)=>list.length?list.map(pill).join(''):'<span class=permzoneempty>'+emptyMsg+'</span>';
   $(g.containerId).innerHTML=
     '<div class=permswap>'+
