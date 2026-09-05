@@ -291,7 +291,12 @@ def publish_to_cloud():
 # are the standard profile fields behind the account-avatar popup (per
 # explicit request: "standard information to fill... phone details and
 # etc." then "add more thing. Email Personal, company Email").
-USER_SETTABLE_KEYS = ("theme", "full_name", "phone", "personal_email", "company_email")
+# "profile_picture_version" is NOT the picture itself (that's a separate
+# R2 object — see photo_store.upload_profile_picture()) — just a plain
+# timestamp string set whenever one is uploaded/removed, so the frontend
+# knows whether to even try fetching /api/profile-picture at all, and can
+# cache-bust the <img> src when it changes.
+USER_SETTABLE_KEYS = ("theme", "full_name", "phone", "personal_email", "company_email", "profile_picture_version")
 
 
 def save_user_setting(username, key, value):

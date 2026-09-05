@@ -301,6 +301,71 @@ def api_change_password():
     result = accounts.change_own_password(session["user"], data.get("current_password"), data.get("new_password"))
     return jsonify(result), (200 if result.get("ok") else 400)
 
+# ---- Profile picture (account avatar popup) — any logged-in user, only
+# ever their OWN (see photo_store.upload_profile_picture()'s own comment
+# on why that's safe to leave open). Per explicit request: "make it so
+# the user can upload his own profile picture." ----
+@app.post("/api/profile-picture-upload")
+def api_profile_picture_upload():
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Not logged in."}), 401
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "No file."}), 400
+    tmp_path = os.path.join(engine.DATA_BASE, "_profilepic_tmp_" + uuid.uuid4().hex + ".png")
+    try:
+        # Normalize whatever format/size the user picked into a small,
+        # consistent PNG before uploading — a multi-megapixel phone photo
+        # has no business being someone's tiny avatar. thumbnail() only
+        # ever shrinks (never upscales) and preserves aspect ratio; the
+        # 3:4 rail/circular-popup display shapes are a CSS object-fit
+        # concern (see .avatarslot/.avatarcircle), not baked in here, so
+        # the same stored picture works in either shape.
+        from PIL import Image
+        img = Image.open(f.stream).convert("RGBA")
+        img.thumbnail((512, 512))
+        img.save(tmp_path, "PNG")
+        photo_store.upload_profile_picture(tmp_path, session["user"])
+        version = str(int(time.time()))
+        accounts.save_user_setting(session["user"], "profile_picture_version", version)
+        return jsonify({"ok": True, "version": version})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+@app.post("/api/profile-picture-remove")
+def api_profile_picture_remove():
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Not logged in."}), 401
+    try:
+        photo_store.delete_profile_picture(session["user"])
+    except Exception:
+        pass  # already gone / never set — removing is still "success" either way
+    accounts.save_user_setting(session["user"], "profile_picture_version", "")
+    return jsonify({"ok": True})
+
+@app.get("/api/profile-picture")
+def api_profile_picture():
+    """Open to any logged-in user, not just the picture's owner — same
+    read-only-browsing-is-fine stance as /api/photostore-fetch. A plain
+    404 (not 502) when this person never set one, since that's the
+    overwhelmingly common case, not an error — see
+    photo_store.get_profile_picture()'s own comment."""
+    if not session.get("user"):
+        return jsonify({"error": "Not logged in."}), 401
+    username = request.args.get("username", "")
+    if not username:
+        return jsonify({"error": "Missing username."}), 400
+    try:
+        data, content_type = photo_store.get_profile_picture(username)
+    except Exception:
+        return jsonify({"error": "No profile picture set."}), 404
+    resp = Response(data, mimetype=content_type)
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    return resp
+
 # ---- Admin-only user management (Settings > Users) — see accounts.py ----
 @app.get("/api/accounts")
 def api_accounts_list():
@@ -4672,7 +4737,19 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
 /* Account avatar (rail) — same 21px footprint as .navicon so it lines up
    with every other rail button, just a filled circle + initial instead
    of an outline icon (see openProfileModal()). */
-.avatarcircle{width:21px;height:21px;flex-shrink:0;border-radius:50%;background:var(--amber);color:var(--brand-dark);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;text-transform:uppercase}
+.avatarcircle{width:21px;height:21px;flex-shrink:0;border-radius:50%;background:var(--amber);color:var(--brand-dark);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;text-transform:uppercase;overflow:hidden}
+.avatarcircle img{width:100%;height:100%;object-fit:cover;display:block}
+/* Rail-only avatar shape (n-avatar) — per explicit request: "a little
+   more bigger and not necessary to be circle, let it be like a 3:4
+   resolution on the bottom left only". Everywhere else the account
+   avatar appears (the profile popup's own preview) keeps .avatarcircle
+   above — this is deliberately scoped to just the rail button.
+   aspect-ratio 5/6 (not literally 3/4) — height lowered 10% from the
+   original 3:4 per explicit follow-up request, width unchanged: original
+   height at 32px wide was 32*4/3=42.67px; 42.67*0.9=38.4px is exactly
+   32*6/5, i.e. a 5:6 ratio. */
+.avatarslot{width:32px;aspect-ratio:5/6;flex-shrink:0;border-radius:7px;overflow:hidden;background:var(--amber);color:var(--brand-dark);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;text-transform:uppercase}
+.avatarslot img{width:100%;height:100%;object-fit:cover;display:block}
 @media (prefers-reduced-motion:reduce){
   .rail,.rail:hover,.rail:focus-within,.rail.pinned,.nav,.nav .navicon,.nav:hover .navicon,.navlabel,.rail:hover .navlabel,.rail:focus-within .navlabel,.rail.pinned .navlabel,.brandbtn,.brandswitchlabel,.rail:hover .brandswitchlabel,.rail:focus-within .brandswitchlabel,.rail.pinned .brandswitchlabel{transition-duration:.001ms!important}
 }
@@ -5352,7 +5429,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
         change"). Click opens #profilemodal (profile fields + password
         change + Sign Out live there now, see openProfileModal()). -->
    <button class=nav id=n-avatar onclick="openProfileModal()" title="Your account">
-     <span class=avatarcircle id=avatarinitial>?</span>
+     <span class=avatarslot id=avatarslot>?</span>
      <span class=navlabel>Account</span>
    </button>
  </div>
@@ -6346,13 +6423,19 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
   <div class=clientmodalbox style="max-width:420px">
     <div class=clientmodalbar><b>Your Account</b><button class=btn onclick=closeProfileModal()>Close</button></div>
     <div class=clientmodalbody>
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
-        <span class=avatarcircle id=profile-avatar style="width:44px;height:44px;font-size:18px"></span>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">
+        <span class=avatarcircle id=profile-avatar style="width:64px;height:64px;font-size:24px;cursor:pointer" onclick=triggerProfilePictureUpload() title="Click to change your profile picture"></span>
+        <input type=file id=profile-picture-input accept="image/*" class=hide onchange=uploadProfilePicture()>
         <div>
           <div style="font-weight:700;font-size:15px" id=profile-username></div>
           <div class=muted style="font-size:11.5px" id=profile-role></div>
+          <div style="margin-top:6px;font-size:11.5px">
+            <a onclick=triggerProfilePictureUpload() style="cursor:pointer;text-decoration:underline">Upload photo</a>
+            <span id=profile-picture-remove-wrap class="hide"> · <a onclick=removeProfilePicture() style="cursor:pointer;text-decoration:underline;color:var(--danger)">Remove</a></span>
+          </div>
         </div>
       </div>
+      <p class=muted id=profile-picture-note style="font-size:11px;margin:-10px 0 14px"></p>
       <div class=f><label>Full Name</label><input id=profile-full_name placeholder="Your name"></div>
       <div class=f><label>Phone</label><input id=profile-phone placeholder="e.g. +971 50 123 4567"></div>
       <div class=f><label>Personal Email</label><input type=email id=profile-personal_email placeholder="you@example.com"></div>
@@ -14830,14 +14913,27 @@ function applyAccessRestrictions(){
   $('admin-tools-btn').style.display=CURRENT_ROLE==='admin'?'':'none';
   showSettingsMainPanel();
   updateAvatarBadge()}
-// Initial letter prefers the account's own Full Name (set via the avatar
-// popup) over the raw username, same idea as any app that shows "J" for
-// "John" once you've told it your name — falls back to the username's
-// first letter (or "?") before that's ever been set.
+// Renders either the uploaded profile picture (if one's set) or a
+// lettered initial into an avatar container — the rail's small 3:4
+// .avatarslot AND the profile popup's own bigger circular .avatarcircle
+// both call this with the SAME source data, just different CSS shapes
+// (per explicit request: bigger + 3:4 + not-circular is scoped to the
+// rail only — see .avatarslot's own comment). The letter prefers the
+// account's own Full Name over the raw username, same idea as any app
+// showing "J" for "John" once you've told it your name.
+function avatarImgUrl(){
+  const v=CURRENT_SETTINGS.profile_picture_version;
+  return v?('/api/profile-picture?username='+encodeURIComponent(CURRENT_USER)+'&v='+encodeURIComponent(v)):null}
+function renderAvatarInto(el){
+  if(!el)return;
+  const url=avatarImgUrl();
+  if(url){el.innerHTML='<img src="'+url+'" alt="">'}
+  else{const label=(CURRENT_SETTINGS.full_name||CURRENT_USER||'?').trim();el.textContent=(label[0]||'?').toUpperCase()}}
 function updateAvatarBadge(){
-  const label=(CURRENT_SETTINGS.full_name||CURRENT_USER||'?').trim();
-  const el=$('avatarinitial');if(el)el.textContent=(label[0]||'?').toUpperCase();
-  $('n-avatar').title='Your account ('+CURRENT_USER+')'}
+  renderAvatarInto($('avatarslot'));
+  renderAvatarInto($('profile-avatar'));
+  $('n-avatar').title='Your account ('+CURRENT_USER+')';
+  const removeWrap=$('profile-picture-remove-wrap');if(removeWrap)removeWrap.classList.toggle('hide',!avatarImgUrl())}
 async function doLogin(ev){
   ev.preventDefault();
   const btn=$('login-submit'),err=$('login-error');
@@ -14886,22 +14982,40 @@ async function doLogout(){
 // toggle, not this popup).
 const PROFILE_INFO_FIELDS=['full_name','phone','personal_email','company_email'];
 async function openProfileModal(){
-  $('profile-info-note').textContent='';$('profile-password-note').textContent='';
+  $('profile-info-note').textContent='';$('profile-password-note').textContent='';$('profile-picture-note').textContent='';
   $('profile-current-password').value='';$('profile-new-password').value='';$('profile-confirm-password').value='';
   $('profile-username').textContent=CURRENT_USER;
   $('profile-role').textContent=CURRENT_ROLE==='admin'?'Administrator':'User';
-  $('profile-avatar').textContent=$('avatarinitial').textContent;
   $('profilemodal').classList.remove('hide');
   const r=await fetch('/api/current-user').then(r=>r.json()).catch(()=>null);
   const settings=(r&&r.settings)||CURRENT_SETTINGS||{};
   CURRENT_SETTINGS=settings;
   CURRENT_GOOGLE_EMAIL=(r&&r.google_email)||'';
   PROFILE_INFO_FIELDS.forEach(k=>{const el=$('profile-'+k);if(el)el.value=settings[k]||''});
-  updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent;
+  updateAvatarBadge();
   renderGoogleAccountSection();
   fetch('/api/oauth/google-configured').then(r=>r.json()).then(r=>{
     $('profile-google-section').classList.toggle('hide',!r.configured)}).catch(()=>{})}
 function closeProfileModal(){$('profilemodal').classList.add('hide')}
+function triggerProfilePictureUpload(){$('profile-picture-input').click()}
+async function uploadProfilePicture(){
+  const input=$('profile-picture-input');
+  const f=input.files[0];if(!f)return;
+  const note=$('profile-picture-note');note.style.color='';note.textContent='Uploading…';
+  const fd=new FormData();fd.append('file',f,f.name);
+  const r=await fetch('/api/profile-picture-upload',{method:'POST',body:fd}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  input.value='';
+  if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not upload — try again.';return}
+  CURRENT_SETTINGS.profile_picture_version=r.version;
+  updateAvatarBadge();
+  note.style.color='var(--success)';note.textContent='Updated.'}
+async function removeProfilePicture(){
+  const note=$('profile-picture-note');note.style.color='';note.textContent='Removing…';
+  const r=await fetch('/api/profile-picture-remove',{method:'POST'}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not remove.';return}
+  CURRENT_SETTINGS.profile_picture_version='';
+  updateAvatarBadge();
+  note.style.color='var(--success)';note.textContent='Removed.'}
 function renderGoogleAccountSection(){
   if(CURRENT_GOOGLE_EMAIL){
     $('profile-google-status').textContent='Connected as '+CURRENT_GOOGLE_EMAIL+' — you can sign in with Google instead of your password.';
@@ -14956,7 +15070,7 @@ async function saveProfileInfo(btn){
   const failed=results.find(r=>!r.ok);
   if(!failed){
     Object.assign(CURRENT_SETTINGS,values);
-    updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent;
+    updateAvatarBadge();
     note.style.color='var(--success)';note.textContent='Saved.'
   }else{note.style.color='var(--danger)';note.textContent=failed.error||'Could not save — try again.'}}
 async function changeOwnPassword(btn){

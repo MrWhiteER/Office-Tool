@@ -36,6 +36,17 @@ The single key the admin enters in Admin Tools gets saved to BOTH:
    because it's a cheap, harmless safety net if the two ever do diverge
    again, not because they're expected to today.
 
+   They DID diverge once (2026-09-05, real incident): the admin's own
+   installed .exe had an older secret cached in ITS OWN config.json from
+   before the key was last rotated, while the bundled r2_readonly.json
+   (and the dev checkout's config.json) had the current one — since the
+   admin's own local key always wins over the bundle when present (see
+   _cfg_block()), every R2 call on that one install failed with
+   SignatureDoesNotMatch, even reads, even though every OTHER install
+   (using the bundled key) was fine. Fixed by hand (copying the correct
+   secret into that install's config.json) — there's no auto-repair for
+   this today; if it happens again, compare the two files directly.
+
 ---- 10GB hard stop ----
 Every upload checks current bucket usage + the new file's size against
 HARD_LIMIT_BYTES first and is rejected client-side (before any data
@@ -295,6 +306,43 @@ def get_uploader(key):
     THEY uploaded — anything with no recorded uploader stays admin-only to
     remove, same as before this existed."""
     return (_read_photo_attribution().get(key) or {}).get("uploaded_by")
+
+
+# One profile picture per user, under SYSTEM_PREFIX like accounts.json —
+# app bookkeeping, not part of the shared product-photo library (excluded
+# from list_photos()/get_usage() the same way). Per explicit request:
+# "make it so the user can upload his own profile picture." Always a
+# .png (app.py normalizes whatever the user picked before uploading), one
+# stable key per username so the frontend never needs to look up a URL —
+# it just requests /api/profile-picture?username=X and gets a 404 if
+# that person never set one.
+PROFILE_PICTURE_PREFIX = SYSTEM_PREFIX + "profile_pictures/"
+
+
+def profile_picture_key(username):
+    return PROFILE_PICTURE_PREFIX + (username or "").strip().lower() + ".png"
+
+
+def upload_profile_picture(local_path, username):
+    """Any logged-in user can set their OWN profile picture — narrow,
+    self-service write, same allow_bundled_write=True reasoning as
+    save_user_setting() (a regular user's bundled read-only key really
+    does carry write access today — see put_bytes()'s own comment)."""
+    with open(local_path, "rb") as f:
+        put_bytes(profile_picture_key(username), f.read(), "image/png", allow_bundled_write=True)
+
+
+def get_profile_picture(username):
+    """Raises (like get_photo_bytes()) if this user never set one, or the
+    connection isn't configured — app.py's route turns that into a plain
+    404 rather than a 502, since "no picture yet" is the overwhelmingly
+    common case, not an error."""
+    return get_bytes(profile_picture_key(username))
+
+
+def delete_profile_picture(username):
+    client = _client(require_write=True, allow_bundled_write=True)
+    client.delete_object(Bucket=_bucket(require_write=True, allow_bundled_write=True), Key=profile_picture_key(username))
 
 
 # Which Sololuce Datasheet photo zone (main/lifestyle/diagram/extra1/

@@ -47,6 +47,13 @@ runtime/
 *.spec
 *.exe
 
+# Inno Setup uninstaller + update_checker.py's own /LOG= file — only ever
+# appear here if an installer was ever run with this dev checkout as its
+# /DIR= target (engine.DATA_BASE for `python app.py` IS the project root)
+# — runtime artifacts, not source, same as everything else in this section.
+unins*.dat
+last_update_install.log
+
 # WebView2's persistent cookie/session storage (see app.py's webview.start()
 # call) — runtime browser profile data, not source.
 webview_data/
