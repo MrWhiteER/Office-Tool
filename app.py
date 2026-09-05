@@ -2735,6 +2735,33 @@ def api_cat_finish_colors_remove():
 
 CAT_BADGES_DIR = os.path.join(engine.DATA_BASE, "static", "cat_badges")
 
+# Real, confirmed bug this route fixes — "the Badges in the software are
+# not showing up" (only in the real installed app; never in a dev
+# `python app.py` run, which is what pointed at this in the first place —
+# see html_engine.py's _load_badge_library() for the other, more severe
+# half of the same root cause). This app's Flask static_folder is pinned
+# to engine.BASE/static (the read-only bundled resource root — see that
+# assignment's own comment), so the generic /static/<path:filename> route
+# only ever looks there. A custom "+ Add Custom Badge" upload
+# (/api/cat-badges-add, right below) is deliberately written to
+# engine.DATA_BASE instead — BASE is the PyInstaller _internal folder in
+# the packaged app, wiped and replaced whole on every update, so writing
+# user data there would just get silently deleted next update — meaning
+# the generic static route could never actually find a custom badge's
+# image at all. This route shadows just the one subpath that needs to
+# check both locations; Werkzeug matches the more specific rule (one
+# extra static path segment) before Flask's own catch-all static rule
+# regardless of registration order, so this doesn't need to come first in
+# the file. Falls back to the original 39's real bundled location so this
+# one route serves both without the caller needing to know which.
+@app.get("/static/cat_badges/<path:filename>")
+def serve_cat_badge(filename):
+    for directory in (CAT_BADGES_DIR, os.path.join(engine.BASE, "static", "cat_badges")):
+        path = os.path.join(directory, filename)
+        if os.path.isfile(path):
+            return send_file(path)
+    return "Not found", 404
+
 @app.get("/api/cat-badges")
 def api_cat_badges():
     return jsonify({"badges": load_cfg().get("cat_badge_library", [])})

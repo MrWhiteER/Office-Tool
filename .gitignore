@@ -13,6 +13,14 @@ drafts/
 clients/
 finance/
 submissions/
+# Every generated/synced document (Quotations, Invoices, DOs, Datasheets,
+# Expense Reports...) — folder_for()'s own auto-managed local mirror of the
+# shared R2 bucket (see app.py's CLOUD_DOCS_BASE comment). Confirmed real
+# customer data lands here just from a dev checkout's own background sync
+# thread pulling down whatever any real user generates — never belonged
+# in git, same reasoning as clients/finance/submissions above; just missed
+# when those were added.
+cloud_documents/
 
 # Login session-signing key (accounts.py/app.py) — a real secret, must
 # never be committed. Accounts now sync via the same private Cloudflare

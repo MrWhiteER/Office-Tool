@@ -255,17 +255,52 @@ def _brand_logo_data_uri(brand):
 # code changes — see app.py's /api/cat-badges-add.
 # ----------------------------------------------------------------------------
 CAT_BADGES_DIR = os.path.join(BASE, "static", "cat_badges")
+# Custom "+ Add Custom Badge" uploads (app.py's /api/cat-badges-add) are
+# written to engine.DATA_BASE, not BASE — same read-only-bundled-resources-
+# vs-writable-persistent-data split as everything else the app writes at
+# runtime (see engine.py's own BASE/DATA_BASE docstring). In a normal `python
+# app.py` dev run the two are literally the same folder, so this distinction
+# was invisible there; in the real packaged app BASE is the PyInstaller
+# _internal folder (replaced wholesale on every update) while DATA_BASE is
+# the folder next to OfficeTool.exe (untouched by an update) — writing a
+# custom badge into BASE would just get silently deleted the next time the
+# app updates.
+CAT_BADGES_DIR_DATA = os.path.join(engine.DATA_BASE, "static", "cat_badges")
 
 def _load_badge_library():
+    # Real, confirmed bug this fixes — "the Badges in the software are not
+    # showing up" (only in the actual installed app, never in a dev
+    # `python app.py` run, which is exactly what pointed at this): this used
+    # to read BASE/config.json, but the live, ever-updated config.json
+    # app.py's own load_cfg()/save_cfg() actually read and write lives at
+    # engine.DATA_BASE/config.json (see app.py's CONFIG constant) — a
+    # DIFFERENT file in the packaged app, where BASE (_internal) and
+    # DATA_BASE (next to the exe) are genuinely different folders. Whatever
+    # happened to be bundled at BASE/config.json (if anything at all — it's
+    # user data, not a resource PyInstaller has any reason to bundle) was a
+    # frozen build-time snapshot nothing ever kept in sync, so cat_badge_library
+    # read from it was empty or stale — silently dropping EVERY badge, not
+    # just custom ones (badges_for() below skips any key that doesn't
+    # resolve against this library, rather than erroring).
     try:
-        with open(os.path.join(BASE, "config.json"), encoding="utf-8") as f:
+        with open(os.path.join(engine.DATA_BASE, "config.json"), encoding="utf-8") as f:
             cfg = json.load(f)
         return cfg.get("cat_badge_library", [])
     except (OSError, ValueError):
         return []
 
 def _badge_image_data_uri(filename):
-    path = os.path.join(CAT_BADGES_DIR, filename)
+    # Custom uploads live under DATA_BASE (see CAT_BADGES_DIR_DATA's own
+    # comment); the original 39 ship bundled under BASE. Try the writable
+    # location first — a custom badge's filename/key never collides with one
+    # of the original 39 (api_cat_badges_add() uniquifies against the whole
+    # library), so there's no ambiguity in checking both.
+    for directory in (CAT_BADGES_DIR_DATA, CAT_BADGES_DIR):
+        path = os.path.join(directory, filename)
+        if os.path.isfile(path):
+            break
+    else:
+        path = os.path.join(CAT_BADGES_DIR, filename)  # let the original open() raise its own real error
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
     ext = os.path.splitext(filename)[1].lstrip(".").lower() or "png"
