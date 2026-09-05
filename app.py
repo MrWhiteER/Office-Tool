@@ -5468,11 +5468,6 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    <button class=nav id=n-clients onclick="view('clients')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=8 r=4 /><path d="M4 21a8 8 0 0 1 16 0"/></svg><span class=navlabel>Clients</span></button>
    <button class=nav id=n-cloudmanager onclick="view('cloudmanager')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.5-2A5 5 0 0 0 6 18h11.5Z"/></svg><span class=navlabel>Cloud Manager</span></button>
    <button class=nav id=n-settings onclick="view('settings')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=3 /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg><span class=navlabel>Settings</span></button>
-   <button class=nav id=n-theme onclick="toggleTheme()" title="Switch light/dark theme">
-     <svg class=navicon id=themeicon-sun viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=4 /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
-     <svg class=navicon id=themeicon-moon style="display:none" viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" /></svg>
-     <span id=themelabel class=navlabel>Theme</span>
-   </button>
    <!-- Hidden until checkForAppUpdate() (called on launch, then every few
         hours) finds a newer GitHub release than APP_VERSION — see
         update_checker.py. Click opens the shared #filemenu popover with
@@ -6329,8 +6324,25 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     </div></div>
     </div>
     <div class="settings-tab-panel hide" id=settings-tab-appearance>
-    <div class=card><div class=ch>Appearance</div><div class=cb>
-      <p class=muted style="font-size:11.5px;margin:0 0 10px">Purely visual — separate from the light/dark theme toggle in the rail, which changes the whole app's colors. This only picks which version of the Office Tool branding (login screen, launch screen, and the app's own shortcut icon) is shown.</p>
+    <!-- Moved here from its old standalone rail button — per explicit
+         request: "The Software color theme changer should be in the
+         Settings Tab in Appearance not on the left any more." Still the
+         exact same mechanism underneath (data-theme attribute + this
+         account's own settings.theme, see setColorTheme()) — the tray
+         icon's own right-click "Switch theme" item still works too
+         (toggleTheme(), unrelated to this button's removal, just flips
+         whichever theme is current instead of picking one explicitly). -->
+    <div class=card><div class=ch>Color Theme</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 10px">Changes the whole app's colors. Saved to your account, so it follows you to every PC you sign into.</p>
+      <div class=f><label>Theme</label>
+        <div class=seg id=set-color-theme-seg>
+          <button type=button data-th=dark onclick="setColorTheme('dark')">Dark</button>
+          <button type=button data-th=light onclick="setColorTheme('light')">Light</button>
+        </div>
+      </div>
+    </div></div>
+    <div class=card><div class=ch>Branding</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 10px">Purely visual — separate from the Color Theme above, which changes the whole app's colors. This only picks which version of the Office Tool branding (login screen, launch screen, and the app's own shortcut icon) is shown.</p>
       <div class=f><label>Branding</label>
         <div class=seg id=set-brand-theme-seg>
           <button type=button data-bt=dark onclick="setBrandTheme('dark')">Dark</button>
@@ -7238,25 +7250,36 @@ async function saveUpdatePrefs(){
 // this only needs to reflect that resulting state, not set it initially).
 function effectiveTheme(){
   return document.documentElement.getAttribute('data-theme')||(window.matchMedia&&window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')}
+// Reflects the current theme into Settings > Appearance's own segmented
+// control (moved here from the old rail button — see that card's own
+// comment) — same active-button-highlight pattern setBrandTheme() already
+// uses for its own segmented control just below it.
 function syncThemeIcon(){
+  const seg=$('set-color-theme-seg');if(!seg)return;
   const dark=effectiveTheme()==='dark';
-  $('themeicon-sun').style.display=dark?'none':'block';
-  $('themeicon-moon').style.display=dark?'block':'none';
-  $('themelabel').textContent=dark?'Dark':'Light'}
-function toggleTheme(){
-  const next=effectiveTheme()==='dark'?'light':'dark';
+  seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.th===(dark?'dark':'light')))}
+function applyTheme(next){
   document.documentElement.setAttribute('data-theme',next);
   try{localStorage.setItem('theme',next)}catch(e){}
   syncThemeIcon();
   // Persist to the account too (not just this device) — best-effort,
-  // fire-and-forget: the toggle itself already applied instantly above,
-  // so a slow/offline save here should never hold up the UI. Only once
-  // actually logged in — the pre-login theme toggle on the login page
-  // itself has no account yet to attach this to.
+  // fire-and-forget: applying it above already took effect instantly, so
+  // a slow/offline save here should never hold up the UI. Only once
+  // actually logged in — the pre-login theme (login screen only has
+  // whatever this device's own localStorage/system preference already
+  // set) has no account yet to attach this to.
   if(LOGGED_IN){
     fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({key:'theme',value:next})}).catch(()=>{})
   }}
+// Settings > Appearance's own explicit Dark/Light buttons.
+function setColorTheme(theme){applyTheme(theme)}
+// Still used by the system tray's own right-click "Switch theme" item
+// (see app.py's _switch_theme(), calls this exact function by name via
+// evaluate_js) — flips whichever theme is current, since a tray menu
+// click has no "which one did you mean" affordance the way two separate
+// Settings buttons do.
+function toggleTheme(){applyTheme(effectiveTheme()==='dark'?'light':'dark')}
 syncThemeIcon();
 // Every document type is its own sidebar entry with its own view name, all
 // sharing the one #v-build DOM underneath — which card set is visible is
