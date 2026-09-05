@@ -5183,6 +5183,25 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .kpitile{background:var(--card-bg);border:1px solid var(--line);border-radius:11px;padding:16px 18px}
 .kpilabel{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:6px}
 .kpivalue{font-size:24px;font-weight:800;color:var(--ink);font-variant-numeric:tabular-nums}
+/* Statement of Account privacy blur — explicit request: figures start
+   blurred, only readable once the user deliberately reveals them, and go
+   blurry again the instant they look away (switch to another tab/tool,
+   alt-tab to another window, or minimize the app — see stmtSetRevealed()'s
+   own call sites in the page script; NOT a checkbox, per explicit "don't
+   use the checkbox method, use something else and nice" — an eye-icon
+   toggle instead, see #stmt-reveal-btn). Scoped to every real figure on
+   the page (KPI tiles, chart axis/tooltip, per-company + per-invoice
+   amounts) via this one shared .stmt-amt class rather than just the 3 KPI
+   tiles, so nothing sensitive is left readable through the back door of
+   the chart or the company breakdown while the page is still "hidden".
+   blur() (not opacity/visibility) specifically because it keeps each
+   figure's own layout box/width intact — revealing doesn't reflow
+   anything around it — while still being genuinely unreadable, unlike a
+   lighter opacity which stays legible enough to guess at a glance. */
+.stmt-amt{filter:blur(7px);transition:filter .18s ease;user-select:none}
+#v-statement.stmt-revealed .stmt-amt{filter:none;user-select:text}
+#stmt-reveal-btn{display:flex;align-items:center;gap:6px;font-size:11.5px;padding:6px 11px}
+#stmt-reveal-btn svg{flex-shrink:0}
 .chartlegend{display:flex;gap:16px;margin-bottom:10px;font-size:12px;color:var(--muted)}
 .chartlegend span{display:inline-flex;align-items:center;gap:6px}
 .chartlegend i{width:10px;height:10px;border-radius:2px;display:inline-block}
@@ -5762,16 +5781,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
              "why"; still the dimension_diagram field under the hood) now
              sits directly opposite Bottom Left, matching the print
              preview's own bottom row exactly. -->
-        <p class="muted hide cat-photos-info" style="font-size:11px;margin:0 0 10px">Laid out the same 2x2 shape as the printed page itself — Top Left/Top Right on top, Bottom Left/Bottom Right below. Each zone's gear icon opens its Placeholder checkbox and (where applicable) an optional print caption. Reserve keeps a Top Left/Top Right zone's space even before it has a photo; Merge combines a zone with its neighbor into one wide photo, using the left one's own upload.</p>
+        <p class="muted hide cat-photos-info" style="font-size:11px;margin:0 0 10px">Laid out the same 2x2 shape as the printed page itself — Top Left/Top Right on top, Bottom Left/Bottom Right below. Each zone's gear icon opens its Placeholder checkbox and (where applicable) an optional print caption and Reserve toggle — Reserve keeps a Top Left/Top Right zone's space even before it has a photo; Merge combines a zone with its neighbor into one wide photo, using the left one's own upload.</p>
         <div class=g2>
           <div class=f>
-            <!-- Reserve is the one control THIS row keeps always-visible —
-                 label+gear on line 1, Reserve checkbox on line 2, so both
-                 columns here share one baseline. -->
-            <div style="margin:0 0 4px">
-              <label style="margin:0;display:flex;align-items:center">Top Left<button type=button class=btn onclick="event.stopPropagation();openZoneSettings('extra1',this)" title="Placeholder & caption options" style="width:16px;height:16px;padding:0;border-radius:50%;font-size:9px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:5px">⚙</button></label>
-              <label class=dvcheck style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);gap:3px;margin-top:3px" title="Keep this zone's space on the sheet even before it has a photo"><input type=checkbox id=cat-img-extra1-show onchange="CAT_IMG.extra1.show=this.checked;schedulePreview()">Reserve</label>
-            </div>
+            <label style="margin:0 0 4px;display:flex;align-items:center">Top Left<button type=button class=btn onclick="event.stopPropagation();openZoneSettings('extra1',this)" title="Placeholder, caption &amp; reserve options" style="width:16px;height:16px;padding:0;border-radius:50%;font-size:9px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:5px">⚙</button></label>
             <div id=cat-img-extra1></div>
             <!-- Merge lives on Top Left specifically (not a third, separate
                  toggle) because Top Left's own photo/zoom/pan/mask become
@@ -5825,10 +5838,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
             </label>
             </div>
           <div class=f>
-            <div style="margin:0 0 4px">
-              <label style="margin:0;display:flex;align-items:center">Top Right<button type=button class=btn onclick="event.stopPropagation();openZoneSettings('extra2',this)" title="Placeholder & caption options" style="width:16px;height:16px;padding:0;border-radius:50%;font-size:9px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:5px">⚙</button></label>
-              <label class=dvcheck style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);gap:3px;margin-top:3px" title="Keep this zone's space on the sheet even before it has a photo"><input type=checkbox id=cat-img-extra2-show onchange="CAT_IMG.extra2.show=this.checked;schedulePreview()">Reserve</label>
-            </div>
+            <label style="margin:0 0 4px;display:flex;align-items:center">Top Right<button type=button class=btn onclick="event.stopPropagation();openZoneSettings('extra2',this)" title="Placeholder, caption &amp; reserve options" style="width:16px;height:16px;padding:0;border-radius:50%;font-size:9px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:5px">⚙</button></label>
             <div id=cat-img-extra2></div></div>
         </div>
         <!-- Bottom Left and Bottom Right — neither has a Reserve checkbox
@@ -6164,10 +6174,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 
   <!-- STATEMENT OF ACCOUNT -->
   <div id=v-statement class=hide style="padding:20px;max-width:1100px;margin:0 auto">
+    <div style="display:flex;justify-content:flex-end;margin:0 0 10px">
+      <button type=button class=btn id=stmt-reveal-btn onclick=toggleStatementReveal() title="Figures stay blurred until you reveal them, and blur again the moment you look away">
+        <span id=stmt-reveal-icon></span><span id=stmt-reveal-label>Show numbers</span>
+      </button>
+    </div>
     <div class=kpirow>
-      <div class=kpitile><div class=kpilabel>Total Invoiced</div><div class=kpivalue id=kpi-invoiced>AED 0</div></div>
-      <div class=kpitile><div class=kpilabel>Total Collected</div><div class=kpivalue id=kpi-collected style="color:var(--success)">AED 0</div></div>
-      <div class=kpitile><div class=kpilabel>Total Outstanding</div><div class=kpivalue id=kpi-outstanding style="color:var(--danger)">AED 0</div></div>
+      <div class=kpitile><div class=kpilabel>Total Invoiced</div><div class="kpivalue stmt-amt" id=kpi-invoiced>AED 0</div></div>
+      <div class=kpitile><div class=kpilabel>Total Collected</div><div class="kpivalue stmt-amt" id=kpi-collected style="color:var(--success)">AED 0</div></div>
+      <div class=kpitile><div class=kpilabel>Total Outstanding</div><div class="kpivalue stmt-amt" id=kpi-outstanding style="color:var(--danger)">AED 0</div></div>
     </div>
     <p class=muted style="font-size:11.5px;margin:4px 0 20px">Reflects invoices generated from today onward. Historical invoices are not included, as prior payment records are unavailable.</p>
     <div class=card><div class=ch>Invoiced vs. Collected by Month</div><div class=cb id=statement-chart></div></div>
@@ -6851,8 +6866,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
              into the onclick, not because the markup needs to differ. r
              quoted for the same reason CLOUD_GLOBE_ICON's own comment
              explains: unquoted + immediately followed by "/>" swallows
-             the slash into the value and never actually self-closes. -->
-        <button type=button class=btn title="Choose from cloud library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(PHOTO_ADJUST_SLOT)"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
+             the slash into the value and never actually self-closes.
+             photoAdjustOpenCloudPicker(), not a direct openCloudPhotoPicker
+             call — see that function's own comment for why: this modal and
+             #cloudphotomodal share the same .clientmodal stacking, so
+             leaving this one open underneath left the cloud picker opening
+             invisibly behind it — reported directly as "doesn't close the
+             current page, user has to manually press Done to go to the
+             globe [picker]". -->
+        <button type=button class=btn title="Choose from cloud library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="photoAdjustOpenCloudPicker()"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
         <button type=button class=btn style="flex:1" onclick="resetPhotoAdjust()">Reset</button>
       </div>
     </div>
@@ -7338,6 +7360,10 @@ function view(v){
   // just stops a direct view('settings')-style console call too. The
   // real enforcement is server-side (app.py's before_request).
   if(BLOCKED_TOOLS.includes(v))v='menu';
+  // Statement privacy blur — re-hide the figures the moment the user
+  // navigates to any other tool/tab, not just when they switch windows or
+  // minimize (see stmtSetRevealed's own comment for the other 2 triggers).
+  if(v!=='statement')stmtSetRevealed(false);
   const isDoc=DOC_VIEW_LIST.includes(v);
   $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-cloudmanager').classList.toggle('hide',v!='cloudmanager');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');$('v-scanner').classList.toggle('hide',v!='scanner');
   $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-cloudmanager').classList.toggle('on',v=='cloudmanager');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
@@ -8503,10 +8529,22 @@ function termsDeliveryValue(){const el=$('terms-delivery');return el?el.value:'1
 function onTermsDeliveryChange(){
   const sel=$('terms-delivery');
   if(sel.value!=='__custom__'){schedulePreview();return}
-  sel.outerHTML='<div style="display:flex;gap:6px"><input type=text id=terms-delivery style="flex:1" placeholder="e.g. 6-8 weeks" oninput=schedulePreview()>'+
+  sel.outerHTML='<div style="display:flex;gap:6px"><input type=text id=terms-delivery style="flex:1" placeholder="e.g. 6-8 weeks" oninput=schedulePreview() onblur=onTermsDeliveryCustomBlur()>'+
     '<button type=button class=btn style="padding:0 11px" onclick=revertTermsDelivery() title="Choose from the list instead">▾</button></div>';
   $('terms-delivery').focus()}
 function revertTermsDelivery(){$('terms-delivery-wrap').innerHTML=termsDeliverySelectHtml();schedulePreview()}
+// Same "empty custom box left behind with no way back" fix as every other
+// Custom… field in the app already has (see onCatSeriesChange's own
+// comment on this exact bug) — this one and Product Builder's own
+// (revertPbCustom's caller) were the two places that had ONLY the manual
+// "▾" button as a way back, with nothing at all happening on a plain
+// click-away — reported directly as "if nothing was written, and the
+// user clicked somewhere else... the pulldown menu should become
+// available again". Only reverts when left genuinely empty; a real typed
+// value stays exactly as free text, same as before this fix.
+function onTermsDeliveryCustomBlur(){
+  const el=$('terms-delivery');if(!el||el.tagName!=='INPUT')return;
+  if(!el.value.trim())revertTermsDelivery()}
 function renderPaymentStages(){
   $('terms-payment-rows').innerHTML=TERMS_PAYMENT.map((p,i)=>
     '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">'+
@@ -9565,6 +9603,15 @@ const CAT_IMG_MASK_LOCKED={lifestyle:true};
 // not real duplication of catImgTitle's data.
 const CAT_IMG_ZONE_NAME={main:'Main Product Photo',lifestyle:'Application Photo',diagram:'Bottom Right',extra1:'Top Left',extra2:'Top Right',extra3:'Bottom Left'};
 const CAT_IMG_ZONE_HAS_CAPTION={diagram:true,extra1:true,extra2:true,extra3:true};
+// Only Top Left/Top Right are optional zones in the first place (Bottom
+// Left/Bottom Right always show, see the HTML's own comment above their
+// row) — Reserve moved in here from its old always-visible checkbox per
+// explicit request ("this should be normal not like this... the reserve
+// option should also be in the small placeholder & caption options"),
+// alongside Placeholder/caption, which had already made the same move
+// earlier for the same "so many checkmarks" decluttering reason (see
+// renderZoneSettingsMenu's own comment).
+const CAT_IMG_ZONE_HAS_RESERVE={extra1:true,extra2:true};
 // The 3 free zones sharing the printed "Dimension Diagram" grid with the
 // (always bottom-right, fixed) diagram itself — each its own generic photo
 // slot with a user-typed label instead of a fixed name.
@@ -9785,12 +9832,13 @@ function renderCatImages(){
     // + the 3 extra zones only — see photo_cell_captioned in the template),
     // not a stand-in for the box's own empty-state placeholder text
     // anymore (that's always just the fixed grid-position name now).
-    // Caption + Placeholder both moved into openZoneSettings' popover below
-    // (per explicit "too many checkmarks" simplification request) — their
-    // inputs only exist in the DOM at all while that zone's popover happens
-    // to be open, so these two lookups are almost always harmless no-ops
-    // now (guarded below); CAT_IMG itself, not the DOM, stays the actual
-    // source of truth throughout — see openZoneSettings' own comment.
+    // Caption + Placeholder (and, for Top Left/Top Right, Reserve too) all
+    // moved into openZoneSettings' popover below (per explicit "too many
+    // checkmarks" simplification requests) — their inputs only exist in
+    // the DOM at all while that zone's popover happens to be open, so
+    // these lookups are almost always harmless no-ops now (guarded
+    // below); CAT_IMG itself, not the DOM, stays the actual source of
+    // truth throughout — see openZoneSettings' own comment.
     const labelEl=$('cat-img-'+slot+'-label');
     if(labelEl)labelEl.value=CAT_IMG[slot].label||'';
     const showEl=$('cat-img-'+slot+'-show');
@@ -9827,15 +9875,18 @@ function renderCatImages(){
 // request. Each zone used to show its Placeholder checkbox (every zone)
 // and, for the 4 captioned ones, an always-visible caption text input
 // inline, on top of whatever Reserve/Merge checkboxes it also has — up to
-// 4 controls per zone x 6 zones. Reserve and Merge stay directly visible
-// (they're the ones a user actually reaches for regularly — deciding
-// whether a zone holds space, or combining two zones into one wide one);
-// Placeholder (rarely touched — it's an on-by-default "how should this
-// look before there's a photo" preference) and the optional print caption
-// (typed once, then left alone) both move into this small settings
-// popover instead, opened via a compact gear icon next to each zone's own
-// label. Reuses the app's existing shared #filemenu popup — same
-// open/position/close mechanics as openUnitManager and every other
+// 4 controls per zone x 6 zones. Merge stays directly visible (it's the
+// one a user actually reaches for regularly — combining a zone with its
+// neighbor into one wide one — and it gates two more controls, Auto-size/
+// Custom height, that only make sense right underneath it); Placeholder
+// (rarely touched — it's an on-by-default "how should this look before
+// there's a photo" preference), the optional print caption (typed once,
+// then left alone), and — per a later explicit request ("this should be
+// normal not like this... the reserve option should also be in the small
+// placeholder & caption options") — Reserve too, all move into this small
+// settings popover instead, opened via a compact gear icon next to each
+// zone's own label. Reuses the app's existing shared #filemenu popup —
+// same open/position/close mechanics as openUnitManager and every other
 // #filemenu-based popover here (see that function's own comment) — rather
 // than inventing a second popover mechanism for one more use of the same
 // idea.
@@ -9851,6 +9902,7 @@ function renderCatImages(){
 // on screen.
 function renderZoneSettingsMenu(slot){
   const hasCaption=!!CAT_IMG_ZONE_HAS_CAPTION[slot];
+  const hasReserve=!!CAT_IMG_ZONE_HAS_RESERVE[slot];
   // onclick=stopPropagation on this outer wrapper — openZoneSettings'
   // close-on-next-click listener sits on `document` (same as every other
   // #filemenu opener), so WITHOUT this, the very first click INTO the
@@ -9874,8 +9926,10 @@ function renderZoneSettingsMenu(slot){
     ?'Show a dashed placeholder box when it has no photo yet — turn off to leave it blank instead. No text shows automatically; type an optional caption below to label it.'
     :'Show a dashed placeholder box with this slot\'s name when it has no photo yet — turn off to leave it blank instead';
   let html='<div class=fmtitle>'+CAT_IMG_ZONE_NAME[slot]+'</div>'+
-    '<div onclick="event.stopPropagation()" style="padding:2px 12px 10px;'+(hasCaption?'width:220px':'width:180px')+'">'+
-    '<label class=dvcheck style="font-size:11px;font-weight:600;text-transform:none;letter-spacing:normal;color:var(--ink);gap:6px;margin-bottom:'+(hasCaption?'10px':'0')+'" title="'+placeholderHint+'"><input type=checkbox id=cat-img-'+slot+'-placeholder '+(CAT_IMG[slot].placeholder!==false?'checked':'')+' onchange="CAT_IMG.'+slot+'.placeholder=this.checked;schedulePreview()">Show placeholder box when empty</label>';
+    '<div onclick="event.stopPropagation()" style="padding:2px 12px 10px;'+(hasCaption?'width:220px':'width:180px')+'">';
+  if(hasReserve)html+=
+    '<label class=dvcheck style="font-size:11px;font-weight:600;text-transform:none;letter-spacing:normal;color:var(--ink);gap:6px;margin-bottom:10px" title="Keep this zone\'s space on the sheet even before it has a photo"><input type=checkbox id=cat-img-'+slot+'-show '+(CAT_IMG[slot].show?'checked':'')+' onchange="CAT_IMG.'+slot+'.show=this.checked;schedulePreview()">Reserve this zone\'s space</label>';
+  html+='<label class=dvcheck style="font-size:11px;font-weight:600;text-transform:none;letter-spacing:normal;color:var(--ink);gap:6px;margin-bottom:'+(hasCaption?'10px':'0')+'" title="'+placeholderHint+'"><input type=checkbox id=cat-img-'+slot+'-placeholder '+(CAT_IMG[slot].placeholder!==false?'checked':'')+' onchange="CAT_IMG.'+slot+'.placeholder=this.checked;schedulePreview()">Show placeholder box when empty</label>';
   if(hasCaption)html+=
     '<label style="display:block;font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);margin-bottom:4px">Optional caption above photo</label>'+
     '<input type=text id=cat-img-'+slot+'-label value="'+(CAT_IMG[slot].label||'').replace(/"/g,'&quot;')+'" placeholder="Optional caption above this photo…" style="width:100%;margin-bottom:0" oninput="CAT_IMG.'+slot+'.label=this.value;schedulePreview()">';
@@ -10146,6 +10200,19 @@ function closePhotoAdjust(){
   $('photoadjustmodal').classList.add('hide');
   PHOTO_ADJUST_SLOT=null;
   renderCatImages();schedulePreview()}
+// Closes this modal FIRST, then opens the cloud picker for the same slot —
+// see the globe button's own HTML comment for the bug this fixes. Grabs
+// the slot into a local var before calling closePhotoAdjust() specifically
+// because that function's own job is to null PHOTO_ADJUST_SLOT back out
+// (a real "close", not a visual-only hide) — reading it after would always
+// pass undefined. selectCloudPhoto() already reopens this same modal via
+// openPhotoAdjust(slot) once a photo is actually picked (or the user can
+// just close the picker with nothing chosen), so no further wiring is
+// needed here beyond getting the two modals to not be open at once.
+function photoAdjustOpenCloudPicker(){
+  const slot=PHOTO_ADJUST_SLOT;if(!slot)return;
+  closePhotoAdjust();
+  openCloudPhotoPicker(slot)}
 // The (i) toggle next to the modal title — see the comment on that button
 // in the HTML above for why this replaced a permanently-visible line of
 // text. Collapsed again on every fresh open (openPhotoAdjust) so it never
@@ -13618,7 +13685,12 @@ function onPbSelectChange(id){
       '<button type=button class=btn style="padding:0 11px" onclick="revertPbCustom(\''+id+'\')" title="Choose from the list instead">▾</button>'+
     '</div>';
   const inp=$(id);inp.focus();
-  inp.addEventListener('input',()=>{PB_CUSTOM[id]=inp.value;updateProductBuilderPreview()})}
+  inp.addEventListener('input',()=>{PB_CUSTOM[id]=inp.value;updateProductBuilderPreview()});
+  // Same "empty custom box left behind with no way back" fix as every
+  // other Custom… field in the app — see onTermsDeliveryCustomBlur's own
+  // comment for the full "why". Only reverts when left genuinely empty; a
+  // typed value stays exactly as free text either way.
+  inp.addEventListener('blur',()=>{if(!inp.value.trim())revertPbCustom(id)})}
 function revertPbCustom(id){
   delete PB_CUSTOM[id];
   $(id).closest('.f').innerHTML=pbSelectInner(id);
@@ -14247,6 +14319,53 @@ async function doBuildSubmittal(){
 let LEDGER=[];
 const CHART_INVOICED='var(--info)', CHART_COLLECTED='var(--success)';
 function money(n){return 'AED '+Math.round(n||0).toLocaleString()}
+// Same figure, wrapped for privacy-blur — use this (not bare money()) in
+// any innerHTML string that puts a real amount on screen, so it picks up
+// the .stmt-amt blur/reveal rule automatically. Not used for the 3 KPI
+// tiles (those wrap the whole element in the HTML directly, since they're
+// set via .textContent, not innerHTML, so a nested span would never
+// parse) or the chart's SVG <text>/tooltip (same idea, done directly on
+// those elements — see renderStatementChart).
+function moneySpan(n){return '<span class=stmt-amt>'+money(n)+'</span>'}
+// Statement of Account privacy blur/reveal — see .stmt-amt's own CSS
+// comment for the full "why". STMT_REVEALED is the one source of truth;
+// stmtSetRevealed() is the only thing allowed to change it, so every
+// place that needs to re-blur (leaving the page, losing focus, minimizing
+// — see the 3 call sites below) just calls it with false rather than
+// touching the class/button directly.
+let STMT_REVEALED=false;
+// r="3" quoted, not bare r=3 — unquoted + immediately followed by "/>"
+// swallows the slash into the value and never actually self-closes (same
+// bug CLOUD_GLOBE_ICON's own comment already warns about); confirmed live
+// via a real console error (<circle> attribute r: Expected length, "3/")
+// before this was quoted.
+const STMT_EYE_ICON='<svg width=15 height=15 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx=12 cy=12 r="3"/></svg>';
+const STMT_EYE_OFF_ICON='<svg width=15 height=15 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><path d="M3 3l18 18"/><path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c6.5 0 10 7 10 7a17.9 17.9 0 0 1-3.5 4.5M6.5 6.5C4 8.2 2 12 2 12s3.5 7 10 7c1.4 0 2.7-.3 3.9-.8M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+function stmtSetRevealed(on){
+  STMT_REVEALED=on;
+  $('v-statement').classList.toggle('stmt-revealed',on);
+  $('stmt-reveal-icon').innerHTML=on?STMT_EYE_OFF_ICON:STMT_EYE_ICON;
+  $('stmt-reveal-label').textContent=on?'Hide numbers':'Show numbers'}
+function toggleStatementReveal(){stmtSetRevealed(!STMT_REVEALED)}
+stmtSetRevealed(false);
+// Re-blur the instant the user looks away — explicit request: "after when
+// the user switch tabs or switches to other page or even minimizes the
+// software the numbers box should get blury again". Three distinct ways
+// to "look away", so three listeners: view() below already runs on every
+// in-app navigation (Menu tile, rail button, anything) — the check there
+// catches switching to a different tool/tab inside Office Tool itself;
+// visibilitychange catches the OS actually hiding this window (minimize,
+// or — in the browser-tab fallback path when pywebview isn't installed,
+// see app.py's own __main__ comment — switching OS/browser tabs away from
+// it); window blur catches simply alt-tabbing focus to another app
+// without minimizing, which visibilitychange alone doesn't always cover
+// in a native webview. Deliberately unconditional (not "only if v-
+// statement is currently visible") — cheap enough to just always run, and
+// means the page is guaranteed to come back hidden no matter what state
+// it structurally left in, rather than trusting every future call site
+// that hides this view to remember the check too.
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stmtSetRevealed(false)});
+window.addEventListener('blur',()=>stmtSetRevealed(false));
 async function loadStatement(){
   const r=await fetch('/api/finance/ledger').then(r=>r.json());
   LEDGER=r.ledger||[];
@@ -14286,7 +14405,7 @@ function renderStatementChart(){
   for(let i=0;i<=yTicks;i++){
     const v=maxVal*i/yTicks, y=padT+plotH-(plotH*i/yTicks);
     gridSvg+='<line x1='+padL+' y1='+y.toFixed(1)+' x2='+w+' y2='+y.toFixed(1)+' stroke="#e4e1da" stroke-width="1" />';
-    gridSvg+='<text x='+(padL-8)+' y='+(y+4).toFixed(1)+' text-anchor=end font-size=10 fill="#74716a">'+Math.round(v).toLocaleString()+'</text>'}
+    gridSvg+='<text class=stmt-amt x='+(padL-8)+' y='+(y+4).toFixed(1)+' text-anchor=end font-size=10 fill="#74716a">'+Math.round(v).toLocaleString()+'</text>'}
   let bars='';
   months.forEach((k,i)=>{
     const gx=padL+i*groupW;
@@ -14298,7 +14417,7 @@ function renderStatementChart(){
     bars+='<text x='+(gx+groupW/2)+' y='+(h-8)+' text-anchor=middle font-size=10.5 fill="#74716a">'+monthLabel(k)+'</text>'});
   box.innerHTML=
     '<div class=chartlegend><span><i style="background:'+CHART_INVOICED+'"></i>Invoiced</span><span><i style="background:'+CHART_COLLECTED+'"></i>Collected</span></div>'+
-    '<div class=chartwrap><svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;max-width:'+w+'px" id=statement-svg>'+gridSvg+bars+'</svg><div class=charttooltip id=statement-tip></div></div>';
+    '<div class=chartwrap><svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;max-width:'+w+'px" id=statement-svg>'+gridSvg+bars+'</svg><div class="charttooltip stmt-amt" id=statement-tip></div></div>';
   const tip=$('statement-tip');
   $('statement-svg').querySelectorAll('.chartbar').forEach(el=>{
     el.addEventListener('mousemove',ev=>{
@@ -14326,14 +14445,14 @@ function renderStatementCompanies(){
       '<div class=companyrow onclick="toggleCompanyExpand(\''+cid+'\')">'+
         '<span class=companyexpand id="'+cid+'-chev">▸</span>'+
         '<span class=companyname>'+escHtml(c)+'</span>'+
-        '<span class=companystat>Invoiced '+money(d.invoiced)+'</span>'+
-        '<span class=companystat>Collected '+money(d.collected)+'</span>'+
-        '<span class=companybalance style="color:'+(balance>0?'var(--danger)':'var(--success)')+'">'+money(balance)+'</span>'+
+        '<span class=companystat>Invoiced '+moneySpan(d.invoiced)+'</span>'+
+        '<span class=companystat>Collected '+moneySpan(d.collected)+'</span>'+
+        '<span class=companybalance style="color:'+(balance>0?'var(--danger)':'var(--success)')+'">'+moneySpan(balance)+'</span>'+
       '</div>'+
       '<div class=companyinvoices id="'+cid+'">'+
         d.items.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>
           '<div class=invoicerow>'+
-            '<span class=muted>INV '+escHtml(e.number||'')+' · '+escHtml(e.date||'')+' · '+money(e.total)+'</span>'+
+            '<span class=muted>INV '+escHtml(e.number||'')+' · '+escHtml(e.date||'')+' · '+moneySpan(e.total)+'</span>'+
             '<button class="paytogglebtn '+(e.paid?'paid':'unpaid')+'" onclick="event.stopPropagation();toggleInvoicePaid(\''+escHtml(e.rel).replace(/'/g,"\\'")+'\')">'+(e.paid?'✓ Paid':'Mark Paid')+'</button>'+
           '</div>').join('')+
       '</div>'+
