@@ -36,11 +36,18 @@ same access boundary as the photo library.
 ---- Permission model ----
 Each user record:
   {"username": "...", "password_hash": "...", "role": "admin"|"user",
-   "brand_lock": null | "SOLOLUCE" | "ARTEMIS" | "ADS" | "WATT",
+   "brand_lock": [] | ["SOLOLUCE"] | ["SOLOLUCE", "ARTEMIS"] | ...,
    "blocked_tools": ["settings", "clients", "submissions", "statement", "alldocs"]}
 - role "admin": brand_lock/blocked_tools are ignored entirely — full access.
-- brand_lock: non-admin user can only ever operate in that one brand;
-  enforced server-side in app.py (before_request), not just hidden in the UI.
+- brand_lock: a LIST of brand codes this user can operate in (empty list
+  or null = unrestricted, sees every brand) — per explicit request: "the
+  locked to brand should have option to multiple brands" (was a single
+  brand or none). Enforced server-side (app.py's /api/set-brand and
+  /api/brands), not just hidden in the UI. _public() below always
+  normalizes this to a real list even for a legacy record that still has
+  the OLD single-string shape on disk (every real account had this unset
+  by the time multi-brand shipped, so there was nothing to migrate in
+  practice, but the read path stays tolerant of either shape regardless).
 - blocked_tools: which of the 5 non-document-generation views this user
   can't open — also enforced server-side via URL-prefix checks, not just a
   hidden nav button.
@@ -183,11 +190,23 @@ def verify_login(username, password):
     return _public(u)
 
 
+def _normalize_brand_lock(v):
+    """Always returns a real list — tolerant of a legacy record that
+    still has the OLD single-string shape (null or one bare brand code)
+    on disk from before multi-brand locking existed. See this module's
+    own docstring."""
+    if not v:
+        return []
+    if isinstance(v, str):
+        return [v]
+    return list(v)
+
+
 def _public(u):
     return {
         "username": u.get("username", ""),
         "role": u.get("role", "user"),
-        "brand_lock": u.get("brand_lock"),
+        "brand_lock": _normalize_brand_lock(u.get("brand_lock")),
         "blocked_tools": u.get("blocked_tools", []),
         "blocked_doc_types": u.get("blocked_doc_types", []),
         # Per-user preferences (currently just "theme") — see
@@ -208,14 +227,18 @@ def list_users():
 
 
 def upsert_user(username, role, brand_lock, blocked_tools, password=None, blocked_doc_types=None):
-    """Create or update a user. password=None on an edit keeps the existing hash."""
+    """Create or update a user. password=None on an edit keeps the
+    existing hash. brand_lock: a list of brand codes (or a single bare
+    string, accepted for backward compatibility — see
+    _normalize_brand_lock()); invalid codes are silently dropped rather
+    than rejecting the whole save, same treatment blocked_tools/
+    blocked_doc_types already get below."""
     username = (username or "").strip()
     if not username:
         raise ValueError("Username required.")
     if role not in ("admin", "user"):
         raise ValueError("Invalid role.")
-    if brand_lock and brand_lock not in BRAND_CODES:
-        raise ValueError("Invalid brand.")
+    brand_lock = [b for b in _normalize_brand_lock(brand_lock) if b in BRAND_CODES]
     blocked_tools = [t for t in (blocked_tools or []) if t in BLOCKABLE_TOOLS]
     blocked_doc_types = [t for t in (blocked_doc_types or []) if t in BLOCKABLE_DOC_TYPES]
     data = load_accounts()
@@ -223,7 +246,7 @@ def upsert_user(username, role, brand_lock, blocked_tools, password=None, blocke
     existing = next((u for u in users if u.get("username", "").lower() == username.lower()), None)
     if existing:
         existing["role"] = role
-        existing["brand_lock"] = brand_lock or None
+        existing["brand_lock"] = brand_lock
         existing["blocked_tools"] = blocked_tools
         existing["blocked_doc_types"] = blocked_doc_types
         if password:
@@ -235,7 +258,7 @@ def upsert_user(username, role, brand_lock, blocked_tools, password=None, blocke
             "username": username,
             "password_hash": generate_password_hash(password),
             "role": role,
-            "brand_lock": brand_lock or None,
+            "brand_lock": brand_lock,
             "blocked_tools": blocked_tools,
             "blocked_doc_types": blocked_doc_types,
         })

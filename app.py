@@ -139,10 +139,17 @@ def _establish_session(u, remember=True):
     # days) so it survives closing/reopening the app; unchecked makes it a
     # plain session cookie most browsers/WebView2 drop once the window closes.
     session.permanent = bool(remember)
-    # A brand-locked user always operates in their locked brand, regardless
-    # of whatever brand this install was last left on.
+    # A brand-locked user always operates in one of their locked brands,
+    # regardless of whatever brand this install was last left on — pin to
+    # the current one if it's already allowed (nicer than always jumping
+    # to the first), else the first allowed brand. brand_lock is now a
+    # LIST (multi-brand lock — see accounts.py's own docstring); a user
+    # with an empty list is unrestricted and this block is skipped.
     if u["brand_lock"]:
-        cfg = load_cfg(); cfg["brand"] = u["brand_lock"]; save_cfg(cfg)
+        cfg = load_cfg()
+        if cfg.get("brand") not in u["brand_lock"]:
+            cfg["brand"] = u["brand_lock"][0]
+        save_cfg(cfg)
 
 @app.post("/api/login")
 def api_login():
@@ -1441,7 +1448,12 @@ def _update_shortcut_icons(theme):
 
 @app.get("/api/brands")
 def api_brands():
-    return jsonify({"brands": [{"code": c, "label": l} for c, l in engine.BRANDS.items()],
+    # brand_lock is a LIST now (multi-brand lock) — a locked user's
+    # switcher only ever offers the brand(s) they're allowed in; empty
+    # list (or no session yet, e.g. login screen) means unrestricted.
+    lock = session.get("brand_lock") or []
+    codes = [c for c in engine.BRANDS if not lock or c in lock]
+    return jsonify({"brands": [{"code": c, "label": engine.BRANDS[c]} for c in codes],
                      "current": current_brand()})
 
 @app.post("/api/set-brand")
@@ -1449,9 +1461,10 @@ def api_set_brand():
     code = (request.json or {}).get("brand", "").strip().upper()
     if code not in engine.BRANDS:
         return jsonify({"error": "Unknown brand."}), 400
-    lock = session.get("brand_lock")
-    if lock and code != lock:
-        return jsonify({"error": "Your account is restricted to " + engine.BRANDS.get(lock, lock) + "."}), 403
+    lock = session.get("brand_lock") or []
+    if lock and code not in lock:
+        allowed = ", ".join(engine.BRANDS.get(c, c) for c in lock)
+        return jsonify({"error": "Your account is restricted to " + allowed + "."}), 403
     cfg = load_cfg(); cfg["brand"] = code; save_cfg(cfg)
     return jsonify({"brand": code})
 
@@ -5027,6 +5040,24 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .dragrow.dragover-left{box-shadow:inset 2px 0 0 0 var(--amber)}
 .dragrow.dragover-right{box-shadow:inset -2px 0 0 0 var(--amber)}
 .draghandle{cursor:grab;color:var(--muted);flex-shrink:0;font-size:13px;line-height:1;transition:color .12s}
+/* Two-zone drag-and-drop permission picker (Admin Tools > Users & Access
+   — Locked Brands / Blocked Tools / Blocked Document Types). Small
+   uniform .dspill pills (not wrapping checkbox labels) dragged between
+   an "off" and "on" zone, or just clicked to toggle — see permSetup()/
+   permRender()/permZoneDrop() in the page script. Shares .dragrow/
+   .dragging/DRAG_KEY with every other reorderable list in this app;
+   only the drop TARGET (a zone, not another row) and the pop-in
+   animation on state change are new here. */
+.permswap{display:flex;gap:10px;align-items:stretch}
+.permzone{flex:1;min-width:0}
+.permzonelabel{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:5px}
+.permzonebody{display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start;min-height:40px;padding:8px;border:1.5px dashed var(--border);border-radius:10px;background:var(--surface-2);transition:background .15s ease,border-color .15s ease}
+.permzonebody.permzoneon{border-style:solid;border-color:#e0c48f}
+.permzonebody.permzone-over{background:var(--tint);border-color:var(--amber);border-style:solid}
+.permzoneempty{font-size:10px;color:var(--muted);font-style:italic;padding:2px}
+@keyframes permPop{0%{transform:scale(.5);opacity:0}60%{transform:scale(1.12);opacity:1}100%{transform:scale(1);opacity:1}}
+.permpill{animation:permPop .32s cubic-bezier(.34,1.56,.64,1);cursor:grab}
+.permpill:active{cursor:grabbing}
 .draghandle:active{cursor:grabbing}
 .dragrow:hover .draghandle{color:var(--amber2)}
 .photobox{position:relative;margin:0;height:78px;background:#e9e7e2;border-radius:7px;display:flex;align-items:center;justify-content:center;padding:3px;box-sizing:border-box}
@@ -5366,7 +5397,6 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .usercard b{font-size:13px;flex:1}
 .userbadge{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--tint);color:var(--muted)}
 .userbadge.admin{background:var(--brand-dark);color:#fff}
-.usertoolchip{font-size:11px;display:flex;align-items:center;gap:6px}
 .cloudphototile{position:relative;cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:6px;text-align:center;transition:border-color .15s,transform .15s;background:var(--card-bg)}
 .cloudphototile:hover{border-color:var(--brand-dark);transform:translateY(-2px)}
 .cloudphototile img{width:100%;aspect-ratio:1;object-fit:contain;background:#fff;border-radius:6px;display:block;margin-bottom:5px}
@@ -6389,10 +6419,23 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <div class=f style="margin-top:10px"><label>Username</label><input id=user-username></div>
       <div class=f><label id=user-password-label>Password</label><input id=user-password type=password placeholder="Leave blank to keep current password when editing"></div>
       <div class=f><label>Role</label><select id=user-role onchange="renderUserRoleFields()"><option value=user>Limited user</option><option value=admin>Admin (full access)</option></select></div>
+      <!-- Drag-and-drop permission pickers — per explicit report/request:
+           the old wrapping-checkbox-label grid ("this should be normal
+           not like this... make it small boxes so it will look
+           symmetrical... admin panel role distribution should look like
+           a drag and drop... nice animation"). Small uniform .dspill
+           pills instead of wrapping checkbox labels; drag a pill between
+           the two zones (or just click it) to toggle, reusing the SAME
+           shared drag primitives (dragRowStart/dragRowEnd/DRAG_KEY) every
+           other reorderable list in this app already uses — see
+           permSetup()/permRender() in the page script. -->
       <div id=user-restrict-fields>
-        <div class=f><label>Locked to brand</label><select id=user-brand-lock><option value="">— none, sees brand switcher —</option></select></div>
-        <div class=f><label>Blocked tools</label><div id=user-blocked-tools style="display:flex;flex-wrap:wrap;gap:10px"></div></div>
-        <div class=f><label>Blocked document types (All Docs)</label><div id=user-blocked-doctypes style="display:flex;flex-wrap:wrap;gap:10px"></div>
+        <div class=f><label>Locked to brand(s)</label>
+          <div id=user-brand-lock></div>
+          <p class=muted style="font-size:10.5px;margin:4px 0 0">Empty = sees the brand switcher, works in any brand. Drag brand(s) into "Locked" to restrict this user to just those.</p>
+        </div>
+        <div class=f><label>Blocked tools</label><div id=user-blocked-tools></div></div>
+        <div class=f><label>Blocked document types (All Docs)</label><div id=user-blocked-doctypes></div>
           <p class=muted style="font-size:10.5px;margin:4px 0 0">Finer-grained than blocking All Docs entirely above — e.g. this user can open All Docs but not see Invoices.</p></div>
       </div>
       <div style="display:flex;gap:8px;margin-top:8px">
@@ -15044,11 +15087,12 @@ function applySession(u){
   }
   applyAccessRestrictions()}
 function applyAccessRestrictions(){
-  // Brand lock: hide the brand switcher entirely and pin BRAND once
-  // loadBrands()/applyBrandUI() run — see their own code for where BRAND
-  // gets set from cfg (the server already forced cfg.brand to the lock at
-  // login, see /api/login).
-  $('brandbtn').style.display=BRAND_LOCK?'none':'';
+  // Brand lock: hide the switcher only when there's nothing to switch
+  // TO (0 or 1 allowed brand) — a multi-brand lock still needs the
+  // switcher, just filtered to those brands (see /api/brands, which
+  // already returns only the locked brand(s) for this session, so
+  // loadBrands()/applyBrandUI()'s BRAND_LIST is pre-filtered).
+  $('brandbtn').style.display=(BRAND_LOCK&&BRAND_LOCK.length===1)?'none':'';
   // Blocked tools: hide the corresponding rail nav button. Server-side
   // enforcement (app.py's before_request) is what actually matters —
   // this is just so a restricted user isn't shown a button that 403s.
@@ -15240,24 +15284,72 @@ let USERS_LIST=[],USERS_BLOCKABLE=[],USERS_BRANDS=[],EDITING_USERNAME=null;
 const TOOL_LABEL={settings:'Settings',clients:'Clients',submissions:'Submissions',statement:'Statement',alldocs:'All Docs'};
 const DOCTYPE_LABEL={INV:'Tax Invoices',DO:'Delivery Orders',QTN2:'Quotations',PI:'Proforma Invoices',RV:'Payment Receipts',CN:'Credit Notes',EXP:'Expense Reports',CAT:'Sololuce Datasheets'};
 let USERS_BLOCKABLE_DOCTYPES=[];
+// ---- Drag-and-drop two-zone permission pickers (brand lock / blocked
+// tools / blocked doc types) — per explicit request: "make it small
+// boxes so it will look symetrical also the admin pannel role
+// distribution should look like a drag and drop... make some nice
+// animation". Each group is a small state object in PERM_GROUPS keyed
+// by name; permRender() fully re-draws both zones from that state, so a
+// toggle (drag OR plain click, both supported) is just "mutate the Set,
+// re-render" — the .permpill CSS animation (permPop keyframes) replays
+// on every pill each render, which is what gives the reshuffle its pop.
+// DRAG_KEY/dragRowStart/dragRowEnd are the SAME shared primitives every
+// other draggable list in this app uses; DRAG_GROUP is the one addition
+// needed here, so a drag started in one picker can't be dropped into a
+// different picker's zone.
+let PERM_GROUPS={},DRAG_GROUP=null;
+function permSetup(group,items,labelFn,containerId,offLabel,onLabel){
+  PERM_GROUPS[group]={items,selected:new Set(),labelFn,containerId,offLabel,onLabel};
+  permRender(group)}
+function permSetSelected(group,values){
+  const g=PERM_GROUPS[group];if(!g)return;
+  g.selected=new Set(values||[]);
+  permRender(group)}
+function permRender(group){
+  const g=PERM_GROUPS[group];if(!g)return;
+  const off=g.items.filter(v=>!g.selected.has(v));
+  const on=g.items.filter(v=>g.selected.has(v));
+  const esc=v=>String(v).replace(/'/g,"\\'");
+  const pill=v=>'<span class=permpill draggable=true ondragstart="permDragStart(event,\''+group+'\',\''+esc(v)+'\')" ondragend="dragRowEnd(event)" onclick="permToggle(\''+group+'\',\''+esc(v)+'\')" title="Click, or drag to the other side">'+escHtml(g.labelFn(v))+'</span>';
+  const zone=(list,emptyMsg)=>list.length?list.map(pill).join(''):'<span class=permzoneempty>'+emptyMsg+'</span>';
+  $(g.containerId).innerHTML=
+    '<div class=permswap>'+
+      '<div class=permzone><div class=permzonelabel>'+escHtml(g.offLabel)+'</div>'+
+        '<div class=permzonebody id="'+g.containerId+'-off" ondragover="permZoneOver(event)" ondragleave="permZoneLeave(event)" ondrop="permZoneDrop(event,\''+group+'\',false)">'+
+          zone(off,'Nothing here')+'</div></div>'+
+      '<div class=permzone><div class=permzonelabel>'+escHtml(g.onLabel)+'</div>'+
+        '<div class="permzonebody permzoneon" id="'+g.containerId+'-on" ondragover="permZoneOver(event)" ondragleave="permZoneLeave(event)" ondrop="permZoneDrop(event,\''+group+'\',true)">'+
+          zone(on,'Drag here, or click a pill')+'</div></div>'+
+    '</div>'}
+function permDragStart(e,group,value){DRAG_GROUP=group;dragRowStart(e,value)}
+function permZoneOver(e){e.preventDefault();e.dataTransfer.dropEffect='move';e.currentTarget.classList.add('permzone-over')}
+function permZoneLeave(e){e.currentTarget.classList.remove('permzone-over')}
+function permZoneDrop(e,group,toOn){
+  e.preventDefault();e.currentTarget.classList.remove('permzone-over');
+  if(DRAG_GROUP!==group||DRAG_KEY===null)return;
+  permApplyToggle(group,DRAG_KEY,toOn);
+  DRAG_KEY=null;DRAG_GROUP=null}
+function permToggle(group,value){
+  const g=PERM_GROUPS[group];if(!g)return;
+  permApplyToggle(group,value,!g.selected.has(value))}
+function permApplyToggle(group,value,toOn){
+  const g=PERM_GROUPS[group];if(!g)return;
+  if(toOn)g.selected.add(value);else g.selected.delete(value);
+  permRender(group)}
 async function loadUsersAdmin(){
   const r=await fetch('/api/accounts').then(r=>r.json()).catch(()=>null);
   if(!r)return;
   USERS_LIST=r.users;USERS_BLOCKABLE=r.blockable_tools;USERS_BRANDS=r.brands;USERS_BLOCKABLE_DOCTYPES=r.blockable_doc_types||[];
-  const sel=$('user-brand-lock');
-  sel.innerHTML='<option value="">— none, sees brand switcher —</option>'+
-    USERS_BRANDS.map(b=>'<option value="'+b+'">'+escHtml(engineBrandLabel(b))+'</option>').join('');
-  $('user-blocked-tools').innerHTML=USERS_BLOCKABLE.map(t=>
-    '<label class=usertoolchip><input type=checkbox value="'+t+'" class=user-tool-cb> '+TOOL_LABEL[t]+'</label>').join('');
-  $('user-blocked-doctypes').innerHTML=USERS_BLOCKABLE_DOCTYPES.map(t=>
-    '<label class=usertoolchip><input type=checkbox value="'+t+'" class=user-doctype-cb> '+(DOCTYPE_LABEL[t]||t)+'</label>').join('');
+  permSetup('brand',USERS_BRANDS,engineBrandLabel,'user-brand-lock','Available (unrestricted)','Locked to');
+  permSetup('tools',USERS_BLOCKABLE,t=>TOOL_LABEL[t]||t,'user-blocked-tools','Allowed','Blocked');
+  permSetup('doctypes',USERS_BLOCKABLE_DOCTYPES,t=>DOCTYPE_LABEL[t]||t,'user-blocked-doctypes','Allowed','Blocked');
   renderUsersList()}
 function engineBrandLabel(code){
   const b=BRAND_LIST.find(x=>x.code===code);return b?b.label:code}
 function renderUsersList(){
   $('users-list').innerHTML=USERS_LIST.map(u=>
     '<div class=usercard><b>'+escHtml(u.username)+'</b>'+
-      '<span class="userbadge'+(u.role==='admin'?' admin':'')+'">'+(u.role==='admin'?'Admin':(u.brand_lock?escHtml(engineBrandLabel(u.brand_lock)):'All brands'))+'</span>'+
+      '<span class="userbadge'+(u.role==='admin'?' admin':'')+'">'+(u.role==='admin'?'Admin':((u.brand_lock&&u.brand_lock.length)?escHtml(u.brand_lock.map(engineBrandLabel).join(', ')):'All brands'))+'</span>'+
       '<button type=button class=btn style="padding:4px 9px;font-size:11px" onclick="editUser(\''+escHtml(u.username).replace(/'/g,"\\'")+'\')">Edit</button>'+
       '<button type=button class=btn style="padding:4px 9px;font-size:11px" onclick="deleteUserConfirm(\''+escHtml(u.username).replace(/'/g,"\\'")+'\',this)">✕</button></div>').join('')
     || '<p class=muted style="font-size:12px">No users yet.</p>'}
@@ -15267,27 +15359,29 @@ function editUser(username){
   $('user-username').value=u.username;$('user-username').disabled=true;
   $('user-password').value='';$('user-password-label').textContent='New password (leave blank to keep current)';
   $('user-role').value=u.role;
-  $('user-brand-lock').value=u.brand_lock||'';
-  document.querySelectorAll('.user-tool-cb').forEach(cb=>cb.checked=(u.blocked_tools||[]).includes(cb.value));
-  document.querySelectorAll('.user-doctype-cb').forEach(cb=>cb.checked=(u.blocked_doc_types||[]).includes(cb.value));
+  permSetSelected('brand',u.brand_lock||[]);
+  permSetSelected('tools',u.blocked_tools||[]);
+  permSetSelected('doctypes',u.blocked_doc_types||[]);
   renderUserRoleFields()}
 function resetUserForm(){
   EDITING_USERNAME=null;
   $('user-username').value='';$('user-username').disabled=false;
   $('user-password').value='';$('user-password-label').textContent='Password';
-  $('user-role').value='user';$('user-brand-lock').value='';
-  document.querySelectorAll('.user-tool-cb').forEach(cb=>cb.checked=false);
-  document.querySelectorAll('.user-doctype-cb').forEach(cb=>cb.checked=false);
+  $('user-role').value='user';
+  permSetSelected('brand',[]);
+  permSetSelected('tools',[]);
+  permSetSelected('doctypes',[]);
   renderUserRoleFields()}
 function renderUserRoleFields(){
   $('user-restrict-fields').style.display=$('user-role').value==='admin'?'none':''}
 async function saveUserForm(){
   const username=$('user-username').value.trim();
   if(!username){toast('Username required');return}
-  const blocked=[...document.querySelectorAll('.user-tool-cb:checked')].map(cb=>cb.value);
-  const blockedDocTypes=[...document.querySelectorAll('.user-doctype-cb:checked')].map(cb=>cb.value);
+  const brandLock=[...(PERM_GROUPS.brand?PERM_GROUPS.brand.selected:[])];
+  const blocked=[...(PERM_GROUPS.tools?PERM_GROUPS.tools.selected:[])];
+  const blockedDocTypes=[...(PERM_GROUPS.doctypes?PERM_GROUPS.doctypes.selected:[])];
   const body={username,password:$('user-password').value||undefined,role:$('user-role').value,
-    brand_lock:$('user-brand-lock').value||null,blocked_tools:blocked,blocked_doc_types:blockedDocTypes};
+    brand_lock:brandLock,blocked_tools:blocked,blocked_doc_types:blockedDocTypes};
   const r=await fetch('/api/accounts-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   if(!r.ok){toast(r.error||'Could not save user');return}
   toast('Saved '+username+' — remember to Publish so other installs see it');
