@@ -570,12 +570,23 @@
     <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
 
       {% if badges %}
-      <!-- Grid (not flex-wrap) so a full row of badges stretches edge-to-edge
-           to match the Technical Specifications divider lines below it —
-           auto-fit computes how many 43px+ columns fit, then 1fr grows them
-           to fill the remainder; a trailing partial row just sits at the
-           left, same as the last line of wrapped text. -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(27px,1fr));gap:8px;margin-bottom:10px;">
+      <!-- Real, confirmed bug fixed here — reported directly, screenshotted,
+           as badges "not in correct... size": minmax(27px,1fr) let every
+           column grow completely unbounded whenever the row wasn't full —
+           a product with only 2-3 badges got them stretched across the
+           WHOLE row width (each one 3-4x the intended icon size, visibly
+           inconsistent with a denser product's small, uniform badges),
+           since grid distributes 100% of the available space across
+           however many tracks exist even when that's just 1 or 2. Capped
+           at 34px (this file's own already-referenced "34.85 rounded"
+           comfortable size from an earlier tuning pass, and close to the
+           26px this same badge set already renders at elsewhere — see
+           renderCatBadgesSummary's own preview strip in app.py) — auto-fit
+           still packs as many 34px columns as fit per row and wraps the
+           rest, so a full row of badges still reads as a clean multi-
+           column block, it just no longer grows past a sane fixed size
+           when there are only a couple of them. -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(27px,34px));gap:8px;margin-bottom:10px;">
         {% for b in badges %}
         <div class="badge"><img src="{{ b.src }}" alt="{{ b.label }}"></div>
         {% endfor %}

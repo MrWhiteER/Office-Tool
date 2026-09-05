@@ -9114,28 +9114,45 @@ const CAT_ALL_CLASS_IO_KEYS=['class-1-fixture','class-2-fixture','class-3-fixtur
 // each group was previously auto-picked — called on every Product Type
 // change and every spec edit so the badge list always reflects the current
 // form instead of accumulating stale auto-picks.
+// Real, confirmed bug fixed here — reported directly as "the badges are
+// not in correct order": this used to unconditionally FILTER OUT every
+// auto-tracked badge (Class/Indoor-Outdoor, IP rating) then PUSH each one
+// straight back onto the END of CAT_BADGES, every single time this ran —
+// which is often, since several edits elsewhere call it again (Product
+// Type change, an IP Rating spec value edit, etc.). A badge the user had
+// manually picked in BETWEEN an auto badge's first appearance and one of
+// those later re-triggers would silently end up sitting BEFORE the auto
+// badge again after the re-shuffle, even though nothing about the auto
+// badge's own applicability had changed — reordering as a side effect of
+// a completely unrelated edit. Now only ever adds a newly-applicable auto
+// badge (pushed at the end, same as before) or removes one that's no
+// longer applicable — a still-applicable one is left exactly where it
+// already sits in CAT_BADGES, so an unrelated recompute is a genuine
+// no-op for it instead of a silent reorder.
 function recomputeCatAutoBadges(){
   const type=$('cat-producttype')?$('cat-producttype').value:'';
   const AUTO_CLASS_IO={Outdoor:{cls:'class-1-fixture',io:'designed-for-use-outside-buildings-only'},
     Indoor:{cls:'class-2-fixture',io:'designed-for-use-inside-buildings-only'},
     Striplight:{cls:'class-3-fixture',io:null}};
-  CAT_BADGES=CAT_BADGES.filter(b=>!CAT_ALL_CLASS_IO_KEYS.includes(b.key));
   const pick=AUTO_CLASS_IO[type];
-  if(pick){
-    CAT_BADGES.push({key:pick.cls});
-    if(pick.io)CAT_BADGES.push({key:pick.io})}
+  const desiredClassIO=[];
+  if(pick){desiredClassIO.push(pick.cls);if(pick.io)desiredClassIO.push(pick.io)}
+  CAT_BADGES=CAT_BADGES.filter(b=>!CAT_ALL_CLASS_IO_KEYS.includes(b.key)||desiredClassIO.includes(b.key));
+  desiredClassIO.forEach(k=>{if(!CAT_BADGES.some(b=>b.key===k))CAT_BADGES.push({key:k})});
   const allIpKeys=Object.values(CAT_IP_BADGE_KEYS);
-  CAT_BADGES=CAT_BADGES.filter(b=>!allIpKeys.includes(b.key));
   // IP Rating can hold several lines (e.g. a product sold in both IP20 and
   // IP65 variants) — match a badge per line, not just the first, deduped in
   // case two lines somehow round to the same rating.
   const ipSpec=CAT_SPECS.find(s=>(s.label||'').trim().toLowerCase()==='ip rating');
+  const desiredIp=[];
   if(ipSpec){
     const seen=new Set();
     (ipSpec.values||[]).forEach(v=>{
       const m=(v||'').match(/(\d{2})/);
       const bk=m&&CAT_IP_BADGE_KEYS[m[1]];
-      if(bk&&!seen.has(bk)){seen.add(bk);CAT_BADGES.push({key:bk})}})}}
+      if(bk&&!seen.has(bk)){seen.add(bk);desiredIp.push(bk)}})}
+  CAT_BADGES=CAT_BADGES.filter(b=>!allIpKeys.includes(b.key)||desiredIp.includes(b.key));
+  desiredIp.forEach(k=>{if(!CAT_BADGES.some(b=>b.key===k))CAT_BADGES.push({key:k})})}
 function onCatProductTypeChange(){recomputeCatAutoBadges();renderCatBadges()}
 // Grouped by real-world meaning rather than one flat alphabetical list, so
 // the picker reads like a spec sheet's own badge legend — matched by KEY
