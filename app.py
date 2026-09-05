@@ -15,6 +15,7 @@ import update_checker
 import runtime_manager
 import accounts
 import photo_store
+import google_oauth
 import scanner
 from version import APP_VERSION
 
@@ -50,7 +51,16 @@ app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 # login screen has something to render into), static assets, login itself,
 # and update-checking (harmless to expose, and the update banner should
 # still work pre-login).
-_PUBLIC_PATHS = {"/", "/api/login", "/api/current-user", "/api/check-update", "/api/apply-update", "/api/apply-update-progress", "/api/get-brand-theme"}
+_PUBLIC_PATHS = {"/", "/api/login", "/api/current-user", "/api/check-update", "/api/apply-update", "/api/apply-update-progress", "/api/get-brand-theme",
+                  # Google Sign-In (google_oauth.py) — google-start/-finish
+                  # must work BEFORE anyone's logged in (that's the whole
+                  # point, for intent="login"); each handler does its own
+                  # narrower check for the intent="link" case instead of
+                  # relying on this blanket gate. google-callback is hit by
+                  # the user's SYSTEM browser, a completely different
+                  # cookie jar with no session on it at all — see
+                  # google_oauth.py's own module docstring.
+                  "/api/oauth/google-configured", "/api/oauth/google-start", "/api/oauth/google-callback", "/api/oauth/google-finish"}
 # Tool-block enforcement: which URL prefixes are hard-blocked server-side
 # for each blockable view (see accounts.py's BLOCKABLE_TOOLS). This list is
 # deliberately narrow — audited call-site by call-site — because this
@@ -102,20 +112,22 @@ def _require_login():
     # user can delete a photo THEY uploaded, checked per-request inside
     # api_photostore_delete() itself since it depends on which specific
     # photo is targeted; only /api/photostore-config (the R2 credentials
-    # themselves) stays a flat admin-only wall here.
-    _PHOTOSTORE_ADMIN_ONLY = ("/api/photostore-config",)
-    if any(path.startswith(p) for p in _PHOTOSTORE_ADMIN_ONLY) and session.get("role") != "admin":
+    # themselves) stays a flat admin-only wall here. Same treatment for
+    # /api/oauth/google-config (the Google OAuth client id/secret,
+    # google_oauth.py) — google-configured/-start/-finish stay open to
+    # everyone (see _PUBLIC_PATHS's own comment), only the credentials
+    # themselves are admin-only to view or change.
+    _ADMIN_ONLY_PATHS = ("/api/photostore-config", "/api/oauth/google-config")
+    if any(path.startswith(p) for p in _ADMIN_ONLY_PATHS) and session.get("role") != "admin":
         return jsonify({"error": "Admin access required."}), 403
     for tool, prefixes in _TOOL_PREFIXES.items():
         if tool in (session.get("blocked_tools") or []) and any(path.startswith(p) for p in prefixes):
             return jsonify({"error": "You don't have access to this."}), 403
 
-@app.post("/api/login")
-def api_login():
-    data = request.json or {}
-    u = accounts.verify_login(data.get("username", ""), data.get("password", ""))
-    if not u:
-        return jsonify({"ok": False, "error": "Wrong username or password."}), 401
+def _establish_session(u, remember=True):
+    """Shared by /api/login and the Google Sign-In finish step
+    (api_oauth_google_finish()) — same session fields, same brand-lock
+    pin, same "remember me" cookie-lifetime choice either way."""
     session.clear()
     session["user"] = u["username"]
     session["role"] = u["role"]
@@ -126,17 +138,120 @@ def api_login():
     # cookie a real expiry (PERMANENT_SESSION_LIFETIME, set below to 30
     # days) so it survives closing/reopening the app; unchecked makes it a
     # plain session cookie most browsers/WebView2 drop once the window closes.
-    session.permanent = bool(data.get("remember", True))
+    session.permanent = bool(remember)
     # A brand-locked user always operates in their locked brand, regardless
     # of whatever brand this install was last left on.
     if u["brand_lock"]:
         cfg = load_cfg(); cfg["brand"] = u["brand_lock"]; save_cfg(cfg)
+
+@app.post("/api/login")
+def api_login():
+    data = request.json or {}
+    u = accounts.verify_login(data.get("username", ""), data.get("password", ""))
+    if not u:
+        return jsonify({"ok": False, "error": "Wrong username or password."}), 401
+    _establish_session(u, remember=data.get("remember", True))
     return jsonify({"ok": True, **u})
 
 @app.post("/api/logout")
 def api_logout():
     session.clear()
     return jsonify({"ok": True})
+
+# ---- Google Sign-In (google_oauth.py) — "Continue with Google" on the
+# login screen, and "Connect Google Account" in the profile popup. ----
+@app.get("/api/oauth/google-configured")
+def api_oauth_google_configured():
+    return jsonify({"configured": google_oauth.is_configured()})
+
+@app.post("/api/oauth/google-start")
+def api_oauth_google_start():
+    data = request.json or {}
+    intent = data.get("intent")
+    if intent not in ("login", "link"):
+        return jsonify({"ok": False, "error": "Invalid request."}), 400
+    username = None
+    if intent == "link":
+        # Captured HERE, from the actual authenticated session making this
+        # request — google-finish trusts THIS value later, never anything
+        # a subsequent (possibly different) caller claims. See
+        # google_oauth.start_flow()'s own comment.
+        username = session.get("user")
+        if not username:
+            return jsonify({"ok": False, "error": "Not logged in."}), 401
+    try:
+        state = google_oauth.start_flow(intent, username=username)
+        return jsonify({"ok": True, "state": state})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.get("/api/oauth/google-callback")
+def api_oauth_google_callback():
+    """Hit by the user's own SYSTEM browser after they approve on Google's
+    page — NOT by the app's own window (see google_oauth.py's module
+    docstring on why the actual login/link step happens elsewhere, in
+    api_oauth_google_finish()). Just shows a plain result page."""
+    code = request.args.get("code", "")
+    state = request.args.get("state", "")
+    error = request.args.get("error", "")
+    if error and not code:
+        ok, message = False, "Google sign-in was cancelled or denied."
+    else:
+        ok, message = google_oauth.handle_callback(code, state)
+    color = "#1f8a4c" if ok else "#c0392b"
+    return (
+        "<!doctype html><html><head><meta charset=utf-8><title>Office Tool</title>"
+        "<style>body{font-family:system-ui,sans-serif;background:#14120e;color:#eee;"
+        "display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;"
+        "text-align:center}p{max-width:420px;line-height:1.5}</style></head><body>"
+        "<p style='color:" + color + ";font-weight:600'>" + json.dumps(message)[1:-1] + "</p>"
+        "</body></html>"
+    )
+
+@app.get("/api/oauth/google-finish")
+def api_oauth_google_finish():
+    """Polled by the app's OWN window (login screen while waiting, or the
+    profile popup's "Connect Google Account") — this is the request that
+    actually runs in the right cookie context to set the Flask session,
+    unlike google-callback above. Returns {ok:true, pending:true} while
+    still waiting, then the real result exactly once (consume() removes
+    the entry so a repeated poll after that can't replay it)."""
+    state = request.args.get("state", "")
+    entry = google_oauth.consume(state)
+    if not entry:
+        return jsonify({"ok": False, "error": "This sign-in attempt has expired — try again."}), 400
+    if entry["status"] == "pending":
+        return jsonify({"ok": True, "pending": True})
+    if entry["status"] == "error":
+        return jsonify({"ok": False, "error": entry.get("error") or "Google sign-in failed."}), 400
+    # status == "done" — Google verified, we have a real email.
+    email = entry["email"]
+    if entry["intent"] == "login":
+        u = accounts.find_user_by_google_email(email)
+        if not u:
+            return jsonify({"ok": False, "error": "No Office Tool account is linked to " + email + " yet. Sign in with your username and password, then connect Google from your account (the avatar icon)."}), 404
+        _establish_session(u, remember=True)
+        return jsonify({"ok": True, **u})
+    else:  # intent == "link" — username was pinned at start_flow() time, not re-derived here
+        result = accounts.link_google_account(entry["username"], email)
+        if result.get("ok"):
+            result["email"] = email
+        return jsonify(result), (200 if result.get("ok") else 400)
+
+@app.post("/api/oauth/google-link")
+def api_oauth_google_link():
+    """Disconnect only (google_email:"" from the profile popup) — no
+    Google round trip needed to REMOVE a link, unlike adding one, since
+    the user is already proving who they are via their existing session
+    right here. (Adding a link goes through the real OAuth flow above,
+    intent="link", so Google itself verifies the email being attached.)"""
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Not logged in."}), 401
+    data = request.json or {}
+    if data.get("google_email"):
+        return jsonify({"ok": False, "error": "Use Connect Google Account (Google must verify the email) — this endpoint only disconnects."}), 400
+    result = accounts.link_google_account(session["user"], "")
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 @app.get("/api/current-user")
 def api_current_user():
@@ -152,7 +267,8 @@ def api_current_user():
     return jsonify({"logged_in": True, "username": session["user"], "role": session["role"],
                      "brand_lock": session.get("brand_lock"), "blocked_tools": session.get("blocked_tools") or [],
                      "blocked_doc_types": session.get("blocked_doc_types") or [],
-                     "settings": ((u.get("settings") or {}) if u else {})})
+                     "settings": ((u.get("settings") or {}) if u else {}),
+                     "google_email": ((u.get("google_email") or "") if u else "")})
 
 @app.get("/api/user-settings")
 def api_get_user_settings():
@@ -640,6 +756,7 @@ def save_cfg(c):
     with open(CONFIG, "w", encoding="utf-8") as f: json.dump(c, f, indent=2, ensure_ascii=False)
 
 photo_store.configure(load_cfg, save_cfg)
+google_oauth.configure(load_cfg, save_cfg)
 
 def _assign_series_color(cfg, label):
     """Deterministically assigns (and persists into cfg) a distinct color for
@@ -2706,6 +2823,30 @@ def api_photostore_config_save():
         resolved = photo_store.get_resolved_admin_config()
         photo_store.save_readonly_config(resolved.get("account_id", ""), resolved.get("access_key_id", ""),
                                           resolved.get("secret_access_key", ""), resolved.get("bucket", ""))
+    except Exception as e:
+        bundled = False
+        bundle_error = str(e)
+    return jsonify({"ok": True, "bundled": bundled, "bundle_error": bundle_error})
+
+@app.get("/api/oauth/google-config")
+def api_oauth_google_config():
+    return jsonify(google_oauth.get_public_config())
+
+@app.post("/api/oauth/google-config")
+def api_oauth_google_config_save():
+    """Same one-save-does-both shape as api_photostore_config_save() just
+    above — this machine's config.json AND the bundled google_oauth.json
+    (ships to every future build via build.bat's --add-data). No
+    read/write credential-tier distinction to preserve here the way R2
+    has (a Desktop-app OAuth client secret isn't confidential to begin
+    with), so this is simpler: just re-reads what was JUST saved and
+    bundles that."""
+    data = request.json or {}
+    google_oauth.save_config(data.get("client_id", ""), data.get("client_secret", ""))
+    bundled = True
+    bundle_error = None
+    try:
+        google_oauth.save_bundled_config()
     except Exception as e:
         bundled = False
         bundle_error = str(e)
@@ -5137,6 +5278,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <label class=dvcheck style="text-transform:none;font-size:12.5px;margin:2px 0 10px"><input type=checkbox id=login-remember checked> Remember me on this PC for 30 days</label>
     <p id=login-error class="muted hide" style="color:#e0464f;font-size:12.5px;margin:2px 0 10px"></p>
     <button class="btn dark" style="width:100%" type=submit id=login-submit>Sign In</button>
+    <!-- Hidden until /api/oauth/google-configured says the admin has set
+         this up (Admin Tools > Google Sign-In, see google_oauth.py) —
+         most installs never see this row at all. -->
+    <div id=login-google-row class="hide" style="margin-top:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin:0 0 12px">
+        <div style="flex:1;height:1px;background:var(--line)"></div>
+        <span class=muted style="font-size:11px">OR</span>
+        <div style="flex:1;height:1px;background:var(--line)"></div>
+      </div>
+      <button type=button class=btn style="width:100%" onclick="loginWithGoogle(this)">Continue with Google</button>
+    </div>
   </form>
   <!-- Steam-style download/install progress — sits below the card,
        anchored near the bottom of the login window, hidden until
@@ -6072,6 +6224,13 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button class=btn style="width:100%" onclick="savePhotoStoreConfig(this)">Save Cloud Storage Key</button>
       <p class=muted id=ps-bundle-note style="font-size:11px;margin:6px 0 0"></p>
     </div></div>
+    <div class=card><div class=ch>Google Sign-In</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 8px">Lets anyone with a linked Google account use "Continue with Google" instead of a password. Needs a one-time Google Cloud Console setup on your own Google account first — see google_oauth.py's own top comment for the exact steps (Create OAuth client ID, type "Desktop app", redirect URI <code>http://127.0.0.1:5000/api/oauth/google-callback</code>). Paste the Client ID/Secret it gives you below.</p>
+      <div class=f><label>Client ID</label><input id=goauth-client_id placeholder="xxxxxxxxxx.apps.googleusercontent.com"></div>
+      <div class=f><label id=goauth-secret-label>Client Secret</label><input id=goauth-client_secret type=password placeholder="Leave blank to keep the saved secret"></div>
+      <button class=btn style="width:100%" onclick="saveGoogleOAuthConfig(this)">Save Google Sign-In</button>
+      <p class=muted id=goauth-bundle-note style="font-size:11px;margin:6px 0 0"></p>
+    </div></div>
     <div class=card><div class=ch>Users &amp; Access</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0 0 4px">Who can open this app, and — for non-admins — which brand and which tools they're limited to. Changes take effect for that user next time they log in.</p>
       <div id=users-list></div>
@@ -6207,6 +6366,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <div class=f><label>Confirm New Password</label><input type=password id=profile-confirm-password autocomplete=new-password></div>
       <button class=btn style="width:100%" onclick=changeOwnPassword(this)>Update Password</button>
       <p class=muted id=profile-password-note style="font-size:11px;margin:6px 0 0"></p>
+      <!-- Hidden until /api/oauth/google-configured says the admin has
+           set this up (google_oauth.py) — most installs never see this
+           section at all. -->
+      <div id=profile-google-section class=hide>
+        <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
+        <div class=ch style="padding:0 0 10px;font-size:12.5px">Google Account</div>
+        <p class=muted id=profile-google-status style="font-size:12px;margin:0 0 10px"></p>
+        <button class=btn style="width:100%" id=profile-google-btn onclick=toggleGoogleAccount(this)>Connect Google Account</button>
+        <p class=muted id=profile-google-note style="font-size:11px;margin:6px 0 0"></p>
+      </div>
       <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
       <button class=btn style="width:100%;color:var(--danger);border-color:var(--danger)" onclick=doLogout()>Sign Out</button>
     </div>
@@ -6991,7 +7160,7 @@ function openAdminTools(){view('settings');showSettingsAdminPanel()}
 function showSettingsAdminPanel(){
   $('settings-main-panel').classList.add('hide');
   $('settings-admin-panel').classList.remove('hide');
-  loadUsersAdmin();loadPhotoStoreList();loadPhotoStoreAdminSettings()}
+  loadUsersAdmin();loadPhotoStoreList();loadPhotoStoreAdminSettings();loadGoogleOAuthAdminSettings()}
 function showSettingsMainPanel(){
   $('settings-admin-panel').classList.add('hide');
   $('settings-main-panel').classList.remove('hide')}
@@ -7068,6 +7237,20 @@ async function loadPhotoStoreAdminSettings(){
   $('ps-secret_access_key').value='';
   $('ps-secret-label').textContent=r.has_secret?'Secret Access Key (saved — leave blank to keep it)':'Secret Access Key';
   refreshPhotoStoreStatus()}
+async function loadGoogleOAuthAdminSettings(){
+  const r=await fetch('/api/oauth/google-config').then(r=>r.json());
+  $('goauth-client_id').value=r.client_id||'';
+  $('goauth-client_secret').value='';
+  $('goauth-secret-label').textContent=r.has_secret?'Client Secret (saved — leave blank to keep it)':'Client Secret'}
+// Same one-save-does-both shape as savePhotoStoreConfig() just above.
+async function saveGoogleOAuthConfig(btn){
+  btn.disabled=true;btn.textContent='Saving…';
+  const r=await fetch('/api/oauth/google-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    client_id:$('goauth-client_id').value.trim(),client_secret:$('goauth-client_secret').value})}).then(r=>r.json());
+  btn.disabled=false;btn.textContent='Save Google Sign-In';
+  $('goauth-bundle-note').textContent=r.bundled?'Bundled for future builds too — rebuild + GUPDATE to ship it to everyone.':('Saved for this machine, but not bundled: '+(r.bundle_error||'unknown error'));
+  toast('Saved');
+  loadGoogleOAuthAdminSettings()}
 // One key, saved to both this machine's own config AND the bundle every
 // future build ships (see /api/photostore-config's own comment) — the
 // bundle half only actually lands from the admin's dev checkout, so
@@ -14563,7 +14746,7 @@ async function deleteDraftFromAllDocs(id){
 // bootApp(), called only after checkLogin()/doLogin() confirms a session.
 // initResizer()'s own calls stay outside: they only wire up drag behavior
 // on static DOM elements, no API calls, safe to run immediately.
-let LOGGED_IN=false, CURRENT_USER=null, CURRENT_ROLE=null, BRAND_LOCK=null, BLOCKED_TOOLS=[], CURRENT_SETTINGS={};
+let LOGGED_IN=false, CURRENT_USER=null, CURRENT_ROLE=null, BRAND_LOCK=null, BLOCKED_TOOLS=[], CURRENT_SETTINGS={}, CURRENT_GOOGLE_EMAIL='';
 function bootApp(){
   loadUnits().then(()=>{setType('QTN2');$('title').textContent='Menu'});loadCfg();loadBrands();loadClients();loadClientsView();checkUnfinishedDraftsOnLaunch();
   initUpdateChecking(); // respects the "check for updates on each start" preference — see Update Center
@@ -14580,7 +14763,13 @@ function bootApp(){
 async function checkLogin(){
   const r=await fetch('/api/current-user').then(r=>r.json()).catch(()=>({logged_in:false}));
   if(r.logged_in){applySession(r);$('loginoverlay').classList.add('hide');bootApp()}
-  else{$('loginoverlay').classList.remove('hide');setTimeout(()=>$('login-username').focus(),50)}
+  else{
+    $('loginoverlay').classList.remove('hide');setTimeout(()=>$('login-username').focus(),50);
+    // Hidden until we know the admin has actually set up Google Sign-In
+    // (Admin Tools > Google Sign-In) — see google_oauth.py.
+    fetch('/api/oauth/google-configured').then(r=>r.json()).then(r=>{
+      $('login-google-row').classList.toggle('hide',!r.configured)}).catch(()=>{})
+  }
   hideSplash()
 }
 // Launch splash — see its own HTML/CSS comments for the z-index/aspect-
@@ -14609,7 +14798,7 @@ function hideSplash(){
     setTimeout(()=>{const s=$('splashscreen');if(s)s.classList.add('hide')},150)
   },wait)}
 function applySession(u){
-  LOGGED_IN=true;CURRENT_USER=u.username;CURRENT_ROLE=u.role;BRAND_LOCK=u.brand_lock;BLOCKED_TOOLS=u.blocked_tools||[];CURRENT_SETTINGS=u.settings||{};
+  LOGGED_IN=true;CURRENT_USER=u.username;CURRENT_ROLE=u.role;BRAND_LOCK=u.brand_lock;BLOCKED_TOOLS=u.blocked_tools||[];CURRENT_SETTINGS=u.settings||{};CURRENT_GOOGLE_EMAIL=u.google_email||'';
   // Per-user theme — "let the theme be linked to the user account": this
   // account's own saved choice (settings.theme, synced via the same R2
   // connection as the rest of the account) wins over whatever this ONE
@@ -14661,6 +14850,24 @@ async function doLogin(ev){
     applySession(r);$('loginoverlay').classList.add('hide');bootApp()
   }catch(e){err.textContent='Could not reach the app — try again';err.classList.remove('hide');btn.disabled=false;btn.textContent='Sign In'}
   return false}
+// Opens the user's REAL system browser (see google_oauth.py's own
+// docstring on why — Google blocks OAuth from any embedded webview,
+// this app's window included) and polls for the result. Only shown at
+// all once /api/oauth/google-configured says the admin has set this up
+// (see checkLogin()).
+async function loginWithGoogle(btn){
+  const err=$('login-error');err.classList.add('hide');
+  const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Opening Google…';
+  const start=await fetch('/api/oauth/google-start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({intent:'login'})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  if(!start.ok){err.textContent=start.error||'Could not start Google sign-in';err.classList.remove('hide');btn.disabled=false;btn.textContent=origLabel;return}
+  btn.textContent='Waiting for Google…';
+  const poll=async()=>{
+    const r=await fetch('/api/oauth/google-finish?state='+encodeURIComponent(start.state)).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+    if(r.pending){setTimeout(poll,1500);return}
+    btn.disabled=false;btn.textContent=origLabel;
+    if(!r.ok){err.textContent=r.error||'Google sign-in failed';err.classList.remove('hide');return}
+    applySession(r);$('loginoverlay').classList.add('hide');bootApp()};
+  setTimeout(poll,1500)}
 async function doLogout(){
   await fetch('/api/logout',{method:'POST'}).catch(()=>{});
   location.reload()}
@@ -14688,9 +14895,48 @@ async function openProfileModal(){
   const r=await fetch('/api/current-user').then(r=>r.json()).catch(()=>null);
   const settings=(r&&r.settings)||CURRENT_SETTINGS||{};
   CURRENT_SETTINGS=settings;
+  CURRENT_GOOGLE_EMAIL=(r&&r.google_email)||'';
   PROFILE_INFO_FIELDS.forEach(k=>{const el=$('profile-'+k);if(el)el.value=settings[k]||''});
-  updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent}
+  updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent;
+  renderGoogleAccountSection();
+  fetch('/api/oauth/google-configured').then(r=>r.json()).then(r=>{
+    $('profile-google-section').classList.toggle('hide',!r.configured)}).catch(()=>{})}
 function closeProfileModal(){$('profilemodal').classList.add('hide')}
+function renderGoogleAccountSection(){
+  if(CURRENT_GOOGLE_EMAIL){
+    $('profile-google-status').textContent='Connected as '+CURRENT_GOOGLE_EMAIL+' — you can sign in with Google instead of your password.';
+    $('profile-google-btn').textContent='Disconnect Google Account'
+  }else{
+    $('profile-google-status').textContent='Not connected — link a Google account to sign in with one click next time.';
+    $('profile-google-btn').textContent='Connect Google Account'
+  }}
+async function toggleGoogleAccount(btn){
+  const note=$('profile-google-note');note.textContent='';
+  const origLabel=btn.textContent;
+  if(CURRENT_GOOGLE_EMAIL){
+    // Disconnect — no Google round trip needed, just clear the link.
+    btn.disabled=true;btn.textContent='Disconnecting…';
+    const r=await fetch('/api/oauth/google-link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({google_email:''})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+    btn.disabled=false;
+    if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not disconnect.';btn.textContent=origLabel;return}
+    CURRENT_GOOGLE_EMAIL='';renderGoogleAccountSection();
+    note.style.color='var(--success)';note.textContent='Disconnected.';
+    return}
+  // Connect — same system-browser + poll flow as loginWithGoogle(), just
+  // with intent="link" so google-finish attaches it to THIS session's
+  // user instead of trying to log anyone in.
+  btn.disabled=true;btn.textContent='Opening Google…';
+  const start=await fetch('/api/oauth/google-start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({intent:'link'})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  if(!start.ok){note.style.color='var(--danger)';note.textContent=start.error||'Could not start Google sign-in';btn.disabled=false;btn.textContent=origLabel;return}
+  btn.textContent='Waiting for Google…';
+  const poll=async()=>{
+    const r=await fetch('/api/oauth/google-finish?state='+encodeURIComponent(start.state)).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+    if(r.pending){setTimeout(poll,1500);return}
+    btn.disabled=false;
+    if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not connect Google account.';btn.textContent=origLabel;return}
+    CURRENT_GOOGLE_EMAIL=r.email||'';renderGoogleAccountSection();
+    note.style.color='var(--success)';note.textContent='Connected.'};
+  setTimeout(poll,1500)}
 async function saveProfileInfo(btn){
   const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Saving…';
   const values={};

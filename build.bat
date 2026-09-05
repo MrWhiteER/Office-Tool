@@ -39,6 +39,7 @@ pyinstaller --name OfficeTool --noconfirm --clean --windowed ^
   --add-data "VERSION;." ^
   --add-data "RUNTIME_VERSION;." ^
   --add-data "r2_readonly.json;." ^
+  --add-data "google_oauth.json;." ^
   --add-data "branding;branding" ^
   --collect-all playwright ^
   --collect-all pystray ^

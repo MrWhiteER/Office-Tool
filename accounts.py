@@ -195,6 +195,11 @@ def _public(u):
         # /api/current-user hand it to the frontend for free, no extra
         # round-trip needed to apply it right away.
         "settings": u.get("settings") or {},
+        # Which Google account (if any) can sign this user in — see
+        # google_oauth.py + link_google_account() below. Never a secret,
+        # safe to hand to the frontend so the profile popup can show
+        # "Connected as x@gmail.com" / offer to disconnect.
+        "google_email": u.get("google_email") or "",
     }
 
 
@@ -370,6 +375,59 @@ def change_own_password(username, current_password, new_password):
         return {"ok": False, "error": "Current password is incorrect."}
     user["password_hash"] = generate_password_hash(new_password)
     _write_json(LOCAL_CACHE, data)  # apply locally right away regardless of whether the publish below succeeds
+    try:
+        photo_store.put_bytes(
+            ACCOUNTS_KEY, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+            "application/json", allow_bundled_write=True,
+        )
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def find_user_by_google_email(google_email):
+    """Used by app.py's /api/oauth/google-finish (intent="login") to turn
+    a verified Google email back into an Office Tool account — only ever
+    matches an account that was explicitly linked via
+    link_google_account() below; Google sign-in never auto-creates one.
+    Returns the PUBLIC shape (never password_hash), same as find_user()'s
+    callers get by convention elsewhere in this module."""
+    google_email = (google_email or "").strip().lower()
+    if not google_email:
+        return None
+    for u in load_accounts().get("users", []):
+        if (u.get("google_email") or "").strip().lower() == google_email:
+            return _public(u)
+    return None
+
+
+def link_google_account(username, google_email):
+    """Self-service — same narrow pull-freshest-copy-then-write-one-field
+    pattern as save_user_setting()/change_own_password() above, just
+    touching google_email instead. google_email="" unlinks. Refuses if
+    that Google email is already linked to a DIFFERENT user (one Google
+    account can't silently take over two Office Tool logins)."""
+    username_norm = (username or "").strip().lower()
+    if not username_norm:
+        return {"ok": False, "error": "Not logged in."}
+    google_email_norm = (google_email or "").strip().lower()
+    if google_email_norm:
+        existing = find_user_by_google_email(google_email_norm)
+        if existing and existing.get("username", "").strip().lower() != username_norm:
+            return {"ok": False, "error": "That Google account is already linked to a different Office Tool user."}
+    try:
+        data_bytes, _ct = photo_store.get_bytes(ACCOUNTS_KEY)
+        data = json.loads(data_bytes.decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("users"), list):
+            raise ValueError("unexpected shape")
+    except Exception:
+        data = load_accounts()
+    users = data.setdefault("users", [])
+    user = next((u for u in users if u.get("username", "").strip().lower() == username_norm), None)
+    if not user:
+        return {"ok": False, "error": "User not found."}
+    user["google_email"] = google_email_norm
+    _write_json(LOCAL_CACHE, data)
     try:
         photo_store.put_bytes(
             ACCOUNTS_KEY, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
