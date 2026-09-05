@@ -97,9 +97,13 @@ def _require_login():
     # request ("I want every user to have his own place in cloudflare...
     # what he uploads... will be mentioned... by which user"), any
     # logged-in user can upload now (attributed to them — see
-    # photo_store.py's photo attribution index); delete stays admin-only
-    # (moderation: anyone can add, only the admin removes).
-    _PHOTOSTORE_ADMIN_ONLY = ("/api/photostore-delete", "/api/photostore-config")
+    # photo_store.py's photo attribution index). Delete is NOT in this
+    # blanket admin-only list (as of the Cloud Manager tool) — a normal
+    # user can delete a photo THEY uploaded, checked per-request inside
+    # api_photostore_delete() itself since it depends on which specific
+    # photo is targeted; only /api/photostore-config (the R2 credentials
+    # themselves) stays a flat admin-only wall here.
+    _PHOTOSTORE_ADMIN_ONLY = ("/api/photostore-config",)
     if any(path.startswith(p) for p in _PHOTOSTORE_ADMIN_ONLY) and session.get("role") != "admin":
         return jsonify({"error": "Admin access required."}), 403
     for tool, prefixes in _TOOL_PREFIXES.items():
@@ -160,7 +164,7 @@ def api_get_user_settings():
 @app.post("/api/user-settings")
 def api_set_user_settings():
     # Any logged-in user — not just the admin — can save their OWN
-    # settings (currently just "theme"). See accounts.save_user_setting()
+    # settings (theme, full_name, phone). See accounts.save_user_setting()
     # for why this is safe to leave open to every user, unlike the
     # admin-only /api/accounts-publish.
     if not session.get("user"):
@@ -168,6 +172,17 @@ def api_set_user_settings():
     data = request.json or {}
     key = (data.get("key") or "").strip()
     result = accounts.save_user_setting(session["user"], key, data.get("value"))
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+@app.post("/api/change-password")
+def api_change_password():
+    # Account avatar popup's "Change Password" — any logged-in user, only
+    # ever touches THEIR OWN password (accounts.change_own_password()
+    # re-verifies the current one before allowing this at all).
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Not logged in."}), 401
+    data = request.json or {}
+    result = accounts.change_own_password(session["user"], data.get("current_password"), data.get("new_password"))
     return jsonify(result), (200 if result.get("ok") else 400)
 
 # ---- Admin-only user management (Settings > Users) — see accounts.py ----
@@ -2771,10 +2786,18 @@ def api_photostore_upload():
 
 @app.post("/api/photostore-delete")
 def api_photostore_delete():
+    """Admin: can remove any photo. Normal user (Cloud Manager tool):
+    can remove only a photo THEY uploaded — checked here per-request
+    (not in the flat _PHOTOSTORE_ADMIN_ONLY wall in before_request) since
+    it depends on which specific photo is targeted. Anything with no
+    recorded uploader (the admin's original library, or predates
+    attribution tracking) stays admin-only."""
     data = request.json or {}
     name = data.get("filename", "")
     if not name:
         return jsonify({"ok": False, "error": "Missing filename."}), 400
+    if session.get("role") != "admin" and photo_store.get_uploader(name) != session.get("user"):
+        return jsonify({"ok": False, "error": "You can only remove photos you uploaded yourself."}), 403
     try:
         photo_store.delete_photo(name)
         return jsonify({"ok": True})
@@ -4486,6 +4509,10 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
 .rail:hover .nav,.rail:focus-within .nav,.rail.pinned .nav{justify-content:flex-start;padding:11px 0 11px 15px;gap:13px}
 .navlabel{max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width .2s ease,opacity .12s ease}
 .rail:hover .navlabel,.rail:focus-within .navlabel,.rail.pinned .navlabel{max-width:150px;opacity:1;transition:max-width .28s ease .05s,opacity .22s ease .1s}
+/* Account avatar (rail) — same 21px footprint as .navicon so it lines up
+   with every other rail button, just a filled circle + initial instead
+   of an outline icon (see openProfileModal()). */
+.avatarcircle{width:21px;height:21px;flex-shrink:0;border-radius:50%;background:var(--amber);color:var(--brand-dark);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;text-transform:uppercase}
 @media (prefers-reduced-motion:reduce){
   .rail,.rail:hover,.rail:focus-within,.rail.pinned,.nav,.nav .navicon,.nav:hover .navicon,.navlabel,.rail:hover .navlabel,.rail:focus-within .navlabel,.rail.pinned .navlabel,.brandbtn,.brandswitchlabel,.rail:hover .brandswitchlabel,.rail:focus-within .brandswitchlabel,.rail.pinned .brandswitchlabel{transition-duration:.001ms!important}
 }
@@ -5040,10 +5067,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .userbadge{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--tint);color:var(--muted)}
 .userbadge.admin{background:var(--brand-dark);color:#fff}
 .usertoolchip{font-size:11px;display:flex;align-items:center;gap:6px}
-.cloudphototile{cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:6px;text-align:center;transition:border-color .15s,transform .15s;background:var(--card-bg)}
+.cloudphototile{position:relative;cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:6px;text-align:center;transition:border-color .15s,transform .15s;background:var(--card-bg)}
 .cloudphototile:hover{border-color:var(--brand-dark);transform:translateY(-2px)}
 .cloudphototile img{width:100%;aspect-ratio:1;object-fit:contain;background:#fff;border-radius:6px;display:block;margin-bottom:5px}
 .cloudphototile span{display:block;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Cloud Manager's own grid (see loadCloudManagerPhotos()) reuses
+   .cloudphototile but isn't click-to-select like the picker — no pointer
+   cursor there, just the delete button shown per-photo permission. */
+.cloudphototile.manage{cursor:default}
+.cloudphototile.manage:hover{border-color:var(--line);transform:none}
+.cloudphototiledel{position:absolute;top:4px;right:4px;width:20px;height:20px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:11px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.cloudphototiledel:hover{background:var(--danger)}
 .scanpagetile{position:relative;width:64px;height:84px;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fff}
 .scanpagetile img{width:100%;height:100%;object-fit:cover}
 .scanpagetile span{position:absolute;bottom:2px;right:3px;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 4px;border-radius:3px}
@@ -5121,6 +5155,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    <button class=nav id=n-statement onclick="view('statement')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=20 x2=12 y2=10 /><line x1=18 y1=20 x2=18 y2=4 /><line x1=6 y1=20 x2=6 y2=16 /></svg><span class=navlabel>Statement</span></button>
    <div style="flex:1"></div>
    <button class=nav id=n-clients onclick="view('clients')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=8 r=4 /><path d="M4 21a8 8 0 0 1 16 0"/></svg><span class=navlabel>Clients</span></button>
+   <button class=nav id=n-cloudmanager onclick="view('cloudmanager')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.5-2A5 5 0 0 0 6 18h11.5Z"/></svg><span class=navlabel>Cloud Manager</span></button>
    <button class=nav id=n-settings onclick="view('settings')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=3 /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg><span class=navlabel>Settings</span></button>
    <button class=nav id=n-theme onclick="toggleTheme()" title="Switch light/dark theme">
      <svg class=navicon id=themeicon-sun viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=4 /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
@@ -5139,9 +5174,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
      </span>
      <span class=navlabel>Update</span>
    </button>
-   <button class=nav id=n-logout onclick="doLogout()" title="Sign out">
-     <svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
-     <span class=navlabel id=logoutlabel>Sign out</span>
+   <!-- Account avatar — replaces the old standalone "Sign out" rail
+        button (per explicit request: "instead of login and logout
+        button, let it be the User Avatar... clicks... pop up a window...
+        edit his details, and if he wants he can exit from account or
+        change"). Click opens #profilemodal (profile fields + password
+        change + Sign Out live there now, see openProfileModal()). -->
+   <button class=nav id=n-avatar onclick="openProfileModal()" title="Your account">
+     <span class=avatarcircle id=avatarinitial>?</span>
+     <span class=navlabel>Account</span>
    </button>
  </div>
  <div class=main>
@@ -5179,6 +5220,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div class=fmtitle>Tools</div>
     <div class=launchergrid>
       <button class=launchertile id=t-scanner onclick="launcherGoScanner()"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 7V5a2 2 0 0 1 2-2h2M4 17v2a2 2 0 0 0 2 2h2M20 7V5a2 2 0 0 0-2-2h-2M20 17v2a2 2 0 0 1-2 2h-2"/><line x1=3 y1=12 x2=21 y2=12 /></svg></span><span>Scanner</span></button>
+      <button class=launchertile id=t-cloudmanager onclick="launcherGo('cloudmanager')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.5-2A5 5 0 0 0 6 18h11.5Z"/></svg></span><span>Cloud Manager</span></button>
     </div>
     <div class=fmtitle>Records</div>
     <div class=launchergrid>
@@ -5738,6 +5780,43 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div id=clientsgrid></div>
   </div>
 
+  <!-- CLOUD MANAGER — a real management page for the shared cloud
+       library, open to every logged-in user (not admin-only): "each user
+       will have different permissions - normal user only can add and
+       remove pictures, clients". Clients already has its own full CRUD
+       tool (the Clients tab above), so this page doesn't duplicate that
+       — it's a shortcut card into it, plus the genuinely new part: a
+       proper Photos grid (upload + delete), where before this a normal
+       user could only upload (Settings > Shared Product Photos) with no
+       way to browse/remove their own uploads outside the document-build
+       picker modal. Delete permission is per-photo, not per-page: admins
+       can remove anything, everyone else only what THEY uploaded (see
+       api_photostore_delete()) — renderCloudManagerGrid() below only
+       shows the ✕ button where that's actually true. -->
+  <div id=v-cloudmanager class=hide style="padding:20px;max-width:1000px;margin:0 auto">
+    <div class=card><div class=ch>Clients</div><div class=cb>
+      <p class=muted style="font-size:12px;margin:0 0 10px">Add, edit, or remove client records from the shared client database.</p>
+      <button class="btn dark" onclick="view('clients')">Open Clients</button>
+    </div></div>
+    <div class=card><div class=ch>Shared Product Photos</div><div class=cb>
+      <p class=muted style="font-size:12px;margin:0 0 10px">Everyone can add photos here — they're attributed to whoever uploaded them. You can remove any photo you uploaded yourself; an admin can remove any photo.</p>
+      <div class=f><label>Add individual photos (filename = product code, e.g. STAGNA-MS.png)</label><input type=file id=cm-upload-files multiple accept=".png"></div>
+      <button class=btn style="width:100%" onclick="uploadPhotosToStore('cm-upload-files',this,'cm-upload-progress',loadCloudManagerPhotos)">Upload Photos</button>
+      <div class=f style="margin-top:10px"><label>Or add an entire folder at once</label><input type=file id=cm-upload-folder webkitdirectory multiple></div>
+      <button class=btn style="width:100%" onclick="uploadPhotosToStore('cm-upload-folder',this,'cm-upload-progress',loadCloudManagerPhotos)">Upload Folder</button>
+      <div id=cm-upload-progress class="muted hide" style="font-size:11.5px;margin-top:6px"></div>
+      <div style="display:flex;gap:8px;margin:14px 0 12px">
+        <input id=cm-photo-search placeholder="Search by product code…" oninput=renderCloudManagerGrid() style="flex:1">
+        <select id=cm-photo-groupby onchange=renderCloudManagerGrid() style="width:auto">
+          <option value="">No grouping</option>
+          <option value="uploader">Group by uploader</option>
+        </select>
+      </div>
+      <p class=muted id=cm-photo-status style="font-size:12px;margin:0 0 10px">Loading…</p>
+      <div id=cm-photo-grid></div>
+    </div></div>
+  </div>
+
   <!-- SUBMISSIONS -->
   <div id=v-submissions class=hide style="padding:20px;max-width:1000px;margin:0 auto">
     <div class=filterbar>
@@ -6068,6 +6147,37 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       </div>
       <div id=cloudphoto-status class=muted style="font-size:12px;margin-bottom:8px"></div>
       <div id=cloudphoto-grid></div>
+    </div>
+  </div>
+</div>
+<!-- Account avatar popup — replaces the old standalone Sign Out rail
+     button (see n-avatar just above). Global sibling, same reasoning as
+     every other modal here: never nest inside a view container that
+     carries .hide outside its own screen. -->
+<div class="clientmodal hide" id=profilemodal>
+  <div class=clientmodalbox style="max-width:420px">
+    <div class=clientmodalbar><b>Your Account</b><button class=btn onclick=closeProfileModal()>Close</button></div>
+    <div class=clientmodalbody>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+        <span class=avatarcircle id=profile-avatar style="width:44px;height:44px;font-size:18px"></span>
+        <div>
+          <div style="font-weight:700;font-size:15px" id=profile-username></div>
+          <div class=muted style="font-size:11.5px" id=profile-role></div>
+        </div>
+      </div>
+      <div class=f><label>Full Name</label><input id=profile-full_name placeholder="Your name"></div>
+      <div class=f><label>Phone</label><input id=profile-phone placeholder="e.g. +971 50 123 4567"></div>
+      <button class="btn dark" style="width:100%" onclick=saveProfileInfo(this)>Save Details</button>
+      <p class=muted id=profile-info-note style="font-size:11px;margin:6px 0 0"></p>
+      <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
+      <div class=ch style="padding:0 0 10px;font-size:12.5px">Change Password</div>
+      <div class=f><label>Current Password</label><input type=password id=profile-current-password autocomplete=current-password></div>
+      <div class=f><label>New Password</label><input type=password id=profile-new-password autocomplete=new-password></div>
+      <div class=f><label>Confirm New Password</label><input type=password id=profile-confirm-password autocomplete=new-password></div>
+      <button class=btn style="width:100%" onclick=changeOwnPassword(this)>Update Password</button>
+      <p class=muted id=profile-password-note style="font-size:11px;margin:6px 0 0"></p>
+      <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
+      <button class=btn style="width:100%;color:var(--danger);border-color:var(--danger)" onclick=doLogout()>Sign Out</button>
     </div>
   </div>
 </div>
@@ -6779,14 +6889,14 @@ function view(v){
   // real enforcement is server-side (app.py's before_request).
   if(BLOCKED_TOOLS.includes(v))v='menu';
   const isDoc=DOC_VIEW_LIST.includes(v);
-  $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');$('v-scanner').classList.toggle('hide',v!='scanner');
-  $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
+  $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-cloudmanager').classList.toggle('hide',v!='cloudmanager');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');$('v-scanner').classList.toggle('hide',v!='scanner');
+  $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-cloudmanager').classList.toggle('on',v=='cloudmanager');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
   // Update/Admin Tools buttons: only make sense while looking at Settings
   // (Admin Tools opens Settings' own admin sub-page; Update Center is
   // reachable from the same corner) — see bar-admin-update-group.
   $('bar-admin-update-group').style.display=(v=='settings')?'flex':'none';
   DOC_VIEW_LIST.forEach(dv=>$('n-'+dv).classList.toggle('on',v===dv));
-  if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients')loadClientsView();if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}if(v=='scanner')$('title').textContent='Scanner'}
+  if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients'){$('title').textContent='Clients';loadClientsView()}if(v=='cloudmanager'){$('title').textContent='Cloud Manager';loadCloudManagerPhotos()}if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}if(v=='scanner')$('title').textContent='Scanner'}
 // The one way to open a document screen — every rail button and Menu tile
 // goes through here. Only resets the form when actually switching type, so
 // clicking the nav item you're already on never wipes work in progress
@@ -6980,7 +7090,11 @@ async function actuallyDeletePhotoFromStore(name){
 // progress line, and skips anything that isn't a .png up front since
 // that's all engine.load_photo_catalog() ever matches against.
 const UPLOAD_BATCH_SIZE=15;
-async function uploadPhotosToStore(inputId,btn,progressId){
+// onDone: optional refresh callback for whichever grid is showing this
+// upload control — Admin Tools' own photostore-list (default, when
+// omitted) vs. the Cloud Manager tool's cm-photo-grid (see
+// loadCloudManagerPhotos()) — same upload machinery, different page.
+async function uploadPhotosToStore(inputId,btn,progressId,onDone){
   const input=$(inputId);
   const all=[...input.files];
   const pngs=all.filter(f=>f.name.toLowerCase().endsWith('.png'));
@@ -7005,7 +7119,60 @@ async function uploadPhotosToStore(inputId,btn,progressId){
   input.value='';
   toast(uploadedTotal+' photo'+(uploadedTotal!==1?'s':'')+' uploaded'+(errorList.length?', '+errorList.length+' failed':'')+(skipped?' — '+skipped+' non-.png skipped':''));
   if(errorList.length)console.warn('Photo upload errors:',errorList);
-  loadPhotoStoreList();refreshPhotoStoreStatus()}
+  if(onDone)onDone();else{loadPhotoStoreList();refreshPhotoStoreStatus()}}
+// ---------------------------------------------------------------- Cloud Manager (Menu -> Cloud Manager)
+// Same list/grid data as the document-build photo picker (openCloudPhotoPicker
+// above it in this file) but as a real management page, not a "choose one"
+// modal — per-photo delete button, shown only where the current user is
+// actually allowed to use it (server also enforces this — see
+// api_photostore_delete()).
+let CLOUD_MANAGER_PHOTOS=null;
+async function loadCloudManagerPhotos(){
+  $('cm-photo-status').textContent='Loading…';
+  $('cm-photo-grid').innerHTML='';
+  const r=await fetch('/api/photostore-list').then(r=>r.json()).catch(e=>({error:e.message}));
+  if(r.error){$('cm-photo-status').textContent='Could not load the cloud library: '+r.error;CLOUD_MANAGER_PHOTOS=[];return}
+  CLOUD_MANAGER_PHOTOS=r.photos||[];
+  renderCloudManagerGrid()}
+function renderCloudManagerGrid(){
+  const q=($('cm-photo-search').value||'').trim().toLowerCase();
+  const groupBy=$('cm-photo-groupby').value;
+  const list=(CLOUD_MANAGER_PHOTOS||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
+  $('cm-photo-status').textContent=(CLOUD_MANAGER_PHOTOS||[]).length
+    ?list.length+' of '+CLOUD_MANAGER_PHOTOS.length+' photo'+(CLOUD_MANAGER_PHOTOS.length!==1?'s':'')
+    :'No photos yet — add some above.';
+  const canDelete=p=>CURRENT_ROLE==='admin'||p.uploaded_by===CURRENT_USER;
+  const tile=p=>{
+    const name=p.key.split('/').pop().replace(/\.png$/i,'');
+    return '<div class="cloudphototile manage" title="'+escHtml(p.key)+'">'+
+      '<img src="/api/photostore-fetch?key='+encodeURIComponent(p.key)+'" loading=lazy>'+
+      '<span>'+escHtml(name)+'</span>'+
+      (canDelete(p)?'<button type=button class=cloudphototiledel title="Remove this photo" onclick="deleteCloudManagerPhoto(\''+escHtml(p.key).replace(/'/g,"\\'")+'\',this)">✕</button>':'')+
+      '</div>'};
+  const gridStyle='display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px';
+  if(groupBy!=='uploader'){
+    $('cm-photo-grid').innerHTML='<div style="'+gridStyle+'">'+list.map(tile).join('')+'</div>';
+    return}
+  // Photos uploaded before attribution tracking existed (the admin's
+  // original library) have no entry — group there rather than "unknown",
+  // same convention as the picker's own grouping (openCloudPhotoPicker).
+  const groups={};
+  list.forEach(p=>{const who=p.uploaded_by||'Admin (original library)';(groups[who]=groups[who]||[]).push(p)});
+  const names=Object.keys(groups).sort((a,b)=>a.localeCompare(b));
+  $('cm-photo-grid').innerHTML=names.map(who=>
+    '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin:10px 0 6px;color:var(--muted)">'+escHtml(who)+' <span style="font-weight:400;text-transform:none;letter-spacing:0">('+groups[who].length+')</span></div>'+
+    '<div style="'+gridStyle+'">'+groups[who].map(tile).join('')+'</div>'
+  ).join('')}
+function deleteCloudManagerPhoto(name,btn){
+  if(btn.dataset.confirm!=='1'){
+    btn.dataset.confirm='1';btn.textContent='Sure?';
+    setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='✕'}},2500);
+    return}
+  actuallyDeleteCloudManagerPhoto(name)}
+async function actuallyDeleteCloudManagerPhoto(name){
+  const r=await fetch('/api/photostore-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name})}).then(r=>r.json());
+  if(!r.ok){toast(r.error||'Could not delete');return}
+  toast('Removed '+name);loadCloudManagerPhotos()}
 
 // ---------------------------------------------------------------- Full Catalog Builder
 // Assembles every generated Sololuce Datasheet into one bound book — see
@@ -14304,7 +14471,7 @@ async function deleteDraftFromAllDocs(id){
 // bootApp(), called only after checkLogin()/doLogin() confirms a session.
 // initResizer()'s own calls stay outside: they only wire up drag behavior
 // on static DOM elements, no API calls, safe to run immediately.
-let LOGGED_IN=false, CURRENT_USER=null, CURRENT_ROLE=null, BRAND_LOCK=null, BLOCKED_TOOLS=[];
+let LOGGED_IN=false, CURRENT_USER=null, CURRENT_ROLE=null, BRAND_LOCK=null, BLOCKED_TOOLS=[], CURRENT_SETTINGS={};
 function bootApp(){
   loadUnits().then(()=>{setType('QTN2');$('title').textContent='Menu'});loadCfg();loadBrands();loadClients();loadClientsView();checkUnfinishedDraftsOnLaunch();
   initUpdateChecking(); // respects the "check for updates on each start" preference — see Update Center
@@ -14350,7 +14517,7 @@ function hideSplash(){
     setTimeout(()=>{const s=$('splashscreen');if(s)s.classList.add('hide')},150)
   },wait)}
 function applySession(u){
-  LOGGED_IN=true;CURRENT_USER=u.username;CURRENT_ROLE=u.role;BRAND_LOCK=u.brand_lock;BLOCKED_TOOLS=u.blocked_tools||[];
+  LOGGED_IN=true;CURRENT_USER=u.username;CURRENT_ROLE=u.role;BRAND_LOCK=u.brand_lock;BLOCKED_TOOLS=u.blocked_tools||[];CURRENT_SETTINGS=u.settings||{};
   // Per-user theme — "let the theme be linked to the user account": this
   // account's own saved choice (settings.theme, synced via the same R2
   // connection as the rest of the account) wins over whatever this ONE
@@ -14381,11 +14548,15 @@ function applyAccessRestrictions(){
   // left the admin sub-page showing.
   $('admin-tools-btn').style.display=CURRENT_ROLE==='admin'?'':'none';
   showSettingsMainPanel();
-  // Label stays plain "Sign out" — a long username used to get appended
-  // inline here and overflow the rail's fixed width. The username still
-  // shows, just as a hover tooltip on the button itself instead.
-  $('logoutlabel').textContent='Sign out';
-  $('n-logout').title='Sign out ('+CURRENT_USER+')'}
+  updateAvatarBadge()}
+// Initial letter prefers the account's own Full Name (set via the avatar
+// popup) over the raw username, same idea as any app that shows "J" for
+// "John" once you've told it your name — falls back to the username's
+// first letter (or "?") before that's ever been set.
+function updateAvatarBadge(){
+  const label=(CURRENT_SETTINGS.full_name||CURRENT_USER||'?').trim();
+  const el=$('avatarinitial');if(el)el.textContent=(label[0]||'?').toUpperCase();
+  $('n-avatar').title='Your account ('+CURRENT_USER+')'}
 async function doLogin(ev){
   ev.preventDefault();
   const btn=$('login-submit'),err=$('login-error');
@@ -14401,6 +14572,52 @@ async function doLogin(ev){
 async function doLogout(){
   await fetch('/api/logout',{method:'POST'}).catch(()=>{});
   location.reload()}
+
+// ---- Account avatar popup (n-avatar) — profile fields + password change,
+// per explicit request: "instead of login and logout button, let it be
+// the User Avatar... pop up a window... edit his details... standard
+// information to fill and standard settings for it... password change or
+// phone details". Fetches fresh from the server on open (not just the
+// CURRENT_SETTINGS snapshot from login) so an edit made from another PC
+// shows up here too, same reasoning as api_current_user()'s own comment. ----
+async function openProfileModal(){
+  $('profile-info-note').textContent='';$('profile-password-note').textContent='';
+  $('profile-current-password').value='';$('profile-new-password').value='';$('profile-confirm-password').value='';
+  $('profile-username').textContent=CURRENT_USER;
+  $('profile-role').textContent=CURRENT_ROLE==='admin'?'Administrator':'User';
+  $('profile-avatar').textContent=$('avatarinitial').textContent;
+  $('profilemodal').classList.remove('hide');
+  const r=await fetch('/api/current-user').then(r=>r.json()).catch(()=>null);
+  const settings=(r&&r.settings)||CURRENT_SETTINGS||{};
+  CURRENT_SETTINGS=settings;
+  $('profile-full_name').value=settings.full_name||'';
+  $('profile-phone').value=settings.phone||'';
+  updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent}
+function closeProfileModal(){$('profilemodal').classList.add('hide')}
+async function saveProfileInfo(btn){
+  const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Saving…';
+  const fullName=$('profile-full_name').value.trim(),phone=$('profile-phone').value.trim();
+  const rName=await fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'full_name',value:fullName})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  const rPhone=await fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'phone',value:phone})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  btn.disabled=false;btn.textContent=origLabel;
+  const note=$('profile-info-note');
+  if(rName.ok&&rPhone.ok){
+    CURRENT_SETTINGS.full_name=fullName;CURRENT_SETTINGS.phone=phone;
+    updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent;
+    note.style.color='var(--success)';note.textContent='Saved.'
+  }else{note.style.color='var(--danger)';note.textContent=rName.error||rPhone.error||'Could not save — try again.'}}
+async function changeOwnPassword(btn){
+  const current=$('profile-current-password').value,next=$('profile-new-password').value,confirm=$('profile-confirm-password').value;
+  const note=$('profile-password-note');note.style.color='var(--danger)';
+  if(!current||!next){note.textContent='Fill in both password fields.';return}
+  if(next!==confirm){note.textContent='New passwords don\'t match.';return}
+  const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Updating…';
+  const r=await fetch('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:current,new_password:next})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  btn.disabled=false;btn.textContent=origLabel;
+  if(r.ok){
+    note.style.color='var(--success)';note.textContent='Password updated.';
+    $('profile-current-password').value='';$('profile-new-password').value='';$('profile-confirm-password').value=''
+  }else{note.textContent=r.error||'Could not update password.'}}
 
 // ---- Admin: Users & Access (Settings) ----
 let USERS_LIST=[],USERS_BLOCKABLE=[],USERS_BRANDS=[],EDITING_USERNAME=null;

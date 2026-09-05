@@ -287,6 +287,16 @@ def _read_photo_attribution():
         return {}
 
 
+def get_uploader(key):
+    """Who uploaded this specific photo, or None if it predates
+    attribution tracking (the admin's original library, or an upload that
+    happened before this index existed). Used by app.py's Cloud Manager
+    tool (/api/photostore-delete) to let a normal user delete only photos
+    THEY uploaded — anything with no recorded uploader stays admin-only to
+    remove, same as before this existed."""
+    return (_read_photo_attribution().get(key) or {}).get("uploaded_by")
+
+
 def _record_photo_attribution(key, username):
     """Best-effort — a failed attribution write should never fail the
     actual photo upload it's attached to. allow_bundled_write=True: any

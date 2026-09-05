@@ -281,10 +281,11 @@ def publish_to_cloud():
 # account via save_user_setting() below — deliberately explicit rather
 # than accepting an arbitrary key, so this can never become a backdoor
 # for writing something unrelated into the shared accounts.json. "theme"
-# is the first (per explicit request: "let the theme be linked to the
-# user account"); more will be added here once there's a fuller spec for
-# what else should live in per-user settings.
-USER_SETTABLE_KEYS = ("theme",)
+# was the first (per explicit request: "let the theme be linked to the
+# user account"); "full_name"/"phone" are the standard profile fields
+# behind the account-avatar popup (per explicit request: "standard
+# information to fill... phone details and etc.").
+USER_SETTABLE_KEYS = ("theme", "full_name", "phone")
 
 
 def save_user_setting(username, key, value):
@@ -333,4 +334,46 @@ def save_user_setting(username, key, value):
     except Exception as e:
         # Saved locally at least — this machine keeps the new value even
         # if the publish itself failed (offline, R2 briefly down, etc.).
+        return {"ok": False, "error": str(e)}
+
+
+def change_own_password(username, current_password, new_password):
+    """Lets a logged-in user change their OWN password from the account
+    avatar popup — a step up in sensitivity from save_user_setting()
+    above, so this ALWAYS re-verifies the current password against the
+    freshest copy first (never trusts the session alone), and only then
+    touches password_hash on that one user's own record. Same narrow
+    pull-merge-push pattern as save_user_setting() otherwise — never
+    touches role/brand_lock/blocked_tools, never any other user's record,
+    allow_bundled_write=True for the same reason that function has it:
+    the bundled read-only key really does carry write access today (see
+    photo_store.py's own comment), and this is exactly the kind of
+    narrow, self-service write that's safe to let every install make."""
+    username_norm = (username or "").strip().lower()
+    if not username_norm:
+        return {"ok": False, "error": "Not logged in."}
+    if not new_password or len(new_password) < 4:
+        return {"ok": False, "error": "New password must be at least 4 characters."}
+    try:
+        data_bytes, _ct = photo_store.get_bytes(ACCOUNTS_KEY)
+        data = json.loads(data_bytes.decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("users"), list):
+            raise ValueError("unexpected shape")
+    except Exception:
+        data = load_accounts()
+    users = data.setdefault("users", [])
+    user = next((u for u in users if u.get("username", "").strip().lower() == username_norm), None)
+    if not user:
+        return {"ok": False, "error": "User not found."}
+    if not check_password_hash(user.get("password_hash", ""), current_password or ""):
+        return {"ok": False, "error": "Current password is incorrect."}
+    user["password_hash"] = generate_password_hash(new_password)
+    _write_json(LOCAL_CACHE, data)  # apply locally right away regardless of whether the publish below succeeds
+    try:
+        photo_store.put_bytes(
+            ACCOUNTS_KEY, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+            "application/json", allow_bundled_write=True,
+        )
+        return {"ok": True}
+    except Exception as e:
         return {"ok": False, "error": str(e)}
