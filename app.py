@@ -6466,10 +6466,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
            SAME zone (e.g. Application Photo) surfaces what was uploaded
            there before, without wading through the whole shared library
            first. Unchecking reveals everything, same as before this
-           feature existed. -->
-      <label id=cloudphoto-zone-row class="hide" style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px;cursor:pointer">
+           feature existed. class=dvcheck (not a bare styled label) —
+           per explicit report, missing this was the real bug behind "the
+           checkbox is wrong location": every OTHER checkbox in this app
+           opts out of the blanket input{width:100%} rule via
+           .dvcheck input[type=checkbox]{width:auto;...} (see that
+           rule's own definition) — this one never did, so the checkbox
+           itself was stretching to fill the row instead of sitting
+           tight against its own label text. -->
+      <label id=cloudphoto-zone-row class="dvcheck hide" style="font-size:11.5px;font-weight:500;white-space:normal;margin-bottom:10px">
         <input type=checkbox id=cloudphoto-zone-only checked onchange=renderCloudPhotoGrid()>
-        Only show photos uploaded for <span id=cloudphoto-zone-label></span>
+        Show only photos for <span id=cloudphoto-zone-label></span>
       </label>
       <div id=cloudphoto-status class=muted style="font-size:12px;margin-bottom:8px"></div>
       <div id=cloudphoto-grid></div>
@@ -9591,11 +9598,19 @@ function renderCloudPhotoGrid(){
   const groupBy=$('cloudphoto-groupby').value;
   const zoneOnly=CLOUD_PHOTO_SLOT&&$('cloudphoto-zone-only').checked;
   let list=(CLOUD_PHOTO_LIST||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
-  if(zoneOnly)list=list.filter(p=>p.zone===CLOUD_PHOTO_SLOT);
+  // A photo with no zone tag at all predates this feature entirely — per
+  // explicit report, the whole existing shared library (575 photos) IS
+  // functionally the Main Product Photo library, just never explicitly
+  // tagged as such. Treating "no tag" as "main" (ONLY for the Main
+  // Product Photo zone specifically — every other zone still means
+  // "nothing uploaded here yet" when untagged) is what makes this
+  // checkbox actually useful immediately instead of showing empty for
+  // the one zone that already has real content.
+  if(zoneOnly)list=list.filter(p=>(p.zone||'main')===CLOUD_PHOTO_SLOT);
   $('cloudphoto-status').textContent=!(CLOUD_PHOTO_LIST||[]).length
     ?'The cloud library is empty — an admin can add photos from Settings > Shared Product Photos.'
     :(zoneOnly&&!list.length
-      ?'No photos uploaded for '+(CAT_IMG_ZONE_NAME[CLOUD_PHOTO_SLOT]||'this zone')+' yet — uncheck the box above to browse the whole library, or use "Upload a picture" instead.'
+      ?'No '+(CAT_IMG_ZONE_NAME[CLOUD_PHOTO_SLOT]||'this zone')+' photos yet — uncheck above to see everything, or upload one.'
       :list.length+' of '+CLOUD_PHOTO_LIST.length+' photo'+(CLOUD_PHOTO_LIST.length!==1?'s':''));
   const tile=p=>{
     const name=p.key.split('/').pop().replace(/\.png$/i,'');
