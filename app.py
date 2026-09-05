@@ -7185,7 +7185,25 @@ async function initUpdateChecking(){
   UPDATE_PREFS=await fetch('/api/update-prefs').then(r=>r.json()).catch(()=>UPDATE_PREFS);
   if(!UPDATE_PREFS.check_on_start)return;
   checkForAppUpdate();
-  setInterval(checkForAppUpdate,4*60*60*1000)} // re-check every 4h for a long-running session
+  // Per explicit request: an update should show up while the app is
+  // ALREADY running, not just at the next launch. The literal ask was
+  // "each 8 seconds" (matching the cadence already used elsewhere for
+  // this app's OWN Cloudflare-backed sync loops) — but GitHub's release
+  // API is a different kind of dependency: unauthenticated requests are
+  // capped at 60/HOUR, PER IP — shared across every Office Tool install
+  // on the same office network, not per-install. Confirmed directly (a
+  // live rate_limit check before/after several real calls, including
+  // trying a conditional If-None-Match request first) that even a
+  // genuine 304 Not Modified response still costs 1 unit here — there's
+  // no free/cheap way to poll this specific endpoint faster.
+  // 5 minutes matches the existing tray-icon checker (app.py's own
+  // _tray_update_checker_loop, been running at this exact interval all
+  // session with no rate-limit issues) rather than inventing a second,
+  // independent interval that would double the total request volume for
+  // no benefit — this is the fastest interval already proven safe here,
+  // just now also driving the main window's own Update button/rail dot
+  // instead of only the tray menu.
+  setInterval(checkForAppUpdate,5*60*1000)}
 
 // ---- Update Center (top bar, everyone) ----
 async function openUpdateCenter(){

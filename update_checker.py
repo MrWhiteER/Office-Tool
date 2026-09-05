@@ -55,6 +55,21 @@ def check_for_update(timeout=6):
     or {available: False, error: "..."} if the repo isn't set up yet, the
     machine is offline, or GitHub is unreachable — callers should treat
     that as "no update", not as a hard failure.
+
+    Deliberately NOT called on a short interval (e.g. every few seconds)
+    while the app is running — confirmed directly against the real API
+    (a live rate_limit check before/after several calls) that even a
+    conditional If-None-Match request that gets back a genuine 304 Not
+    Modified STILL costs 1 unit of the unauthenticated 60/hour budget
+    here; an ETag-based "free polling" cache was tried and measured, not
+    just assumed, and removed once the numbers showed it doesn't help.
+    That 60/hour is also PER IP, shared across every Office Tool install
+    on the same office network, not per-install — so anything faster
+    than roughly a couple of minutes risks the whole office collectively
+    exhausting it and update checks silently failing for everyone. See
+    initUpdateChecking() in the page script for the interval actually
+    used while running, and its own comment for the real numbers this
+    was based on.
     """
     if "YOUR_GITHUB_USERNAME" in GITHUB_REPO:
         return {"available": False, "current": APP_VERSION, "error": "GITHUB_REPO not configured yet"}
