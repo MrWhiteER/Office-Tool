@@ -3017,9 +3017,11 @@ def api_photostore_upload():
     for the folder structure, which R2/S3 stores natively as a prefix.
     Optional "zone" form field (one of _PHOTO_ZONE_SLOTS): tags every file
     in this batch as uploaded for that Datasheet photo zone — see
-    uploadZonePhoto() in the page script, the globe-icon menu's "Upload a
-    picture" option. Absent for every other upload path (Cloud Manager,
-    Admin Tools, Settings) — those photos simply have no zone."""
+    pickCatImage()/uploadPhotoWithDuplicateCheck() in the page script,
+    called automatically every time a Datasheet photo zone's "Choose
+    image…" picks a local file. Absent for every other upload path
+    (Cloud Manager, Admin Tools, Settings) — those photos simply have no
+    zone."""
     files = request.files.getlist("files")
     if not files:
         return jsonify({"ok": False, "error": "No files."}), 400
@@ -6483,6 +6485,19 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     </div>
   </div>
 </div>
+<!-- Same-name-and-size duplicate check — see uploadPhotoWithDuplicateCheck()
+     in the page script. Global sibling, same reasoning as every other
+     modal here. -->
+<div class="clientmodal hide" id=dupphotomodal>
+  <div class=clientmodalbox style="max-width:420px">
+    <div class=clientmodalbar><b>Already in the cloud library</b></div>
+    <div class=clientmodalbody>
+      <p class=muted style="font-size:12.5px;margin:0 0 16px">A photo named "<b id=dupphoto-name></b>" — same size — is already in the shared cloud library. It's already applied to this document either way; what should happen to the cloud copy?</p>
+      <button class="btn dark" style="width:100%;margin-bottom:8px" onclick="resolveDuplicatePhoto('rename')">Save it under a new name</button>
+      <button class=btn style="width:100%" onclick="resolveDuplicatePhoto('cancel')">Don't save another copy</button>
+    </div>
+  </div>
+</div>
 <!-- Account avatar popup — replaces the old standalone Sign Out rail
      button (see n-avatar just above). Global sibling, same reasoning as
      every other modal here: never nest inside a view container that
@@ -6782,7 +6797,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
              quoted for the same reason CLOUD_GLOBE_ICON's own comment
              explains: unquoted + immediately followed by "/>" swallows
              the slash into the value and never actually self-closes. -->
-        <button type=button class=btn title="Add from the cloud library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openZonePhotoMenu(PHOTO_ADJUST_SLOT,this.getBoundingClientRect())"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
+        <button type=button class=btn title="Choose from cloud library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(PHOTO_ADJUST_SLOT)"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
         <button type=button class=btn style="flex:1" onclick="resetPhotoAdjust()">Reset</button>
       </div>
     </div>
@@ -9495,6 +9510,16 @@ const CAT_IMG_EXTRA_POSITION={extra1:'Top Left',extra2:'Top Right',extra3:'Botto
 // string happens to already be quoted or have a space before its own
 // "/>", which is why only this one tag broke.
 const CLOUD_GLOBE_ICON='<svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg>';
+// Per explicit request, this now does THREE things every time, not just
+// one: apply the picture to this document instantly (unchanged, local
+// FileReader embed — never blocked on a network round trip), AND save it
+// to the shared cloud library tagged with this zone (see
+// uploadPhotoWithDuplicateCheck() below) — the separate "Upload a
+// picture…" menu option this used to require is gone; picking a photo
+// here IS the upload now, so there's only one button left to press. The
+// two halves are independent: the local embed always succeeds
+// immediately even if the cloud save fails (offline, R2 not configured)
+// or the user cancels it at the duplicate-check step below.
 function pickCatImage(slot){
   const inp=document.createElement('input');
   inp.type='file';inp.accept='image/*';
@@ -9512,60 +9537,67 @@ function pickCatImage(slot){
       CAT_IMG[slot]=Object.assign(catImgDefault(),{src:reader.result,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
       renderCatImages();schedulePreview();
       openPhotoAdjust(slot)};
-    reader.readAsDataURL(f)};
+    reader.readAsDataURL(f);
+    uploadPhotoWithDuplicateCheck(f,slot)};
   inp.click()}
 function removeCatImage(slot){CAT_IMG[slot]=Object.assign(catImgDefault(),{label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});renderCatImages();schedulePreview()}
 
-// ---------------------------------------------------------------- Globe icon menu (per zone)
-// Per explicit request: "when the user clicks on it it will show a small
-// menu where he can upload a picture or choose a picture. so... when the
-// user will click the globe in main product photo and if he adds a
-// picture it will save in cloudflare in Main Product Picture and if it's
-// Application Photo it will add in Application Photo. same with the
-// rest!" Reuses the same #filemenu popover as openUpdateMenu() — see its
-// own comment for the positioning/dismiss mechanics, unchanged here.
-function openZonePhotoMenu(slot,rect){
-  const menu=$('filemenu');
-  renderZonePhotoMenu(slot);
-  menu.style.display='block';
-  const r=rect||{left:0,bottom:0};
-  const w=menu.offsetWidth||220,h=menu.offsetHeight||110;
-  let x=r.left,y=r.bottom+4;
-  if(x+w>window.innerWidth-8)x=window.innerWidth-w-8;
-  if(y+h>window.innerHeight-8)y=r.top-h-4;
-  menu.style.left=x+'px';menu.style.top=y+'px';
-  setTimeout(()=>document.addEventListener('click',closeFileMenu,{once:true}),0)}
-function renderZonePhotoMenu(slot){
-  $('filemenu').innerHTML=
-    '<div class=fmtitle>'+escHtml(CAT_IMG_ZONE_NAME[slot]||'Photo')+'</div>'+
-    '<button type=button class=btn style="width:calc(100% - 24px);margin:2px 12px 6px;display:block" onclick="event.stopPropagation();closeFileMenu();uploadZonePhoto(\''+slot+'\')">Upload a picture…</button>'+
-    '<button type=button class=btn style="width:calc(100% - 24px);margin:0 12px 8px;display:block" onclick="event.stopPropagation();closeFileMenu();openCloudPhotoPicker(\''+slot+'\')">Choose from library…</button>'}
-// Same local-embed behavior as pickCatImage() (instant, no need to wait on
-// a round trip) PLUS a real upload to the shared cloud library tagged
-// with this zone, so it's findable again later via "Choose from
-// library…" on the SAME zone (see openCloudPhotoPicker()'s own zone
-// filter). The two are independent — the local embed always succeeds
-// immediately; if the cloud save fails (offline, R2 not configured) the
-// photo still works fine in THIS document, it just won't be reusable
-// from the library later.
-function uploadZonePhoto(slot){
-  const inp=document.createElement('input');
-  inp.type='file';inp.accept='image/*';
-  inp.onchange=()=>{
-    const f=inp.files[0];if(!f)return;
-    const reader=new FileReader();
-    reader.onload=()=>{
-      CAT_IMG[slot]=Object.assign(catImgDefault(),{src:reader.result,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
-      renderCatImages();schedulePreview();
-      openPhotoAdjust(slot)};
-    reader.readAsDataURL(f);
-    const fd=new FormData();
-    fd.append('files',f,f.name);
-    fd.append('zone',slot);
-    fetch('/api/photostore-upload',{method:'POST',body:fd}).then(r=>r.json()).then(r=>{
-      if(!r.ok)toast('Using it here, but could not save to the cloud library: '+(r.errors||[]).join(', '))
-    }).catch(()=>toast('Using it here, but could not reach the cloud library'))};
-  inp.click()}
+// ---------------------------------------------------------------- Cloud upload + duplicate check
+// Per explicit request: every picture attached via pickCatImage() above
+// also lands in the shared cloud library automatically — "but the most
+// important is that it will never be duplicated. So check for the same
+// name and same size always. If the picture is same, let the user know
+// about it, and allow the user to choose... Keep the file with another
+// name, or upload another one." Deliberately a CHEAP check (filename +
+// byte size against the live library, via /api/photostore-list — no
+// need to read or hash file contents for it) run right before every
+// upload, not a one-time thing.
+let PENDING_DUP_UPLOAD=null;
+async function uploadPhotoWithDuplicateCheck(file,zone){
+  let photos=[];
+  try{photos=(await fetch('/api/photostore-list').then(r=>r.json())).photos||[]}catch(e){}
+  const existing=photos.find(p=>p.key===file.name);
+  if(existing&&existing.size===file.size){
+    // Same name AND same size — genuinely looks like the same picture
+    // already in the library. A same-NAME-different-SIZE collision is a
+    // different, rarer case (two unrelated photos that happen to share a
+    // filename) — that one's handled silently below by just uniquifying
+    // the name, since it isn't "the same picture" by this feature's own
+    // definition and doesn't need to interrupt the user.
+    PENDING_DUP_UPLOAD={file,zone,existingKeys:new Set(photos.map(p=>p.key))};
+    $('dupphoto-name').textContent=file.name;
+    $('dupphotomodal').classList.remove('hide');
+    return}
+  const name=existing?uniquifyPhotoName(file.name,new Set(photos.map(p=>p.key))):file.name;
+  doUploadZonePhoto(file,name,zone)}
+function doUploadZonePhoto(file,name,zone){
+  const fd=new FormData();
+  fd.append('files',file,name);
+  fd.append('zone',zone);
+  fetch('/api/photostore-upload',{method:'POST',body:fd}).then(r=>r.json()).then(r=>{
+    if(!r.ok)toast('Using it here, but could not save to the cloud library: '+(r.errors||[]).join(', '))
+  }).catch(()=>toast('Using it here, but could not reach the cloud library'))}
+function closeDupPhotoModal(){$('dupphotomodal').classList.add('hide');PENDING_DUP_UPLOAD=null}
+function resolveDuplicatePhoto(choice){
+  const pending=PENDING_DUP_UPLOAD;
+  closeDupPhotoModal();
+  if(!pending)return;
+  if(choice==='rename'){
+    const name=uniquifyPhotoName(pending.file.name,pending.existingKeys);
+    doUploadZonePhoto(pending.file,name,pending.zone);
+    toast('Saved to the cloud library as '+name)}
+  // choice==='cancel' — nothing further to do here; the photo is already
+  // applied to THIS document either way (pickCatImage()'s own local embed
+  // ran immediately, independent of this cloud-save decision) — the user
+  // is free to click "Choose image…" again to pick a different one.
+}
+function uniquifyPhotoName(name,existingKeys){
+  const dot=name.lastIndexOf('.');
+  const base=dot>=0?name.slice(0,dot):name;
+  const ext=dot>=0?name.slice(dot):'';
+  let n=2,candidate=base+'_'+n+ext;
+  while(existingKeys.has(candidate)){n++;candidate=base+'_'+n+ext}
+  return candidate}
 
 // ---------------------------------------------------------------- Cloud Photo Library picker
 // Lets a user pick a product photo visually out of the shared R2 library
@@ -9704,7 +9736,7 @@ function renderCatImages(){
        '</div>'
       :'<div style="display:flex;gap:5px">'+
          '<button type=button class=btn style="flex:1;font-size:11px;padding:8px 4px" onclick="pickCatImage(\''+slot+'\')">Choose image…</button>'+
-         '<button type=button class=btn title="Add from the cloud library" style="width:38px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="event.stopPropagation();openZonePhotoMenu(\''+slot+'\',this.getBoundingClientRect())">'+CLOUD_GLOBE_ICON+'</button>'+
+         '<button type=button class=btn title="Choose from cloud library" style="width:38px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="event.stopPropagation();openCloudPhotoPicker(\''+slot+'\')">'+CLOUD_GLOBE_ICON+'</button>'+
        '</div>'})}
 
 // Photos section decluttering — explicit "so many checkmarks... confusing"
