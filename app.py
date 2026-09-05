@@ -5216,7 +5216,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .clientmodal{position:fixed;inset:0;background:rgba(20,18,14,.55);z-index:225;display:flex;align-items:center;justify-content:center;padding:20px}
 .clientmodal.hide{display:none}
 .clientmodalbox{background:var(--glass-bg);border-radius:var(--r-lg);width:100%;max-width:460px;max-height:88vh;overflow:auto;box-shadow:var(--shadow-xl);animation:brandOpen .2s cubic-bezier(.24,.9,.32,1.24)}
-.clientmodalbar{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+/* Sticky, not static — per explicit report (a screenshot: scrolled deep
+   into a long cloud photo grid, the header/Close button had scrolled
+   completely out of view with no way back up except scrolling all the
+   way back). .clientmodalbox itself is the scrolling element (overflow:
+   auto above); pinning the bar to its own top means every modal sharing
+   these two classes gets an always-reachable close button for free, with
+   zero per-modal changes — every one of them already has its own
+   Close/Cancel/Done button living in here. Solid background (same token
+   the box itself uses) + a border + z-index so scrolled content doesn't
+   show through or visually merge with it as it passes underneath. */
+.clientmodalbar{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:2;background:var(--glass-bg);border-radius:var(--r-lg) var(--r-lg) 0 0}
 .clientmodalbar b{font-size:14px}
 .clientmodalbody{padding:20px}
 .clientlogopicker{width:76px;height:76px;border-radius:50%;background:var(--tint);border:1.5px dashed #e0c48f;display:flex;align-items:center;justify-content:center;cursor:pointer;margin:0 auto 16px;position:relative;overflow:hidden}
