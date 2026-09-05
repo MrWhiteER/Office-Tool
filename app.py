@@ -1246,6 +1246,53 @@ def _upload_doc_meta(doc_path, key_suffix):
         meta_key = os.path.splitext(key_suffix)[0] + ".meta.json"
         photo_store.upload_document(meta_path, meta_key)
 
+# Cloud backup — every generated document (Quotation/Invoice/DO/Datasheet/
+# Expense Report) gets a copy pushed to the shared R2 bucket right after its
+# local save succeeds, per explicit request: "Datasheets, Invoice,
+# Quotation, DO... should be uploaded and saved to Cloudflare after their
+# generation." Meant to be called on a background thread — document
+# generation must stay exactly as fast as before, and a slow/offline
+# connection must never make generation itself look like it failed. Key is
+# a clean logical path (brand/doctype/filename), not the user's real local
+# folder (see upload_document()'s own docstring on why).
+#
+# Pulled out to module level (was a closure inside api_generate() only) so
+# _generate_do_and_inv() — the OTHER real place a document gets generated,
+# used for the DO+Invoice a Quotation approval creates immediately, and
+# again when a submittal rebuild corrects their quantities — can share the
+# exact same logic instead of silently skipping it. That gap was a real,
+# reported bug: "when the user is clicking to create DO+INVOICE on the
+# quotation it generates locally not in the Cloudflare" — confirmed by
+# reading the code: _generate_do_and_inv() called engine.generate() and
+# returned, with no call anywhere in it to this backup at all, so a DO+INV
+# created that way never left the local machine and could never be pulled
+# down by any other install (unlike every document made through the normal
+# Generate button, which already went through this).
+def _backup_doc_to_cloud(pdf_path, xlsx_path, brand, doctype, generated_by):
+    main_path = pdf_path or xlsx_path
+    if main_path:
+        meta = _read_doc_meta(main_path)
+        # generated_by is set once, on first save — an edit/re-generation
+        # of the SAME document (replace=, or a submittal-triggered DO/INV
+        # rebuild) shouldn't reattribute it to whoever happened to trigger
+        # that later save.
+        meta.setdefault("generated_by", generated_by)
+        meta.setdefault("generated_at", datetime.datetime.now().isoformat())
+        meta.setdefault("downloads", [])
+        _write_doc_meta(main_path, meta)
+    if pdf_path and os.path.isfile(pdf_path):
+        photo_store.upload_document(pdf_path, f"{brand}/{doctype}/{os.path.basename(pdf_path)}")
+    if xlsx_path and os.path.isfile(xlsx_path):
+        photo_store.upload_document(xlsx_path, f"{brand}/{doctype}/{os.path.basename(xlsx_path)}")
+    if main_path:
+        _upload_doc_meta(main_path, f"{brand}/{doctype}/{os.path.basename(main_path)}")
+
+def _backup_doc_to_cloud_async(pdf_path, xlsx_path, brand, doctype, generated_by):
+    """Fire-and-forget wrapper — the one every real call site should use
+    (see _backup_doc_to_cloud's own comment for why this must never block
+    the request)."""
+    threading.Thread(target=_backup_doc_to_cloud, args=(pdf_path, xlsx_path, brand, doctype, generated_by), daemon=True).start()
+
 def all_doc_folders(brand=None):
     """Every distinct auto-managed document folder (INV/DO/QTN2/...) for a
     brand, deduplicated. Sololuce Datasheets' CAT folder is always
@@ -3921,37 +3968,7 @@ def api_generate():
                     save_ledger(brand, entries)
         rel = os.path.relpath(res.get("pdf", res.get("xlsx")), folder)
 
-        # Cloud backup — every generated document (Quotation/Invoice/DO/
-        # Datasheet/Expense Report) gets a copy pushed to the shared R2
-        # bucket right after its local save succeeds, per explicit
-        # request: "Datasheets, Invoice, Quotation, DO... should be
-        # uploaded and saved to Cloudflare after their generation." Runs
-        # on a background thread — Generate must stay exactly as fast as
-        # before, and a slow/offline connection must never make document
-        # generation itself look like it failed. Key is a clean logical
-        # path (brand/doctype/filename), not the user's real local
-        # folder (see upload_document()'s own docstring on why).
-        _doc_pdf = res.get("pdf")
-        _doc_xlsx = res.get("xlsx")
-        _gen_by = session.get("user", "")
-        def _backup_to_cloud(pdf_path=_doc_pdf, xlsx_path=_doc_xlsx, brand=gen_brand, doctype=dtype, generated_by=_gen_by):
-            main_path = pdf_path or xlsx_path
-            if main_path:
-                meta = _read_doc_meta(main_path)
-                # generated_by is set once, on first save — an edit/re-
-                # generation of the SAME document (replace=) shouldn't
-                # reattribute it to whoever happened to be the one editing.
-                meta.setdefault("generated_by", generated_by)
-                meta.setdefault("generated_at", datetime.datetime.now().isoformat())
-                meta.setdefault("downloads", [])
-                _write_doc_meta(main_path, meta)
-            if pdf_path and os.path.isfile(pdf_path):
-                photo_store.upload_document(pdf_path, f"{brand}/{doctype}/{os.path.basename(pdf_path)}")
-            if xlsx_path and os.path.isfile(xlsx_path):
-                photo_store.upload_document(xlsx_path, f"{brand}/{doctype}/{os.path.basename(xlsx_path)}")
-            if main_path:
-                _upload_doc_meta(main_path, f"{brand}/{doctype}/{os.path.basename(main_path)}")
-        threading.Thread(target=_backup_to_cloud, daemon=True).start()
+        _backup_doc_to_cloud_async(res.get("pdf"), res.get("xlsx"), gen_brand, dtype, session.get("user", ""))
 
         return jsonify({"ok": True, "xlsx": os.path.basename(res.get("xlsx", "")),
                         "pdf": os.path.basename(res.get("pdf", "")),
@@ -4051,6 +4068,14 @@ def _generate_do_and_inv(sub_id, brand, company, project, qtn_number, items,
     except Exception as e:
         traceback.print_exc()
         return None, f"Could not generate the Delivery Order/Invoice: {e}"
+    # Cloud backup — see _backup_doc_to_cloud's own comment for the real bug
+    # this fixes: this function used to stop right here, so a DO+INV made
+    # this way (Quotation approval, or a submittal-triggered quantity
+    # correction) never reached R2 at all, unlike every document made
+    # through the normal Generate button.
+    generated_by = session.get("user", "")
+    _backup_doc_to_cloud_async(do_res.get("pdf"), do_res.get("xlsx"), brand, "DO", generated_by)
+    _backup_doc_to_cloud_async(inv_res.get("pdf"), inv_res.get("xlsx"), brand, "INV", generated_by)
     return {
         "do_number": do_number, "do_rel": os.path.relpath(do_res["xlsx"], do_folder).replace(os.sep, "/"),
         "inv_number": inv_number, "inv_rel": os.path.relpath(inv_res["xlsx"], inv_folder).replace(os.sep, "/"),
