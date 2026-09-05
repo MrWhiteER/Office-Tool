@@ -282,10 +282,11 @@ def publish_to_cloud():
 # than accepting an arbitrary key, so this can never become a backdoor
 # for writing something unrelated into the shared accounts.json. "theme"
 # was the first (per explicit request: "let the theme be linked to the
-# user account"); "full_name"/"phone" are the standard profile fields
-# behind the account-avatar popup (per explicit request: "standard
-# information to fill... phone details and etc.").
-USER_SETTABLE_KEYS = ("theme", "full_name", "phone")
+# user account"); "full_name"/"phone"/"personal_email"/"company_email"
+# are the standard profile fields behind the account-avatar popup (per
+# explicit request: "standard information to fill... phone details and
+# etc." then "add more thing. Email Personal, company Email").
+USER_SETTABLE_KEYS = ("theme", "full_name", "phone", "personal_email", "company_email")
 
 
 def save_user_setting(username, key, value):

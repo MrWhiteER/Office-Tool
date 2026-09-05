@@ -2748,15 +2748,29 @@ def api_photostore_fetch():
     resp.headers["Cache-Control"] = "private, max-age=3600"
     return resp
 
+# Same 6 Sololuce Datasheet photo zones as CAT_IMG_ZONE_NAME (page script)
+# — kept as its own small allow-list here rather than trusting whatever
+# string the client sends, since this becomes a permanent tag on a shared
+# R2 object. See photo_store.get_zone()'s own comment for what this is for.
+_PHOTO_ZONE_SLOTS = ("main", "lifestyle", "diagram", "extra1", "extra2", "extra3")
+
 @app.post("/api/photostore-upload")
 def api_photostore_upload():
     """Accepts either loose files or a whole folder (the frontend sends
     each File's webkitRelativePath as its filename when uploading a
     folder — see uploadPhotosToStore()) — so a key here may contain "/"
-    for the folder structure, which R2/S3 stores natively as a prefix."""
+    for the folder structure, which R2/S3 stores natively as a prefix.
+    Optional "zone" form field (one of _PHOTO_ZONE_SLOTS): tags every file
+    in this batch as uploaded for that Datasheet photo zone — see
+    uploadZonePhoto() in the page script, the globe-icon menu's "Upload a
+    picture" option. Absent for every other upload path (Cloud Manager,
+    Admin Tools, Settings) — those photos simply have no zone."""
     files = request.files.getlist("files")
     if not files:
         return jsonify({"ok": False, "error": "No files."}), 400
+    zone = request.form.get("zone", "")
+    if zone not in _PHOTO_ZONE_SLOTS:
+        zone = None
     try:
         running_usage = photo_store.get_usage()  # one listing for this whole batch, not one per file
     except Exception as e:
@@ -2775,7 +2789,7 @@ def api_photostore_upload():
         try:
             f.save(tmp_path)
             photo_store.upload_photo(tmp_path, key, running_usage=running_usage,
-                                      uploaded_by=session.get("user", ""), allow_bundled_write=True)
+                                      uploaded_by=session.get("user", ""), allow_bundled_write=True, zone=zone)
             uploaded.append(key)
         except Exception as e:
             errors.append(key + ": " + str(e))
@@ -2799,7 +2813,12 @@ def api_photostore_delete():
     if session.get("role") != "admin" and photo_store.get_uploader(name) != session.get("user"):
         return jsonify({"ok": False, "error": "You can only remove photos you uploaded yourself."}), 403
     try:
-        photo_store.delete_photo(name)
+        # allow_bundled_write=True: safe here specifically because the
+        # permission check just above already established either admin,
+        # or "deleting a photo I uploaded myself" — see delete_photo()'s
+        # own comment for why this is required, not optional, for a real
+        # non-admin user's delete to work at all.
+        photo_store.delete_photo(name, allow_bundled_write=True)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
@@ -6145,6 +6164,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
           <option value="uploader">Group by uploader</option>
         </select>
       </div>
+      <!-- Only shown when opened from a specific zone's globe menu (see
+           openCloudPhotoPicker()) — defaults to checked so re-opening the
+           SAME zone (e.g. Application Photo) surfaces what was uploaded
+           there before, without wading through the whole shared library
+           first. Unchecking reveals everything, same as before this
+           feature existed. -->
+      <label id=cloudphoto-zone-row class="hide" style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px;cursor:pointer">
+        <input type=checkbox id=cloudphoto-zone-only checked onchange=renderCloudPhotoGrid()>
+        Only show photos uploaded for <span id=cloudphoto-zone-label></span>
+      </label>
       <div id=cloudphoto-status class=muted style="font-size:12px;margin-bottom:8px"></div>
       <div id=cloudphoto-grid></div>
     </div>
@@ -6167,6 +6196,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       </div>
       <div class=f><label>Full Name</label><input id=profile-full_name placeholder="Your name"></div>
       <div class=f><label>Phone</label><input id=profile-phone placeholder="e.g. +971 50 123 4567"></div>
+      <div class=f><label>Personal Email</label><input type=email id=profile-personal_email placeholder="you@example.com"></div>
+      <div class=f><label>Company Email</label><input type=email id=profile-company_email placeholder="you@artemis-lightings.com"></div>
       <button class="btn dark" style="width:100%" onclick=saveProfileInfo(this)>Save Details</button>
       <p class=muted id=profile-info-note style="font-size:11px;margin:6px 0 0"></p>
       <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
@@ -6431,7 +6462,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
              quoted for the same reason CLOUD_GLOBE_ICON's own comment
              explains: unquoted + immediately followed by "/>" swallows
              the slash into the value and never actually self-closes. -->
-        <button type=button class=btn title="Choose from Cloud Library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(PHOTO_ADJUST_SLOT)"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
+        <button type=button class=btn title="Add from the cloud library" style="width:42px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openZonePhotoMenu(PHOTO_ADJUST_SLOT,this.getBoundingClientRect())"><svg width=24 height=24 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.8 3 4.3 6.2 4.3 9.5s-1.5 6.5-4.3 9.5c-2.8-3-4.3-6.2-4.3-9.5S9.2 5.5 12 2.5Z"/><path d="M3.8 7.5h16.4M3.8 16.5h16.4"/></svg></button>
         <button type=button class=btn style="flex:1" onclick="resetPhotoAdjust()">Reset</button>
       </div>
     </div>
@@ -9151,6 +9182,57 @@ function pickCatImage(slot){
   inp.click()}
 function removeCatImage(slot){CAT_IMG[slot]=Object.assign(catImgDefault(),{label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});renderCatImages();schedulePreview()}
 
+// ---------------------------------------------------------------- Globe icon menu (per zone)
+// Per explicit request: "when the user clicks on it it will show a small
+// menu where he can upload a picture or choose a picture. so... when the
+// user will click the globe in main product photo and if he adds a
+// picture it will save in cloudflare in Main Product Picture and if it's
+// Application Photo it will add in Application Photo. same with the
+// rest!" Reuses the same #filemenu popover as openUpdateMenu() — see its
+// own comment for the positioning/dismiss mechanics, unchanged here.
+function openZonePhotoMenu(slot,rect){
+  const menu=$('filemenu');
+  renderZonePhotoMenu(slot);
+  menu.style.display='block';
+  const r=rect||{left:0,bottom:0};
+  const w=menu.offsetWidth||220,h=menu.offsetHeight||110;
+  let x=r.left,y=r.bottom+4;
+  if(x+w>window.innerWidth-8)x=window.innerWidth-w-8;
+  if(y+h>window.innerHeight-8)y=r.top-h-4;
+  menu.style.left=x+'px';menu.style.top=y+'px';
+  setTimeout(()=>document.addEventListener('click',closeFileMenu,{once:true}),0)}
+function renderZonePhotoMenu(slot){
+  $('filemenu').innerHTML=
+    '<div class=fmtitle>'+escHtml(CAT_IMG_ZONE_NAME[slot]||'Photo')+'</div>'+
+    '<button type=button class=btn style="width:calc(100% - 24px);margin:2px 12px 6px;display:block" onclick="event.stopPropagation();closeFileMenu();uploadZonePhoto(\''+slot+'\')">Upload a picture…</button>'+
+    '<button type=button class=btn style="width:calc(100% - 24px);margin:0 12px 8px;display:block" onclick="event.stopPropagation();closeFileMenu();openCloudPhotoPicker(\''+slot+'\')">Choose from library…</button>'}
+// Same local-embed behavior as pickCatImage() (instant, no need to wait on
+// a round trip) PLUS a real upload to the shared cloud library tagged
+// with this zone, so it's findable again later via "Choose from
+// library…" on the SAME zone (see openCloudPhotoPicker()'s own zone
+// filter). The two are independent — the local embed always succeeds
+// immediately; if the cloud save fails (offline, R2 not configured) the
+// photo still works fine in THIS document, it just won't be reusable
+// from the library later.
+function uploadZonePhoto(slot){
+  const inp=document.createElement('input');
+  inp.type='file';inp.accept='image/*';
+  inp.onchange=()=>{
+    const f=inp.files[0];if(!f)return;
+    const reader=new FileReader();
+    reader.onload=()=>{
+      CAT_IMG[slot]=Object.assign(catImgDefault(),{src:reader.result,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
+      renderCatImages();schedulePreview();
+      openPhotoAdjust(slot)};
+    reader.readAsDataURL(f);
+    const fd=new FormData();
+    fd.append('files',f,f.name);
+    fd.append('zone',slot);
+    fetch('/api/photostore-upload',{method:'POST',body:fd}).then(r=>r.json()).then(r=>{
+      if(!r.ok)toast('Using it here, but could not save to the cloud library: '+(r.errors||[]).join(', '))
+    }).catch(()=>toast('Using it here, but could not reach the cloud library'))};
+  inp.click()}
+
 // ---------------------------------------------------------------- Cloud Photo Library picker
 // Lets a user pick a product photo visually out of the shared R2 library
 // (see photo_store.py) instead of needing the exact file already on their
@@ -9164,6 +9246,12 @@ async function openCloudPhotoPicker(slot){
   $('cloudphotomodal').classList.remove('hide');
   $('cloudphoto-search').value='';
   $('cloudphoto-groupby').value='';
+  // Every call site passes one of the 6 Datasheet zones (see
+  // CAT_IMG_ZONE_NAME) — always show + pre-check the zone filter, per
+  // explicit request ("same with the rest!" — every zone, not just one).
+  $('cloudphoto-zone-row').classList.remove('hide');
+  $('cloudphoto-zone-label').textContent=CAT_IMG_ZONE_NAME[slot]||'this zone';
+  $('cloudphoto-zone-only').checked=true;
   $('cloudphoto-status').textContent='Loading…';
   $('cloudphoto-grid').innerHTML='';
   const r=await fetch('/api/photostore-list').then(r=>r.json()).catch(e=>({error:e.message}));
@@ -9174,10 +9262,14 @@ function closeCloudPhotoPicker(){$('cloudphotomodal').classList.add('hide');CLOU
 function renderCloudPhotoGrid(){
   const q=($('cloudphoto-search').value||'').trim().toLowerCase();
   const groupBy=$('cloudphoto-groupby').value;
-  const list=(CLOUD_PHOTO_LIST||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
-  $('cloudphoto-status').textContent=(CLOUD_PHOTO_LIST||[]).length
-    ?list.length+' of '+CLOUD_PHOTO_LIST.length+' photo'+(CLOUD_PHOTO_LIST.length!==1?'s':'')
-    :'The cloud library is empty — an admin can add photos from Settings > Shared Product Photos.';
+  const zoneOnly=CLOUD_PHOTO_SLOT&&$('cloudphoto-zone-only').checked;
+  let list=(CLOUD_PHOTO_LIST||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
+  if(zoneOnly)list=list.filter(p=>p.zone===CLOUD_PHOTO_SLOT);
+  $('cloudphoto-status').textContent=!(CLOUD_PHOTO_LIST||[]).length
+    ?'The cloud library is empty — an admin can add photos from Settings > Shared Product Photos.'
+    :(zoneOnly&&!list.length
+      ?'No photos uploaded for '+(CAT_IMG_ZONE_NAME[CLOUD_PHOTO_SLOT]||'this zone')+' yet — uncheck the box above to browse the whole library, or use "Upload a picture" instead.'
+      :list.length+' of '+CLOUD_PHOTO_LIST.length+' photo'+(CLOUD_PHOTO_LIST.length!==1?'s':''));
   const tile=p=>{
     const name=p.key.split('/').pop().replace(/\.png$/i,'');
     return '<div class=cloudphototile onclick="selectCloudPhoto(\''+p.key.replace(/'/g,"\\'")+'\')" title="'+escHtml(p.key)+'">'+
@@ -9270,7 +9362,7 @@ function renderCatImages(){
        '</div>'
       :'<div style="display:flex;gap:5px">'+
          '<button type=button class=btn style="flex:1;font-size:11px;padding:8px 4px" onclick="pickCatImage(\''+slot+'\')">Choose image…</button>'+
-         '<button type=button class=btn title="Choose from Cloud Library" style="width:38px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="openCloudPhotoPicker(\''+slot+'\')">'+CLOUD_GLOBE_ICON+'</button>'+
+         '<button type=button class=btn title="Add from the cloud library" style="width:38px;padding:0;flex:0 0 auto;color:#22c55e;display:flex;align-items:center;justify-content:center" onclick="event.stopPropagation();openZonePhotoMenu(\''+slot+'\',this.getBoundingClientRect())">'+CLOUD_GLOBE_ICON+'</button>'+
        '</div>'})}
 
 // Photos section decluttering — explicit "so many checkmarks... confusing"
@@ -14580,6 +14672,12 @@ async function doLogout(){
 // phone details". Fetches fresh from the server on open (not just the
 // CURRENT_SETTINGS snapshot from login) so an edit made from another PC
 // shows up here too, same reasoning as api_current_user()'s own comment. ----
+// Every field the avatar popup lets a user edit about themselves — kept
+// as one list so opening/saving the popup is a loop, not one hardcoded
+// fetch per field (see accounts.USER_SETTABLE_KEYS, the server-side twin
+// of this list — "theme" isn't here since that's set from the theme
+// toggle, not this popup).
+const PROFILE_INFO_FIELDS=['full_name','phone','personal_email','company_email'];
 async function openProfileModal(){
   $('profile-info-note').textContent='';$('profile-password-note').textContent='';
   $('profile-current-password').value='';$('profile-new-password').value='';$('profile-confirm-password').value='';
@@ -14590,22 +14688,31 @@ async function openProfileModal(){
   const r=await fetch('/api/current-user').then(r=>r.json()).catch(()=>null);
   const settings=(r&&r.settings)||CURRENT_SETTINGS||{};
   CURRENT_SETTINGS=settings;
-  $('profile-full_name').value=settings.full_name||'';
-  $('profile-phone').value=settings.phone||'';
+  PROFILE_INFO_FIELDS.forEach(k=>{const el=$('profile-'+k);if(el)el.value=settings[k]||''});
   updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent}
 function closeProfileModal(){$('profilemodal').classList.add('hide')}
 async function saveProfileInfo(btn){
   const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Saving…';
-  const fullName=$('profile-full_name').value.trim(),phone=$('profile-phone').value.trim();
-  const rName=await fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'full_name',value:fullName})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-  const rPhone=await fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'phone',value:phone})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  const values={};
+  // Sequential, NOT Promise.all — accounts.save_user_setting() does its
+  // own independent pull-freshest-copy-then-write-one-field round trip
+  // per call (see its own comment); firing all 4 fields at once meant
+  // whichever finished writing LAST would silently clobber the others'
+  // changes, since each read its "before" snapshot before any of the
+  // others had written theirs back. Confirmed live: 2 fields saved
+  // together, only the last one to finish actually stuck.
+  const results=[];
+  for(const k of PROFILE_INFO_FIELDS){
+    values[k]=$('profile-'+k).value.trim();
+    results.push(await fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,value:values[k]})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message})))}
   btn.disabled=false;btn.textContent=origLabel;
   const note=$('profile-info-note');
-  if(rName.ok&&rPhone.ok){
-    CURRENT_SETTINGS.full_name=fullName;CURRENT_SETTINGS.phone=phone;
+  const failed=results.find(r=>!r.ok);
+  if(!failed){
+    Object.assign(CURRENT_SETTINGS,values);
     updateAvatarBadge();$('profile-avatar').textContent=$('avatarinitial').textContent;
     note.style.color='var(--success)';note.textContent='Saved.'
-  }else{note.style.color='var(--danger)';note.textContent=rName.error||rPhone.error||'Could not save — try again.'}}
+  }else{note.style.color='var(--danger)';note.textContent=failed.error||'Could not save — try again.'}}
 async function changeOwnPassword(btn){
   const current=$('profile-current-password').value,next=$('profile-new-password').value,confirm=$('profile-confirm-password').value;
   const note=$('profile-password-note');note.style.color='var(--danger)';

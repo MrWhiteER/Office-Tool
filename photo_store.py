@@ -297,6 +297,51 @@ def get_uploader(key):
     return (_read_photo_attribution().get(key) or {}).get("uploaded_by")
 
 
+# Which Sololuce Datasheet photo zone (main/lifestyle/diagram/extra1/
+# extra2/extra3 — see app.py's CAT_IMG_ZONE_NAME) a photo was uploaded
+# FOR, via the globe-icon menu next to that zone — per explicit request:
+# "when the user clicks the globe in main product photo and if he adds a
+# picture it will save in cloudflare in Main Product Picture and if it's
+# Application Photo it will add in Application Photo. same with the
+# rest!" Same one-small-shared-index shape as PHOTO_ATTRIBUTION_KEY
+# (not per-object R2 Metadata, for the same "one HEAD request per photo"
+# reason) — deliberately a SEPARATE index rather than folding "zone" into
+# the attribution entry, since a photo can be uploaded through the
+# regular Cloud Manager/Settings path (no zone at all) just as easily as
+# through a specific zone's globe menu; most photos will never have one.
+PHOTO_ZONE_KEY = SYSTEM_PREFIX + "photo_zones.json"
+
+
+def _read_photo_zones():
+    try:
+        data_bytes, _ct = get_bytes(PHOTO_ZONE_KEY)
+        data = json.loads(data_bytes.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_zone(key):
+    """Which zone slot this photo was uploaded for (e.g. "lifestyle"), or
+    None if it wasn't uploaded through a zone's globe menu at all — the
+    overwhelming majority of the library. Used by app.py's cloud photo
+    picker to default-filter to just this zone's own previously-uploaded
+    photos when opened from a specific slot."""
+    return _read_photo_zones().get(key)
+
+
+def _record_photo_zone(key, zone):
+    """Best-effort, same shape as _record_photo_attribution() — a failed
+    write here should never fail the upload itself."""
+    try:
+        zones = _read_photo_zones()
+        zones[key] = zone
+        put_bytes(PHOTO_ZONE_KEY, json.dumps(zones, indent=2, ensure_ascii=False).encode("utf-8"),
+                   "application/json", allow_bundled_write=True)
+    except Exception:
+        pass
+
+
 def _record_photo_attribution(key, username):
     """Best-effort — a failed attribution write should never fail the
     actual photo upload it's attached to. allow_bundled_write=True: any
@@ -338,15 +383,19 @@ def list_photos():
     # callers should treat as "uploaded by the admin" (they were, before
     # any of this existed) rather than "unknown".
     attribution = _read_photo_attribution()
+    zones = _read_photo_zones()
     for o in out:
         info = attribution.get(o["key"])
         if info:
             o["uploaded_by"] = info.get("uploaded_by")
             o["uploaded_at"] = info.get("uploaded_at")
+        zone = zones.get(o["key"])
+        if zone:
+            o["zone"] = zone
     return sorted(out, key=lambda o: o["key"].lower())
 
 
-def upload_photo(local_path, filename, running_usage=None, uploaded_by=None, allow_bundled_write=False):
+def upload_photo(local_path, filename, running_usage=None, uploaded_by=None, allow_bundled_write=False, zone=None):
     """
     Used to be strictly admin-only; per explicit request, any logged-in
     user can now upload new product photos (allow_bundled_write=True from
@@ -381,11 +430,20 @@ def upload_photo(local_path, filename, running_usage=None, uploaded_by=None, all
     running_usage["bytes_used"] += size
     if uploaded_by:
         _record_photo_attribution(filename, uploaded_by)
+    if zone:
+        _record_photo_zone(filename, zone)
 
 
-def delete_photo(filename):
-    client = _client(require_write=True)
-    client.delete_object(Bucket=_bucket(require_write=True), Key=filename)
+def delete_photo(filename, allow_bundled_write=False):
+    """allow_bundled_write=True: needed for the Cloud Manager tool's
+    "delete your own upload" case (app.py's api_photostore_delete()) — a
+    genuine non-admin user's machine only ever has the bundled read-only
+    config, never r2_photo_store, so without this every one of their
+    deletes would fail with "No write-capable R2 key is set up" even
+    though the permission check already passed. Same reasoning
+    upload_photo() already has this for — see its own comment."""
+    client = _client(require_write=True, allow_bundled_write=allow_bundled_write)
+    client.delete_object(Bucket=_bucket(require_write=True, allow_bundled_write=allow_bundled_write), Key=filename)
 
 
 # Generated documents (Quotations, Tax Invoices, Delivery Orders, Sololuce
