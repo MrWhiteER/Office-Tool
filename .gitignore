@@ -47,6 +47,11 @@ runtime/
 *.spec
 *.exe
 
+# app.py's local disk cache for /api/photostore-fetch — real downloaded
+# photo bytes, not source, same "local runtime state" category as
+# runtime/ above. See _PHOTO_CACHE_DIR's own comment.
+photo_cache/
+
 # Inno Setup uninstaller + update_checker.py's own /LOG= file — only ever
 # appear here if an installer was ever run with this dev checkout as its
 # /DIR= target (engine.DATA_BASE for `python app.py` IS the project root)

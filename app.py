@@ -2934,24 +2934,73 @@ def api_photostore_list():
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
+# Local disk cache for /api/photostore-fetch — per explicit request: "the
+# cloudflare pictures are loading every time very slow because the
+# software is downloading the preview every time... after the first load
+# of any picture, it will stay in cache". Before this, EVERY open of the
+# Cloud Manager grid or the cloud photo picker re-downloaded every visible
+# photo from R2 fresh (Cache-Control only controls the BROWSER's own
+# cache, not whether this server round-trips to R2 on a request it DOES
+# receive — and re-rendering the grid via innerHTML on every
+# search/filter keystroke made that happen constantly). First fetch of a
+# given key still hits R2 and pays that cost once; every fetch after that
+# — this session, and every session after it, since this is disk-backed
+# and outlives the app closing, not just "until restart" — is a local
+# file read. Bounded naturally by the same 10GB the shared library itself
+# is capped at (see photo_store.HARD_LIMIT_BYTES), so no separate eviction
+# logic here. Invalidated on the two things that can make a cached copy
+# wrong: re-uploading under the same key (api_photostore_upload) and
+# deleting it (api_photostore_delete) — both remove the stale cache file
+# so a stale image can never outlive the real object.
+_PHOTO_CACHE_DIR = os.path.join(engine.DATA_BASE, "photo_cache")
+
+def _photo_cache_path(key):
+    # Keys can contain "/" (folder uploads use the relative path as the
+    # key) — flatten into one safe filename rather than trying to mirror
+    # that as real subdirectories.
+    safe = re.sub(r'[\\/:*?"<>|]', "_", key)
+    return os.path.join(_PHOTO_CACHE_DIR, safe)
+
+def _invalidate_photo_cache(key):
+    try:
+        p = _photo_cache_path(key)
+        if os.path.isfile(p):
+            os.remove(p)
+    except Exception:
+        pass
+
 @app.get("/api/photostore-fetch")
 def api_photostore_fetch():
-    """Streams one photo's bytes straight from R2 — used both as the
-    gallery grid's <img src> (thumbnails, browser-cached) and, on click,
-    the source the picker draws to a canvas to produce the same kind of
-    data: URI a local file upload would (see pickCatImage() vs
-    openCloudPhotoPicker() in the page script — CAT_IMG[slot].src is
-    always a self-contained data URI either way, zero special-casing
-    needed anywhere downstream in PDF/xlsx generation)."""
+    """Streams one photo's bytes — from the local disk cache once one
+    exists (see _PHOTO_CACHE_DIR's own comment above), R2 the first time.
+    Used both as the gallery grid's <img src> (thumbnails, browser-cached
+    on top of this) and, on click, the source the picker draws to a
+    canvas to produce the same kind of data: URI a local file upload
+    would (see pickCatImage() vs openCloudPhotoPicker() in the page
+    script — CAT_IMG[slot].src is always a self-contained data URI
+    either way, zero special-casing needed anywhere downstream in
+    PDF/xlsx generation)."""
     key = request.args.get("key", "")
     if not key:
         return jsonify({"error": "Missing key."}), 400
+    cache_path = _photo_cache_path(key)
+    if os.path.isfile(cache_path):
+        content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
+        resp = send_file(cache_path, mimetype=content_type, conditional=True)
+        resp.headers["Cache-Control"] = "private, max-age=604800"
+        return resp
     try:
         data, content_type = photo_store.get_photo_bytes(key)
     except Exception as e:
         return jsonify({"error": str(e)}), 502
+    try:
+        os.makedirs(_PHOTO_CACHE_DIR, exist_ok=True)
+        with open(cache_path, "wb") as f:
+            f.write(data)
+    except Exception:
+        pass  # best-effort — a failed cache write should never break serving the photo
     resp = Response(data, mimetype=content_type)
-    resp.headers["Cache-Control"] = "private, max-age=3600"
+    resp.headers["Cache-Control"] = "private, max-age=604800"
     return resp
 
 # Same 6 Sololuce Datasheet photo zones as CAT_IMG_ZONE_NAME (page script)
@@ -2997,6 +3046,7 @@ def api_photostore_upload():
             photo_store.upload_photo(tmp_path, key, running_usage=running_usage,
                                       uploaded_by=session.get("user", ""), allow_bundled_write=True, zone=zone)
             uploaded.append(key)
+            _invalidate_photo_cache(key)  # a re-upload under the same key must never keep serving the OLD cached bytes
         except Exception as e:
             errors.append(key + ": " + str(e))
         finally:
@@ -3025,6 +3075,7 @@ def api_photostore_delete():
         # own comment for why this is required, not optional, for a real
         # non-admin user's delete to work at all.
         photo_store.delete_photo(name, allow_bundled_write=True)
+        _invalidate_photo_cache(name)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
@@ -15441,8 +15492,29 @@ if __name__ == "__main__":
                     pass
             loading_window.events.loaded += _set_loading_theme
 
-        window = webview.create_window("Office Tool", url, width=1400, height=900,
-                                        min_size=(1000, 650), hidden=bool(loading_window))
+        # Per explicit request: "the software will always launch in the
+        # middle of the screen and the main window will also be in the
+        # middle and it will be 70% of the user window" — same
+        # webview.screens[0]-based centering the loading square already
+        # uses just above (reused here rather than reinvented), sized to
+        # 70% of that screen's real resolution instead of a fixed
+        # 1400x900 that could be way too small (4K) or too big (a small
+        # laptop) depending on the actual monitor. min_size stays as a
+        # floor so a genuinely tiny screen (70% of which would be
+        # unusable) never shrinks the window below where the UI still
+        # works.
+        _main_width, _main_height = 1400, 900
+        _main_x = _main_y = None
+        try:
+            _screen = webview.screens[0]
+            _main_width = max(1000, int(_screen.width * 0.7))
+            _main_height = max(650, int(_screen.height * 0.7))
+            _main_x = _screen.x + (_screen.width - _main_width) // 2
+            _main_y = _screen.y + (_screen.height - _main_height) // 2
+        except Exception:
+            pass
+        window = webview.create_window("Office Tool", url, width=_main_width, height=_main_height,
+                                        x=_main_x, y=_main_y, min_size=(1000, 650), hidden=bool(loading_window))
 
         if loading_window:
             # LOADING_MIN_SECONDS is a floor on how long the loading square
