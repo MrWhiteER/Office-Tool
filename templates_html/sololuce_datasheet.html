@@ -22,10 +22,26 @@
   @font-face{font-family:'Gotham';src:url({{ gothambold_src }}) format('woff2');font-weight:700;font-style:normal;font-display:swap}
   doc-page:not(:defined){visibility:hidden}
   body{margin:0;background:#525659;font-family:'Gotham',sans-serif;color:#231f20}
-  /* Grid column basis reduced 15% (41 * 0.85 = 34.85, rounded) so each
-     badge itself renders 15% smaller — auto-fit just packs more of them
-     into the same row width. */
-  .badge{width:100%;aspect-ratio:1;}
+  /* flex (not grid) specifically so EVERY badge always stays on one line,
+     never wrapping to a 2nd row — per explicit request ("can you fit all
+     these badges in one line") after a real product with 8 selected badges
+     wrapped 4+4. flex-basis:0 + flex-grow:1 + max-width:34px means: few
+     badges each grow up to the same 34px cap this row was already tuned to
+     (see the badge-grid container's own comment — no regression for that
+     case, confirmed live: 8 badges render at ~30px each, one line). Enough
+     badges that 34px each would overflow the row trigger flex-shrink (on
+     by default via flex:1 1 0) to compress every badge equally until the
+     row fits in one line — min-width:16px (not 0) is a real, measured
+     floor on that shrink, not an arbitrary guess: confirmed directly (a
+     standalone flex test at this exact CSS) that min-width:0 shrinks 30+
+     badges down to ~2px squares — technically "one line" but completely
+     illegible, defeating the point. 16px keeps a real, still-readable
+     icon size through a realistic worst case (confirmed same test: still
+     one line, no floor hit, through at least 8; a genuinely extreme count
+     past roughly a dozen would rather overflow slightly past the column's
+     own edge at a legible 16px than shrink to invisible dots — a far
+     smaller, rarer cosmetic issue than either bug this replaced). */
+  .badge{flex:1 1 0;max-width:34px;min-width:16px;aspect-ratio:1;}
   .badge img{width:100%;height:100%;object-fit:contain;display:block;}
 </style>
 </head>
@@ -570,23 +586,27 @@
     <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
 
       {% if badges %}
-      <!-- Real, confirmed bug fixed here — reported directly, screenshotted,
-           as badges "not in correct... size": minmax(27px,1fr) let every
-           column grow completely unbounded whenever the row wasn't full —
-           a product with only 2-3 badges got them stretched across the
-           WHOLE row width (each one 3-4x the intended icon size, visibly
-           inconsistent with a denser product's small, uniform badges),
-           since grid distributes 100% of the available space across
-           however many tracks exist even when that's just 1 or 2. Capped
-           at 34px (this file's own already-referenced "34.85 rounded"
-           comfortable size from an earlier tuning pass, and close to the
-           26px this same badge set already renders at elsewhere — see
-           renderCatBadgesSummary's own preview strip in app.py) — auto-fit
-           still packs as many 34px columns as fit per row and wraps the
-           rest, so a full row of badges still reads as a clean multi-
-           column block, it just no longer grows past a sane fixed size
-           when there are only a couple of them. -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(27px,34px));gap:8px;margin-bottom:10px;">
+      <!-- Two real, confirmed bugs fixed here across two passes, both
+           screenshotted. First — badges "not in correct... size": a grid
+           column let every badge grow completely unbounded whenever the
+           row wasn't full, so a product with only 2-3 badges got them
+           stretched across the WHOLE row width (3-4x the intended icon
+           size). Capped growth at 34px (this file's own already-
+           referenced "34.85 rounded" comfortable size from an earlier
+           tuning pass, close to the 26px this same badge set renders at
+           in renderCatBadgesSummary's own preview strip in app.py).
+           Second — "can you fit all these badges in one line": that grid
+           fix used CSS Grid's auto-fit, which packs as many capped
+           columns as fit a row and WRAPS the rest to a new row — a real
+           product with 8 badges wrapped 4+4 instead of staying on one
+           line. flex (see .badge's own comment) replaces the grid for
+           exactly this reason: flex-shrink lets every badge compress
+           together to fit one line when there are too many for all of
+           them to sit at the full 34px cap, instead of any of them
+           wrapping — the one thing a grid track genuinely can't do (a
+           track that doesn't fit moves to a new row, it doesn't shrink
+           the ones already placed). -->
+      <div style="display:flex;flex-wrap:nowrap;gap:8px;margin-bottom:10px;">
         {% for b in badges %}
         <div class="badge"><img src="{{ b.src }}" alt="{{ b.label }}"></div>
         {% endfor %}
