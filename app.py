@@ -6142,7 +6142,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div class=filterbar>
       <div class=searchwrap style="flex:1;min-width:200px">
         <svg class=searchicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=11 cy=11 r=7 /><path d="m21 21-4.3-4.3"/></svg>
-        <input id=search placeholder="Search company, project or number…" oninput=renderList()>
+        <input id=search placeholder="Search company, project or number…" oninput="persistFilter('search');renderList()">
       </div>
       <select id=fcompany onchange=onCompanyFilter() style="width:190px"><option value=all>All companies</option></select>
       <select id=frange onchange=onRangePreset() style="width:150px">
@@ -6155,7 +6155,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       </select>
       <input id=ffrom type=date onchange=renderList() class=hide style="width:150px">
       <input id=fto type=date onchange=renderList() class=hide style="width:150px">
-      <select id=fsort onchange=renderList() style="width:135px"><option value=desc>Newest first</option><option value=asc>Oldest first</option></select>
+      <!-- fsort/search remembered across sessions (localStorage, see
+           persistFilter/restoreFilter) per explicit request ("all the
+           filter in the system should always be remembered as last
+           settup filters"). fcompany/frange/fgroup deliberately stay
+           session-only — all three already have real, deliberate
+           per-tab-type default logic of their own (setAllDocsType sets
+           fgroup's default per doc type; fcompany's own option list is
+           rebuilt fresh from whatever companies exist THIS load) that a
+           blind global persisted value would fight rather than respect. -->
+      <select id=fsort onchange="persistFilter('fsort');renderList()" style="width:135px"><option value=desc>Newest first</option><option value=asc>Oldest first</option></select>
       <!-- Folder order — which GROUP (company, or for CAT, category) comes
            first, independent of fsort above (which only orders documents
            WITHIN a group). Defaults per type in setAllDocsType (A-Z for
@@ -6192,7 +6201,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
   <!-- CLIENTS -->
   <div id=v-clients class=hide style="padding:20px;max-width:1000px;margin:0 auto">
     <div class=filterbar>
-      <input id=clientsearch placeholder="Search clients…" oninput=renderClientsGrid() style="flex:1;min-width:200px">
+      <input id=clientsearch placeholder="Search clients…" oninput="persistFilter('clientsearch');renderClientsGrid()" style="flex:1;min-width:200px">
       <div class=seg id=clientgroupseg>
         <button class=on data-g=country onclick="setClientGrouping('country')">Country</button>
         <button data-g=city onclick="setClientGrouping('city')">City</button>
@@ -6229,10 +6238,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button class=btn style="width:100%" onclick="uploadPhotosToStore('cm-upload-folder',this,'cm-upload-progress',loadCloudManagerPhotos)">Upload Folder</button>
       <div id=cm-upload-progress class="muted hide" style="font-size:11.5px;margin-top:6px"></div>
       <div style="display:flex;gap:8px;margin:14px 0 12px">
-        <input id=cm-photo-search placeholder="Search by product code…" oninput=renderCloudManagerGrid() style="flex:1">
-        <select id=cm-photo-groupby onchange=renderCloudManagerGrid() style="width:auto">
+        <input id=cm-photo-search placeholder="Search by product code…" oninput="persistFilter('cm-photo-search');renderCloudManagerGrid()" style="flex:1">
+        <select id=cm-photo-groupby onchange="persistFilter('cm-photo-groupby');renderCloudManagerGrid()" style="width:auto">
           <option value="">No grouping</option>
           <option value="uploader">Group by uploader</option>
+        </select>
+        <!-- Same "one more separate filter" for recency as the Datasheet's
+             own cloud picker (openCloudPhotoPicker) — see that dropdown's
+             own comment for the full reasoning, identical here. -->
+        <select id=cm-photo-sort onchange="persistFilter('cm-photo-sort');renderCloudManagerGrid()" style="width:auto">
+          <option value="">Name (A-Z)</option>
+          <option value="latest">Latest upload first</option>
         </select>
       </div>
       <p class=muted id=cm-photo-status style="font-size:12px;margin:0 0 10px">Loading…</p>
@@ -6243,7 +6259,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
   <!-- SUBMISSIONS -->
   <div id=v-submissions class=hide style="padding:20px;max-width:1000px;margin:0 auto">
     <div class=filterbar>
-      <input id=subsearch placeholder="Search submissions…" oninput=renderSubmissions() style="flex:1;min-width:200px">
+      <input id=subsearch placeholder="Search submissions…" oninput="persistFilter('subsearch');renderSubmissions()" style="flex:1;min-width:200px">
       <button class="btn dark" onclick=openNewSubmission()>+ New Submission</button>
     </div>
     <div id=submissionsgrid></div>
@@ -6599,15 +6615,30 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div class=clientmodalbar><b>Choose from Cloud Library</b><button class=btn onclick=closeCloudPhotoPicker()>Cancel</button></div>
     <div class=clientmodalbody>
       <div style="display:flex;gap:8px;margin-bottom:12px">
-        <input id=cloudphoto-search placeholder="Search by product code…" oninput=renderCloudPhotoGrid() style="flex:1">
+        <input id=cloudphoto-search placeholder="Search by product code…" oninput="persistFilter('cloudphoto-search');renderCloudPhotoGrid()" style="flex:1">
         <!-- Any logged-in user can add photos now, not just the admin
              (see photo_store.py's photo attribution index) — grouping by
              uploader is how "the system will see it all in one just...
              it will show as groups, by whom it was uploaded" surfaces in
              this picker specifically. -->
-        <select id=cloudphoto-groupby onchange=renderCloudPhotoGrid() style="width:auto">
+        <select id=cloudphoto-groupby onchange="persistFilter('cloudphoto-groupby');renderCloudPhotoGrid()" style="width:auto">
           <option value="">All photos</option>
           <option value="uploader">Group by uploader</option>
+        </select>
+        <!-- Separate from the grouping dropdown above on purpose — per
+             explicit request ("should also filter as latest upload as
+             well, so there should be one more separate filter for it") —
+             sorting by recency is a different axis than grouping by who
+             uploaded, and the two combine freely (sorting happens on the
+             flat list before grouping splits it, so "latest first" holds
+             inside each uploader's own group too). Sorts by the photo
+             object's real S3 LastModified (list_photos()'s own "modified"
+             field, present on every photo — unlike uploaded_at, which is
+             empty for the original pre-attribution library — see that
+             function's own comment). -->
+        <select id=cloudphoto-sort onchange="persistFilter('cloudphoto-sort');renderCloudPhotoGrid()" style="width:auto">
+          <option value="">Name (A-Z)</option>
+          <option value="latest">Latest upload first</option>
         </select>
       </div>
       <!-- Only shown when opened from a specific zone's globe menu (see
@@ -6624,7 +6655,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
            itself was stretching to fill the row instead of sitting
            tight against its own label text. -->
       <label id=cloudphoto-zone-row class="dvcheck hide" style="font-size:11.5px;font-weight:500;white-space:normal;margin-bottom:10px">
-        <input type=checkbox id=cloudphoto-zone-only checked onchange=renderCloudPhotoGrid()>
+        <input type=checkbox id=cloudphoto-zone-only checked onchange="persistFilter('cloudphoto-zone-only');renderCloudPhotoGrid()">
         Show only photos for <span id=cloudphoto-zone-label></span>
       </label>
       <div id=cloudphoto-status class=muted style="font-size:12px;margin-bottom:8px"></div>
@@ -6984,6 +7015,29 @@ let TYPE='QTN2', INDEX=[], items=[], EDITING=null, EDITING_DRAFT=null, hoverTime
 async function loadUnits(){const r=await fetch('/api/units').then(r=>r.json());if(r.units&&r.units.length)UNITS=r.units}
 const $=id=>document.getElementById(id);
 function escHtml(s){return (s??'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+// Filter/sort persistence — per explicit request: "all the filter in the
+// system should always be remembered as last settup filters." One shared
+// pair instead of hand-rolling localStorage reads/writes at every
+// individual search box/dropdown/checkbox: call persistFilter(id) from
+// that same control's existing onchange/oninput handler (right alongside
+// whatever re-render call was already there), and restoreFilter(id) once
+// when the screen/modal holding it is opened, before the first render —
+// see openCloudPhotoPicker/loadCloudManagerPhotos for the pattern. Scoped
+// per-control by DOM id, which is already unique across the page, so no
+// separate per-screen namespacing is needed. localStorage (not a server
+// setting) — this is a per-device UI convenience, same category as the
+// theme toggle's own device-level localStorage half.
+function persistFilter(id){
+  const el=$(id);if(!el)return;
+  try{localStorage.setItem('cs_filter_'+id, el.type==='checkbox'?(el.checked?'1':'0'):el.value)}catch(e){}}
+function restoreFilter(id,fallback){
+  const el=$(id);if(!el)return;
+  let v=null;
+  try{v=localStorage.getItem('cs_filter_'+id)}catch(e){}
+  if(v===null){
+    if(fallback!==undefined){if(el.type==='checkbox')el.checked=fallback;else el.value=fallback}
+    return}
+  if(el.type==='checkbox')el.checked=(v==='1');else el.value=v}
 // Same icon+heading+subtext shape everywhere a list has nothing to show —
 // iconPath reuses that section's own sidebar-nav icon, so the empty state
 // visually echoes where the user already is instead of a bare line of text.
@@ -7695,6 +7749,11 @@ async function uploadPhotosToStore(inputId,btn,progressId,onDone){
 // api_photostore_delete()).
 let CLOUD_MANAGER_PHOTOS=null;
 async function loadCloudManagerPhotos(){
+  // Restored, not reset — same "remember every filter" request as the
+  // Datasheet's own cloud picker (openCloudPhotoPicker's own comment).
+  restoreFilter('cm-photo-search','');
+  restoreFilter('cm-photo-groupby','');
+  restoreFilter('cm-photo-sort','');
   $('cm-photo-status').textContent='Loading…';
   $('cm-photo-grid').innerHTML='';
   const r=await fetch('/api/photostore-list').then(r=>r.json()).catch(e=>({error:e.message}));
@@ -7704,7 +7763,9 @@ async function loadCloudManagerPhotos(){
 function renderCloudManagerGrid(){
   const q=($('cm-photo-search').value||'').trim().toLowerCase();
   const groupBy=$('cm-photo-groupby').value;
-  const list=(CLOUD_MANAGER_PHOTOS||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
+  const sortBy=$('cm-photo-sort').value;
+  let list=(CLOUD_MANAGER_PHOTOS||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
+  if(sortBy==='latest')list=[...list].sort((a,b)=>(b.modified||'').localeCompare(a.modified||''));
   $('cm-photo-status').textContent=(CLOUD_MANAGER_PHOTOS||[]).length
     ?list.length+' of '+CLOUD_MANAGER_PHOTOS.length+' photo'+(CLOUD_MANAGER_PHOTOS.length!==1?'s':'')
     :'No photos yet — add some above.';
@@ -9835,14 +9896,21 @@ let CLOUD_PHOTO_SLOT=null, CLOUD_PHOTO_LIST=null;
 async function openCloudPhotoPicker(slot){
   CLOUD_PHOTO_SLOT=slot;
   $('cloudphotomodal').classList.remove('hide');
-  $('cloudphoto-search').value='';
-  $('cloudphoto-groupby').value='';
+  // Restored, not reset — per explicit request, every filter here (search
+  // text, grouping, sort, the zone-only checkbox) is remembered as this
+  // device's own last-used setup rather than snapping back to a fixed
+  // default on every open. Each restoreFilter's own fallback is the exact
+  // value this used to be hardcoded to, so a first-ever open (nothing in
+  // localStorage yet) behaves identically to before this change.
+  restoreFilter('cloudphoto-search','');
+  restoreFilter('cloudphoto-groupby','');
+  restoreFilter('cloudphoto-sort','');
   // Every call site passes one of the 6 Datasheet zones (see
-  // CAT_IMG_ZONE_NAME) — always show + pre-check the zone filter, per
-  // explicit request ("same with the rest!" — every zone, not just one).
+  // CAT_IMG_ZONE_NAME) — always show the zone filter, per explicit
+  // request ("same with the rest!" — every zone, not just one).
   $('cloudphoto-zone-row').classList.remove('hide');
   $('cloudphoto-zone-label').textContent=CAT_IMG_ZONE_NAME[slot]||'this zone';
-  $('cloudphoto-zone-only').checked=true;
+  restoreFilter('cloudphoto-zone-only',true);
   $('cloudphoto-status').textContent='Loading…';
   $('cloudphoto-grid').innerHTML='';
   const r=await fetch('/api/photostore-list').then(r=>r.json()).catch(e=>({error:e.message}));
@@ -9853,8 +9921,15 @@ function closeCloudPhotoPicker(){$('cloudphotomodal').classList.add('hide');CLOU
 function renderCloudPhotoGrid(){
   const q=($('cloudphoto-search').value||'').trim().toLowerCase();
   const groupBy=$('cloudphoto-groupby').value;
+  const sortBy=$('cloudphoto-sort').value;
   const zoneOnly=CLOUD_PHOTO_SLOT&&$('cloudphoto-zone-only').checked;
   let list=(CLOUD_PHOTO_LIST||[]).filter(p=>!q||p.key.toLowerCase().includes(q));
+  // "modified" (list_photos()'s own real S3 LastModified) is on every
+  // photo, old library included — unlike uploaded_at, which only exists
+  // for photos uploaded through the newer per-user attribution flow — so
+  // this never silently drops a legacy photo to the bottom/top for
+  // lacking a timestamp the way sorting by uploaded_at alone would.
+  if(sortBy==='latest')list=[...list].sort((a,b)=>(b.modified||'').localeCompare(a.modified||''));
   // A photo with no zone tag at all predates this feature entirely — per
   // explicit report, the whole existing shared library (575 photos) IS
   // functionally the Main Product Photo library, just never explicitly
@@ -14025,7 +14100,14 @@ async function loadClients(){
   refreshClientNamesDatalist();
   fillDatalist('projects',PROJECTS);
   return r}
-async function loadIndex(){const r=await loadClients();INDEX=r.records||[];
+async function loadIndex(){
+  // Restored, not reset — see persistFilter/restoreFilter's own comment.
+  // Only the two filters here with no per-tab-type default logic of their
+  // own (see the filter bar's own HTML comment for why fcompany/frange/
+  // fgroup stay session-only).
+  restoreFilter('search','');
+  restoreFilter('fsort','desc');
+  const r=await loadClients();INDEX=r.records||[];
   const cl=r.companies||[...new Set(INDEX.map(x=>x.company_label))];
   const curCo=$('fcompany').value;
   $('fcompany').innerHTML='<option value=all>All companies</option>'+cl.map(c=>'<option'+(c===curCo?' selected':'')+'>'+c+'</option>').join('');
@@ -14075,6 +14157,7 @@ function countryFlag(code){
 // ---------------------------------------------------------------- client database (full details, logos — the Clients tab)
 let CLIENT_RECORDS=[];
 async function loadClientsView(){
+  restoreFilter('clientsearch','');
   const r=await fetch('/api/clients').then(r=>r.json());
   CLIENT_RECORDS=r.clients||[];
   refreshClientNamesDatalist();
@@ -14171,6 +14254,7 @@ function exportAllClients(){window.location.href='/api/clients-export'}
 let SUBMISSIONS=[];
 const STAGE_LABEL={in_progress:'In Progress',delivered:'Delivered',submittal_built:'Submittal Built'};
 async function loadSubmissions(){
+  restoreFilter('subsearch','');
   const r=await fetch('/api/submissions').then(r=>r.json());
   SUBMISSIONS=r.submissions||[];
   renderSubmissions()}
