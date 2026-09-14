@@ -5957,6 +5957,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
         <div class=clientmodalbox style="max-width:460px">
           <div class=clientmodalbar><b>Spec Badges</b><button class=btn onclick=closeCatBadgesModal()>Done</button></div>
           <div class=clientmodalbody>
+            <!-- Same "Fill Standard Information" convention (.dspill,
+                 preset-fill button) as the Ordering Table's own — per
+                 explicit request for one-click access to the fixed
+                 "standard badges" list (CAT_STANDARD_BADGE_KEYS) from
+                 inside the picker itself, not just as the silent default
+                 a brand-new datasheet already starts with. Additive, not
+                 a reset — see applyCatStandardBadges()'s own comment. -->
+            <button type=button class="dspill" style="margin-bottom:10px" onclick=applyCatStandardBadges() title="Adds every badge from the fixed standard set — doesn't remove anything already applied">+ Add Standard Badges</button>
             <div id=cat-badges-modal-rows></div>
           </div>
         </div>
@@ -9165,6 +9173,18 @@ function setCatBadgeSearch(v){CAT_BADGE_SEARCH=v;renderCatBadges()}
 // request (RoHS itself was retired from the library entirely, see
 // _retired_badge_keys in load_cfg).
 const CAT_STANDARD_BADGE_KEYS=['dispose-product-through-special-recycling','excellent-color-rendering-very-natural-light','emergency-lighting-module-for-power-failure','general-performance-or-summary-rating','sdcm-3','european-conformity-safety-marking','coverage-against-manufacturing-defects'];
+// One-click "+ Add Standard Badges" button in the picker modal (per
+// explicit request) — same list a fresh datasheet already seeds itself
+// with (see setType('CAT') and the sidecar-load fallback further down),
+// just reachable on demand for a product that's missing some of them
+// (started from Import-from-PDF, or had one removed by hand) instead of
+// only ever applying automatically on a brand-new form. Additive only —
+// never removes a badge already on the sheet, standard or custom, same
+// "never silently discard a selection" reasoning as every other picker
+// here; running it twice is a harmless no-op the second time.
+function applyCatStandardBadges(){
+  CAT_STANDARD_BADGE_KEYS.forEach(k=>{if(!isCatBadgeSelected(k))CAT_BADGES.push({key:k})});
+  renderCatBadges();schedulePreview()}
 // IP number -> library key, built from actually reading each badge PNG
 // (several library labels were purely descriptive with no literal "IP65"
 // text, so filename/label guessing alone isn't reliable here).
