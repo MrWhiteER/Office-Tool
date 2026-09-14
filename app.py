@@ -4496,21 +4496,81 @@ def api_print_prefs_save():
     save_cfg(cfg)
     return jsonify({"ok": True})
 
+def _print_pdf_native(pdf_path, printer_name):
+    """Prints a PDF using ONLY Windows' own GDI printing API plus PyMuPDF
+    (fitz) and Pillow — both already-bundled dependencies (fitz is already
+    used by pdf_extract.py/catalog_builder.py; Pillow by half the photo
+    pipeline) — never handing the job to whatever third-party app happens
+    to be registered as the .pdf "print" shell verb handler.
+
+    The previous implementation (win32api.ShellExecute "printto" / plain
+    os.startfile "print") delegated to that registered handler — which
+    worked fine on a machine with Adobe Acrobat installed and set as
+    default, but per explicit request ("i need to be free from any other
+    software... will not be required to download adobe acrobat") a fresh
+    install must be able to print with nothing beyond what Windows itself
+    already ships. This never touches that handler at all: every page is
+    rasterized straight from the PDF (fitz) and blitted directly onto the
+    printer's own device context (the standard pywin32 GDI-printing
+    recipe — win32ui.CreateDC + StartDoc/StartPage/EndPage/EndDoc, PIL's
+    ImageWin.Dib for the actual blit) — the exact same mechanism Windows'
+    own built-in apps use, "Microsoft Print to PDF" included.
+
+    Each page is rendered at the TARGET PRINTER's own reported DPI
+    (GetDeviceCaps LOGPIXELSX/Y), not a fixed guess — matches the
+    printer's real resolution exactly, no wasted oversampling and no
+    blurry undersampling. Scaled to fit the printable area (GetDeviceCaps
+    HORZRES/VERTRES) preserving aspect ratio and centered, rather than
+    assumed to exactly match the configured paper size — protects against
+    a cut-off or corner-shrunk page if a document's own page size and the
+    printer's current paper size ever disagree, without distorting either
+    dimension."""
+    import fitz
+    import win32ui
+    import win32con
+    from PIL import Image, ImageWin
+
+    hdc = win32ui.CreateDC()
+    hdc.CreatePrinterDC(printer_name)
+    try:
+        printable_w = hdc.GetDeviceCaps(win32con.HORZRES)
+        printable_h = hdc.GetDeviceCaps(win32con.VERTRES)
+        dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX) or 300
+        dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY) or 300
+        doc = fitz.open(pdf_path)
+        try:
+            hdc.StartDoc(os.path.basename(pdf_path))
+            matrix = fitz.Matrix(dpi_x / 72.0, dpi_y / 72.0)
+            for page in doc:
+                hdc.StartPage()
+                pix = page.get_pixmap(matrix=matrix)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                scale = min(printable_w / img.width, printable_h / img.height)
+                w = max(1, round(img.width * scale))
+                h = max(1, round(img.height * scale))
+                x = (printable_w - w) // 2
+                y = (printable_h - h) // 2
+                ImageWin.Dib(img).draw(hdc.GetHandleOutput(), (x, y, x + w, y + h))
+                hdc.EndPage()
+            hdc.EndDoc()
+        finally:
+            doc.close()
+    finally:
+        hdc.DeleteDC()
+
 @app.post("/api/print-document")
 def api_print_document():
     """Prints one already-generated PDF — never the xlsx twin (no silent
     LibreOffice conversion in the middle of a print action, and the PDF is
     what this app's own preview already shows as "the real document"
-    everywhere else). Uses the saved default printer (Settings > Printer
-    &amp; Scanner) via Windows' own "printto" shell verb when one's been
-    chosen, matching exactly how a real Print dialog would route it; falls
-    back to the plain "print" verb (Windows' own system default printer)
-    when no preference has been set, so this works out of the box on a
-    fresh install with zero configuration. Both verbs hand the job to
-    whatever's already registered to open a .pdf (Edge, Acrobat, etc.) —
-    this app has no PDF rendering engine of its own to print through
-    directly, same reason "Open in your PDF reader" (openNative) already
-    delegates to the OS rather than drawing one itself."""
+    everywhere else) — via _print_pdf_native above, entirely through
+    Windows' own printing API with no third-party PDF app required. Uses
+    the saved default printer (Settings > Printer &amp; Scanner) when
+    one's been chosen, otherwise whatever Windows itself currently calls
+    the default (GetDefaultPrinter) — same fallback shape as before, still
+    works out of the box on a fresh install with zero configuration."""
     data = request.json or {}
     rel = data.get("rel", "")
     folder, path = resolve_rel(rel)
@@ -4519,13 +4579,15 @@ def api_print_document():
     pdf_path = path if path.lower().endswith(".pdf") else os.path.splitext(path)[0] + ".pdf"
     if not os.path.isfile(pdf_path):
         return jsonify({"ok": False, "error": "No PDF for this document yet — generate it first."}), 400
-    printer = (load_cfg().get("print_prefs") or {}).get("printer") or ""
     try:
-        if printer:
-            import win32api
-            win32api.ShellExecute(0, "printto", pdf_path, '"%s"' % printer, ".", 0)
-        else:
-            os.startfile(pdf_path, "print")
+        import win32print
+        printer = (load_cfg().get("print_prefs") or {}).get("printer") or ""
+        if not printer:
+            printer = win32print.GetDefaultPrinter()
+    except Exception as e:
+        return jsonify({"ok": False, "error": "No printer available: " + str(e)}), 500
+    try:
+        _print_pdf_native(pdf_path, printer)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -6642,6 +6704,19 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div class=card><div class=ch>Scanner</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0 0 10px">Used by Scan Now (Menu &gt; Scanner) whenever more than one scanner is connected — with only one connected, that one's always used regardless of this.</p>
       <div class=f><label>Default scanner</label><select id=set-default-scanner onchange=saveScannerPref()><option value="">(Ask each time / only one connected)</option></select></div>
+      <!-- Distinguishes "nothing chosen yet, but Windows sees a scanner"
+           (this dropdown option's own label already covers that) from
+           "Windows doesn't see ANY scanner at all right now" — the
+           previous version left the second case looking identical to the
+           first, which reads as a silent app bug ("it says ask each time
+           but my scanner IS connected") when it's actually a Windows/
+           driver-level gap this app has no way to fix on its own: plenty
+           of AIO printer/scanners (confirmed live on a real Canon G3070 —
+           Get-PnpDevice showed it registered ONLY as a PrintQueue, no
+           Image-class device at all) install their PRINT driver without
+           their separate scan/WIA driver, so Windows genuinely has no
+           scanner device to enumerate until that's installed too. -->
+      <p id=set-scanner-status class=muted style="font-size:11.5px;margin:8px 0 0"></p>
     </div></div>
     </div>
    </div>
@@ -7739,7 +7814,14 @@ async function loadPrinterScannerSettings(){
     ((printersR.printers||[]).length?'':'No printers found — check Windows\' own printer setup.');
   const scannerSel=$('set-default-scanner');
   scannerSel.innerHTML='<option value="">(Ask each time / only one connected)</option>'+
-    (scannersR.scanners||[]).map(s=>'<option value="'+escHtml(s.id)+'"'+(s.id===prefsR.scanner_device_id?' selected':'')+'>'+escHtml(s.name)+'</option>').join('')}
+    (scannersR.scanners||[]).map(s=>'<option value="'+escHtml(s.id)+'"'+(s.id===prefsR.scanner_device_id?' selected':'')+'>'+escHtml(s.name)+'</option>').join('');
+  // See this card's own HTML comment — an empty list here almost always
+  // means Windows itself has no scanner device to offer yet (a driver/
+  // pairing gap this app can't fix), not a bug in this dropdown, so say
+  // that plainly instead of leaving it looking identical to "nothing
+  // chosen yet, and that's fine."
+  $('set-scanner-status').textContent=(scannersR.scanners||[]).length?'':
+    'No scanner detected by Windows right now — if one is plugged in and powered on, install its scanner/WIA driver (the print driver alone usually isn\'t enough) or check Settings > Bluetooth & devices > Printers & scanners.';
 async function savePrinterPref(){
   const r=await fetch('/api/print-prefs',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({printer:$('set-default-printer').value,scanner_device_id:$('set-default-scanner').value})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
