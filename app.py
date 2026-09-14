@@ -4875,12 +4875,17 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
    inside it would trigger .rail:hover the instant the pointer reaches the
    handle, yanking the rail wider and turning "grab the handle" into
    "chase a moving target"). Fixed at the rail's own COLLAPSED edge (64px)
-   at all times except while actively dragging, when JS takes over via
-   inline left/style — see initRailResizer(). */
+   by default, but tracks the SAME triggers that widen the rail itself
+   (hover/focus-within/pinned/manualpin, right below) so it always sits at
+   the rail's actual current edge — without this it stays frozen at 64px
+   while the rail hover-expands to 212px, cutting a stray line straight
+   through the middle of the now-wider icon+label rows. Only while
+   actively dragging does JS take over via inline left/style instead — see
+   initRailResizer(). */
 .rail-resizer{position:fixed;left:64px;top:0;bottom:0;width:9px;margin-left:-4px;cursor:ew-resize;z-index:21;transition:left .26s cubic-bezier(.32,.08,.24,1)}
 .rail-resizer::after{content:'';position:absolute;top:0;bottom:0;left:4px;width:1px;background:rgba(255,255,255,.16);transition:background .12s,width .12s,left .12s}
 .rail-resizer:hover::after,.rail-resizer.active::after{background:var(--amber);width:3px;left:3px}
-.rail.pinned~.rail-resizer,.rail.manualpin~.rail-resizer{left:212px}
+.rail:hover~.rail-resizer,.rail:focus-within~.rail-resizer,.rail.pinned~.rail-resizer,.rail.manualpin~.rail-resizer{left:212px}
 /* While actively dragging, initRailResizer() drives width/left with inline
    styles every mousemove for direct 1:1 finger-follow — the CSS transition
    would only fight that, so it's switched off for the duration and restored
