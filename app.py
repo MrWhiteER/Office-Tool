@@ -4450,6 +4450,86 @@ def api_doc_download():
         _upload_doc_meta(path, f"{brand_part}/{dtype_part}/{os.path.basename(path)}")
     return jsonify({"ok": True, "downloads": downloads})
 
+# ---------------------------------------------------------------- Printing
+# Per explicit request: a Print button on every All Docs row (every
+# document type, not just Datasheets) and one in the top bar for whatever
+# document is currently open — plus a Settings > Printer &amp; Scanner
+# section to pick a DEFAULT printer instead of always going to Windows'
+# own system default. win32print/win32api (pywin32) are already a bundled
+# dependency (see update_checker.py's own WMI use, browse-scanned-do's
+# tkinter use) — no new dependency needed.
+@app.get("/api/printers")
+def api_printers():
+    """Enumerates real installed Windows printers (name only — this app
+    never needs driver-level detail) plus whichever one Windows itself
+    currently calls the default, so the Settings dropdown can show
+    "(System default)" pre-selected correctly on a machine that's never
+    set a preference here. Never raises: a machine with no printers
+    configured yet, or win32print unavailable for some reason, just gets
+    an empty list back — printing itself already has its own OS-level
+    fallback (see api_print_document) for exactly that case."""
+    try:
+        import win32print
+        printers = [p[2] for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
+        try:
+            default = win32print.GetDefaultPrinter()
+        except Exception:
+            default = ""
+        return jsonify({"printers": printers, "default": default})
+    except Exception as e:
+        return jsonify({"printers": [], "default": "", "error": str(e)})
+
+@app.get("/api/print-prefs")
+def api_print_prefs():
+    cfg = load_cfg()
+    prefs = cfg.get("print_prefs") or {}
+    return jsonify({"printer": prefs.get("printer", ""), "scanner_device_id": prefs.get("scanner_device_id", "")})
+
+@app.post("/api/print-prefs")
+def api_print_prefs_save():
+    data = request.json or {}
+    cfg = load_cfg()
+    cfg["print_prefs"] = {
+        "printer": (data.get("printer") or "").strip(),
+        "scanner_device_id": (data.get("scanner_device_id") or "").strip(),
+    }
+    save_cfg(cfg)
+    return jsonify({"ok": True})
+
+@app.post("/api/print-document")
+def api_print_document():
+    """Prints one already-generated PDF — never the xlsx twin (no silent
+    LibreOffice conversion in the middle of a print action, and the PDF is
+    what this app's own preview already shows as "the real document"
+    everywhere else). Uses the saved default printer (Settings > Printer
+    &amp; Scanner) via Windows' own "printto" shell verb when one's been
+    chosen, matching exactly how a real Print dialog would route it; falls
+    back to the plain "print" verb (Windows' own system default printer)
+    when no preference has been set, so this works out of the box on a
+    fresh install with zero configuration. Both verbs hand the job to
+    whatever's already registered to open a .pdf (Edge, Acrobat, etc.) —
+    this app has no PDF rendering engine of its own to print through
+    directly, same reason "Open in your PDF reader" (openNative) already
+    delegates to the OS rather than drawing one itself."""
+    data = request.json or {}
+    rel = data.get("rel", "")
+    folder, path = resolve_rel(rel)
+    if not path:
+        return jsonify({"ok": False, "error": "File not found."}), 404
+    pdf_path = path if path.lower().endswith(".pdf") else os.path.splitext(path)[0] + ".pdf"
+    if not os.path.isfile(pdf_path):
+        return jsonify({"ok": False, "error": "No PDF for this document yet — generate it first."}), 400
+    printer = (load_cfg().get("print_prefs") or {}).get("printer") or ""
+    try:
+        if printer:
+            import win32api
+            win32api.ShellExecute(0, "printto", pdf_path, '"%s"' % printer, ".", 0)
+        else:
+            os.startfile(pdf_path, "print")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 CS_CACHE = os.path.join(engine.DATA_BASE, "_cs_cache")  # temp render cache, never written into the user's own folder
 
 CS_PREVIEWABLE = (".pdf", ".xlsx", ".xls", ".doc", ".docx")
@@ -4784,8 +4864,30 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
 .rail{width:64px;background:var(--glass-rail-bg);border-right:1px solid var(--glass-border);color:#fff;display:flex;flex-direction:column;align-items:stretch;padding:16px 8px;gap:4px;position:sticky;top:0;height:100vh;z-index:20;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.28) transparent;transition:width .26s cubic-bezier(.32,.08,.24,1),box-shadow .26s ease}
 /* Collapsed = icons only. Hovering the bar (or focusing into it via keyboard,
    or having the brand-switch popup pinned open) widens it and reveals labels
-   — see .navlabel/.brandswitchlabel below for the label reveal itself. */
-.rail:hover,.rail:focus-within,.rail.pinned{width:212px;box-shadow:8px 0 28px rgba(0,0,0,.24)}
+   — see .navlabel/.brandswitchlabel below for the label reveal itself.
+   .manualpin is the same idea but user-driven and sticky (see #rail-resizer/
+   initRailResizer() near the bottom of the script) — per explicit request,
+   drag the handle on the rail's edge left/right to pin it collapsed
+   (symbol-only) or expanded (labels showing), independent of hover, and it
+   remembers the choice across restarts (localStorage). */
+.rail:hover,.rail:focus-within,.rail.pinned,.rail.manualpin{width:212px;box-shadow:8px 0 28px rgba(0,0,0,.24)}
+/* The draggable handle itself — a sibling of .rail (not a child: living
+   inside it would trigger .rail:hover the instant the pointer reaches the
+   handle, yanking the rail wider and turning "grab the handle" into
+   "chase a moving target"). Fixed at the rail's own COLLAPSED edge (64px)
+   at all times except while actively dragging, when JS takes over via
+   inline left/style — see initRailResizer(). */
+.rail-resizer{position:fixed;left:64px;top:0;bottom:0;width:9px;margin-left:-4px;cursor:ew-resize;z-index:21;transition:left .26s cubic-bezier(.32,.08,.24,1)}
+.rail-resizer::after{content:'';position:absolute;top:0;bottom:0;left:4px;width:1px;background:rgba(255,255,255,.16);transition:background .12s,width .12s,left .12s}
+.rail-resizer:hover::after,.rail-resizer.active::after{background:var(--amber);width:3px;left:3px}
+.rail.pinned~.rail-resizer,.rail.manualpin~.rail-resizer{left:212px}
+/* While actively dragging, initRailResizer() drives width/left with inline
+   styles every mousemove for direct 1:1 finger-follow — the CSS transition
+   would only fight that, so it's switched off for the duration and restored
+   the instant the drag ends (inline styles cleared), which is what makes
+   the final snap into place animate instead of just jumping. */
+.rail-resizer.active{transition:none}
+.rail.dragging{transition:none}
 .rail::-webkit-scrollbar{width:6px}
 .rail::-webkit-scrollbar-track{background:transparent}
 .rail::-webkit-scrollbar-thumb{background:rgba(255,255,255,.22);border-radius:3px}
@@ -4816,9 +4918,9 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
 /* Collapsed: bulb/logo centered, label collapsed to nothing. Expanded (rail
    hovered/focused/pinned): row shifts left and the brand code+chevron fade in
    — see .rail:hover etc. above for what widens the rail itself. */
-.rail:hover .brandbtn,.rail:focus-within .brandbtn,.rail.pinned .brandbtn{justify-content:flex-start;gap:12px;padding:10px 13px}
+.rail:hover .brandbtn,.rail:focus-within .brandbtn,.rail.pinned .brandbtn,.rail.manualpin .brandbtn{justify-content:flex-start;gap:12px;padding:10px 13px}
 .brandswitchlabel{display:flex;align-items:center;gap:3px;font-size:8.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width .2s ease,opacity .12s ease}
-.rail:hover .brandswitchlabel,.rail:focus-within .brandswitchlabel,.rail.pinned .brandswitchlabel{max-width:140px;opacity:1;transition:max-width .26s ease .05s,opacity .2s ease .1s}
+.rail:hover .brandswitchlabel,.rail:focus-within .brandswitchlabel,.rail.pinned .brandswitchlabel,.rail.manualpin .brandswitchlabel{max-width:140px;opacity:1;transition:max-width .26s ease .05s,opacity .2s ease .1s}
 .chev{font-size:7px;transition:transform .22s;display:inline-block}
 .brandbtn.open .chev{transform:rotate(180deg)}
 /* left offset matches the rail's EXPANDED width (212px)+8px gap: the popup
@@ -4849,9 +4951,9 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
    (hover / keyboard focus-within / brand-popup pinned open): row goes
    left-aligned and the label fades+widens in with a slight delay so it
    doesn't feel like it's racing the rail's own width transition. */
-.rail:hover .nav,.rail:focus-within .nav,.rail.pinned .nav{justify-content:flex-start;padding:11px 0 11px 15px;gap:13px}
+.rail:hover .nav,.rail:focus-within .nav,.rail.pinned .nav,.rail.manualpin .nav{justify-content:flex-start;padding:11px 0 11px 15px;gap:13px}
 .navlabel{max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width .2s ease,opacity .12s ease}
-.rail:hover .navlabel,.rail:focus-within .navlabel,.rail.pinned .navlabel{max-width:150px;opacity:1;transition:max-width .28s ease .05s,opacity .22s ease .1s}
+.rail:hover .navlabel,.rail:focus-within .navlabel,.rail.pinned .navlabel,.rail.manualpin .navlabel{max-width:150px;opacity:1;transition:max-width .28s ease .05s,opacity .22s ease .1s}
 /* Account avatar (rail) — same 21px footprint as .navicon so it lines up
    with every other rail button, just a filled circle + initial instead
    of an outline icon (see openProfileModal()). */
@@ -4869,7 +4971,7 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
 .avatarslot{width:32px;aspect-ratio:5/6;flex-shrink:0;border-radius:7px;overflow:hidden;background:var(--amber);color:var(--brand-dark);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;text-transform:uppercase}
 .avatarslot img{width:100%;height:100%;object-fit:cover;display:block}
 @media (prefers-reduced-motion:reduce){
-  .rail,.rail:hover,.rail:focus-within,.rail.pinned,.nav,.nav .navicon,.nav:hover .navicon,.navlabel,.rail:hover .navlabel,.rail:focus-within .navlabel,.rail.pinned .navlabel,.brandbtn,.brandswitchlabel,.rail:hover .brandswitchlabel,.rail:focus-within .brandswitchlabel,.rail.pinned .brandswitchlabel{transition-duration:.001ms!important}
+  .rail,.rail:hover,.rail:focus-within,.rail.pinned,.rail.manualpin,.rail-resizer,.nav,.nav .navicon,.nav:hover .navicon,.navlabel,.rail:hover .navlabel,.rail:focus-within .navlabel,.rail.pinned .navlabel,.rail.manualpin .navlabel,.brandbtn,.brandswitchlabel,.rail:hover .brandswitchlabel,.rail:focus-within .brandswitchlabel,.rail.pinned .brandswitchlabel,.rail.manualpin .brandswitchlabel{transition-duration:.001ms!important}
 }
 .main{flex:1;min-width:0}
 .watermark{position:fixed;top:0;left:64px;right:0;bottom:0;z-index:-1;display:flex;align-items:center;justify-content:center;pointer-events:none;overflow:hidden}
@@ -5617,9 +5719,27 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
      <span class=navlabel>Account</span>
    </button>
  </div>
+ <!-- Drag handle for the rail — per explicit request: "when the user
+      slides it to max left it will be only the symbol, and when he drags
+      it to right it will show the text very nicely and animated." A
+      sibling of .rail on purpose (see .rail-resizer's own CSS comment) —
+      wired up by initRailResizer() near the bottom of the script. -->
+ <div class=rail-resizer id=rail-resizer title="Drag to pin the sidebar open or closed"></div>
  <div class=main>
   <div class=bar>
     <h1 id=title>Menu</h1>
+    <!-- Print — the top-bar half of the "print button" request (see the
+         All Docs row one, printDocFromAllDocs, for the other half).
+         Shown on every document Build screen (see view()'s own toggle) —
+         "the parked area" was empty screen space here on every screen
+         that ISN'T Settings, since bar-admin-update-group next to this
+         only ever shows there. Prints whatever real, already-SAVED
+         document is currently open (EDITING) — a brand-new, not-yet-
+         Generated draft has no real PDF on disk to hand to a printer at
+         all, so printCurrentDoc() below just says so rather than
+         pretending to print an in-progress edit that doesn't match what
+         would come out. -->
+    <button type=button class=btn id=bar-print-btn style="display:none" onclick=printCurrentDoc()>🖶 Print</button>
     <div id=bar-admin-update-group style="display:none;gap:8px">
       <!-- Update Center + Admin Tools — scoped to the Settings tab only
            (per explicit request; an earlier version of this made them
@@ -6401,6 +6521,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button type=button data-tab=clients onclick="showSettingsTab('clients')">Clients</button>
       <button type=button data-tab=lists onclick="showSettingsTab('lists')">Lists</button>
       <button type=button data-tab=appearance onclick="showSettingsTab('appearance')">Appearance</button>
+      <button type=button data-tab=printer onclick="showSettingsTab('printer')">Printer &amp; Scanner</button>
     </div>
     <div class=settings-tab-panel id=settings-tab-folders>
     <!-- The 8 separate local-folder fields this card used to have (one
@@ -6496,6 +6617,26 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
         </div>
       </div>
       <p id=set-brand-theme-status class=muted style="font-size:11.5px;margin:8px 0 0"></p>
+    </div></div>
+    </div>
+    <!-- Per explicit request: a place to pick a DEFAULT printer (instead
+         of always going to whatever Windows itself currently calls the
+         default) and, alongside it, the same idea for the scanner —
+         reusing Scanner tool's own device list (api/scanner-list) rather
+         than a second device-enumeration mechanism. Both save straight on
+         change (own onchange handler below), same "no separate Save
+         button" pattern as Color Theme/Branding right above, since
+         there's exactly one field each here, not a batch of fields worth
+         a single combined save. -->
+    <div class="settings-tab-panel hide" id=settings-tab-printer>
+    <div class=card><div class=ch>Printer</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 10px">Used by every Print button in the app (All Docs, and the top bar while a document is open). Leave on System Default to always use whatever Windows itself currently has set.</p>
+      <div class=f><label>Default printer</label><select id=set-default-printer onchange=savePrinterPref()><option value="">(System default)</option></select></div>
+      <p id=set-printer-status class=muted style="font-size:11.5px;margin:8px 0 0"></p>
+    </div></div>
+    <div class=card><div class=ch>Scanner</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 10px">Used by Scan Now (Menu &gt; Scanner) whenever more than one scanner is connected — with only one connected, that one's always used regardless of this.</p>
+      <div class=f><label>Default scanner</label><select id=set-default-scanner onchange=saveScannerPref()><option value="">(Ask each time / only one connected)</option></select></div>
     </div></div>
     </div>
    </div>
@@ -7510,6 +7651,11 @@ function view(v){
   // (Admin Tools opens Settings' own admin sub-page; Update Center is
   // reachable from the same corner) — see bar-admin-update-group.
   $('bar-admin-update-group').style.display=(v=='settings')?'flex':'none';
+  // Print button — shown on every document Build screen (see this
+  // button's own HTML comment); the click handler itself, not this
+  // toggle, is what decides whether there's actually a saved document
+  // open to print right now (EDITING) vs. an unsaved in-progress draft.
+  $('bar-print-btn').style.display=isDoc?'':'none';
   DOC_VIEW_LIST.forEach(dv=>$('n-'+dv).classList.toggle('on',v===dv));
   if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients'){$('title').textContent='Clients';loadClientsView()}if(v=='cloudmanager'){$('title').textContent='Cloud Manager';loadCloudManagerPhotos()}if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}if(v=='scanner')$('title').textContent='Scanner'}
 // The one way to open a document screen — every rail button and Menu tile
@@ -7564,13 +7710,37 @@ async function loadSettings(){
   const b=BRAND_LIST.find(x=>x.code===BRAND)||{code:BRAND,label:BRAND};
   $('set-brandname').textContent=b.label;
   $('set-bulb').innerHTML=brandIcon(BRAND,'set');
-  renderManageLists();renderAuditLog();loadPhotoStoreSettings()}
+  renderManageLists();renderAuditLog();loadPhotoStoreSettings();loadPrinterScannerSettings()}
 // Admin Tools — a sub-page nested WITHIN Settings itself (own rail item
 // deliberately rejected — see applyAccessRestrictions()'s comment), only
 // ever reachable via the entry card that's only visible for role==='admin'.
 // Global top-bar button (visible on every screen for role==='admin', see
 // the .bar markup) — jumps straight to Settings' Admin sub-page from
 // anywhere, no need to go through Settings' own UI first.
+// Printer & Scanner tab (Settings) — see that panel's own HTML comment.
+// Both dropdowns save on change, no separate Save button, so this only
+// ever needs to run once per Settings visit (called from loadSettings())
+// to populate the option lists and pre-select whatever's already saved.
+async function loadPrinterScannerSettings(){
+  const [printersR,prefsR,scannersR]=await Promise.all([
+    fetch('/api/printers').then(r=>r.json()).catch(()=>({printers:[],default:''})),
+    fetch('/api/print-prefs').then(r=>r.json()).catch(()=>({printer:'',scanner_device_id:''})),
+    fetch('/api/scanner-list').then(r=>r.json()).catch(()=>({scanners:[]})),
+  ]);
+  const printerSel=$('set-default-printer');
+  printerSel.innerHTML='<option value="">(System default'+(printersR.default?' — '+escHtml(printersR.default):'')+')</option>'+
+    (printersR.printers||[]).map(p=>'<option value="'+escHtml(p)+'"'+(p===prefsR.printer?' selected':'')+'>'+escHtml(p)+'</option>').join('');
+  $('set-printer-status').textContent=printersR.error?('Could not list printers: '+printersR.error):
+    ((printersR.printers||[]).length?'':'No printers found — check Windows\' own printer setup.');
+  const scannerSel=$('set-default-scanner');
+  scannerSel.innerHTML='<option value="">(Ask each time / only one connected)</option>'+
+    (scannersR.scanners||[]).map(s=>'<option value="'+escHtml(s.id)+'"'+(s.id===prefsR.scanner_device_id?' selected':'')+'>'+escHtml(s.name)+'</option>').join('')}
+async function savePrinterPref(){
+  const r=await fetch('/api/print-prefs',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({printer:$('set-default-printer').value,scanner_device_id:$('set-default-scanner').value})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  $('set-printer-status').textContent=r.ok?'Saved.':('Could not save: '+(r.error||'unknown error'))}
+function saveScannerPref(){savePrinterPref()}   // same prefs object, one shared save
+
 function openAdminTools(){view('settings');showSettingsAdminPanel()}
 function showSettingsAdminPanel(){
   $('settings-main-panel').classList.add('hide');
@@ -7579,7 +7749,7 @@ function showSettingsAdminPanel(){
 function showSettingsMainPanel(){
   $('settings-admin-panel').classList.add('hide');
   $('settings-main-panel').classList.remove('hide')}
-const SETTINGS_TABS=['folders','clients','lists','appearance'];
+const SETTINGS_TABS=['folders','clients','lists','appearance','printer'];
 function showSettingsTab(name){
   document.querySelectorAll('#settings-tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===name));
   SETTINGS_TABS.forEach(t=>$('settings-tab-'+t).classList.toggle('hide',t!==name));
@@ -13869,6 +14039,26 @@ async function downloadDocFromAllDocs(rel){
   toast('Saved.');
   loadIndex()} // refresh so the row's own "downloaded by/when" badge updates right away
 
+// Shared by the All Docs row button AND the top-bar one (printCurrentDoc)
+// — both just hand a rel to the same backend route; this is the one that
+// actually calls it and gives feedback, so neither caller repeats itself.
+async function printDocFromAllDocs(rel,btn){
+  const orig=btn?btn.textContent:null;
+  if(btn){btn.disabled=true;btn.textContent='Printing…'}
+  const r=await fetch('/api/print-document',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rel})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  if(btn){btn.disabled=false;btn.textContent=orig}
+  toast(r.ok?'Sent to printer.':('Could not print: '+(r.error||'unknown error')))}
+// Top-bar Print button — see its own HTML comment. EDITING only ever
+// holds a real saved document's rel (openDoc()'s own comment: null for
+// an in-progress import, and never set at all for a brand-new draft that
+// hasn't been Generated yet), so this is exactly the "is there a real
+// PDF on disk to print" check — no separate API round-trip needed just
+// to find that out before trying.
+function printCurrentDoc(){
+  if(!EDITING){toast('Generate this document first, or print an existing one from All Docs');return}
+  printDocFromAllDocs(EDITING,$('bar-print-btn'))}
+
 function openCS(rel){
   $('csmodaltitle').textContent='Company System — '+rel.split('/').pop()+' (page 1 preview — use Excel/PDF above to open the full file)';
   $('csframe').src='/cs-thumb?f='+encodeURIComponent(rel);
@@ -15297,6 +15487,13 @@ function renderList(){
     if(hasXlsx)actions+='<button class=rbtn onclick="event.stopPropagation();openNative(\''+xlsxRel+'\')" title="Open in Excel">Excel</button>';
     if(hasWord)actions+='<button class=rbtn onclick="event.stopPropagation();openNative(\''+wordRel+'\')" title="Open in Word">Word</button>';
     if(hasPdf)actions+='<button class=rbtn onclick="event.stopPropagation();openNative(\''+pdfRel+'\')" title="Open in your PDF reader">PDF</button>';
+    // Print — per explicit request, every document type here (not just
+    // Datasheets) gets one, right next to the PDF button it's gated on
+    // the same way (there's nothing to print without a real PDF). See
+    // printDocFromAllDocs()/api_print_document for the actual mechanics
+    // — Windows' own printto/print shell verbs, using the Settings >
+    // Printer &amp; Scanner default when one's been picked.
+    if(hasPdf)actions+='<button class=rbtn onclick="event.stopPropagation();printDocFromAllDocs(\''+pdfRel+'\',this)" title="Print this document">🖶 Print</button>';
     actions+=hasXlsx
       ? '<button class="rbtn cs" onclick="event.stopPropagation();openDoc(\''+xlsxRel+'\')" title="Edit in Company System">Open in CS</button>'
       : (isDoPdf||isEditableHtmlDocType)
@@ -15790,6 +15987,52 @@ function initResizer(resizerId, onDrag){
 }
 initResizer('resizer', renderPreviewPages);
 initResizer('fcresizer', fcRenderPreviewPages);
+// Rail drag handle — per explicit request: "when the user slides it to max
+// left it will be only the symbol, and when he drags it to right it will
+// show the text very nicely and animated." Unlike initResizer() above
+// (continuous width, any value in a range) this only ever SETTLES on one
+// of two states — collapsed (64px, icons only) or pinned-expanded (212px,
+// the same width .rail:hover already uses) — but the drag itself is fully
+// continuous/live (rail width + label opacity/max-width tracking the
+// pointer 1:1 every mousemove) so it still reads as a real slide, not a
+// binary snap, and only settles into whichever end it's closer to on
+// release. Persisted via localStorage so the choice survives a restart.
+function initRailResizer(){
+  const handle=$('rail-resizer');const rail=$('rail');if(!handle||!rail)return;
+  const MIN=64,MAX=212;
+  if(localStorage.getItem('cs_railpin')==='1')rail.classList.add('manualpin');
+  const labels=()=>rail.querySelectorAll('.navlabel,.brandswitchlabel');
+  let dragging=false,startX=0,startW=0;
+  function apply(w){
+    rail.style.width=w+'px';handle.style.left=w+'px';
+    const frac=Math.max(0,Math.min(1,(w-MIN)/(MAX-MIN)));
+    labels().forEach(el=>{
+      const target=el.classList.contains('brandswitchlabel')?140:150;
+      el.style.maxWidth=(frac*target)+'px';el.style.opacity=frac});
+    return frac}
+  handle.addEventListener('mousedown',e=>{
+    dragging=true;startX=e.clientX;startW=rail.getBoundingClientRect().width;
+    rail.classList.add('dragging');handle.classList.add('active');
+    document.body.style.userSelect='none';e.preventDefault()});
+  window.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    apply(Math.max(MIN,Math.min(MAX,startW+(e.clientX-startX))))});
+  window.addEventListener('mouseup',()=>{
+    if(!dragging)return;
+    dragging=false;
+    const frac=apply(parseFloat(rail.style.width)||MIN);
+    const pin=frac>0.5;
+    rail.classList.remove('dragging');handle.classList.remove('active');
+    document.body.style.userSelect='';
+    // Clear every inline style the drag set so the normal CSS classes
+    // (.manualpin below, or plain hover) take back over — leaving them in
+    // place would freeze the rail at this exact px forever, hover included.
+    rail.style.width='';handle.style.left='';
+    labels().forEach(el=>{el.style.maxWidth='';el.style.opacity=''});
+    rail.classList.toggle('manualpin',pin);
+    localStorage.setItem('cs_railpin',pin?'1':'0')});
+}
+initRailResizer();
 window.addEventListener('resize',()=>{renderPreviewPages();fcRenderPreviewPages()});
 checkLogin();
 // Both /api/check-update and /api/apply-update(-progress) are public
