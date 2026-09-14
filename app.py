@@ -10340,10 +10340,16 @@ function openZoneSettings(slot,btn){
 // photo filling the frame than the real page (the true, more elongated
 // 280:106 shape) then actually renders — not a pan/zoom bug, a stale
 // cropping-guide constant. main/lifestyle aren't touched here — those two
-// use a real CSS aspect-ratio (1/1, 16/9) directly on their own template
+// use a real CSS aspect-ratio (1/0.85, 16/9) directly on their own template
 // element, confirmed exact via the same measurement, so they were never
-// approximations to begin with.
-const CAT_IMG_ASPECT={main:1,lifestyle:16/9,diagram:280/106,extra1:280/106,extra2:280/106,extra3:280/106};
+// approximations to begin with. main was a plain 1/1 square until an
+// explicit request to shorten that box (the empty placeholder AND the
+// real photo frame — one element, both states) by 15%, anchored from the
+// top — sololuce_datasheet.html's own Main Product Photo box carries the
+// identical 1/0.85 ratio, so this modal's drag/zoom/mask preview always
+// matches what the real PDF renders; keep these two in sync if that box
+// ever changes shape again.
+const CAT_IMG_ASPECT={main:1/0.85,lifestyle:16/9,diagram:280/106,extra1:280/106,extra2:280/106,extra3:280/106};
 // The 4 bottom-right grid zones (Dimension Diagram + the 3 generic Extra
 // Photo slots) are often used for line-art/diagrams that need to shrink
 // well below their frame rather than fill it, so their zoom floor is
