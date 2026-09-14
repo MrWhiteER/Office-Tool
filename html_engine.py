@@ -649,6 +649,28 @@ def _render_html_to_pdf(html, out_path):
         # keeps this line correct even if a future template defines a
         # non-Promise value under the same name by mistake.
         page.evaluate("window.__panReady || Promise.resolve()")
+        # Real, confirmed bug fixed here — reported directly: "sometimes
+        # the same draft is in 1 page and sometimes its 2 pages" for
+        # byte-identical content. <doc-page>'s own header/footer height
+        # measurement (--doc-hdr-h/--doc-ftr-h, which its print stylesheet
+        # uses to reserve space at the top/bottom of every page — see
+        # doc-page.js's own comment on .hdr-space) runs on a
+        # requestAnimationFrame debounce, re-triggered again after
+        # document.fonts.ready specifically because header text can
+        # reflow once real fonts swap in. That's a DIFFERENT async signal
+        # than the document.fonts.ready wait directly above, with no
+        # ordering guarantee between them — so page.pdf() could fire
+        # before that rAF-scheduled re-measurement has actually landed,
+        # printing with the element's stale/starting 0px reservation
+        # instead of the real header height, silently letting MORE
+        # content fit onto page 1 than the header space it's actually
+        # printed with allows. forceMeasure() is a synchronous escape
+        # hatch from that debounce (see its own comment) — called here,
+        # after fonts+panReady have both settled and right before the
+        # snapshot, it forces the real, final measurement into place at
+        # exactly the moment that matters, with no timing dependency left
+        # to race at all.
+        page.evaluate("document.querySelectorAll('doc-page').forEach(dp => dp.forceMeasure && dp.forceMeasure())")
         # prefer_css_page_size makes Playwright actually honor the @page
         # size doc-page.js injects (see that file's own module docstring)
         # instead of silently defaulting to US Letter — every template here

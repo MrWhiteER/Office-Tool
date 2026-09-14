@@ -252,6 +252,33 @@
       const ftr = this.querySelector(':scope > [slot="footer"]');
       this._syncSize(hdr ? hdr.offsetHeight : 0, ftr ? ftr.offsetHeight : 0);
     }
+
+    /** Public, synchronous escape hatch from _scheduleMeasure()'s own
+     *  requestAnimationFrame debounce — a PDF-export caller (see
+     *  html_engine.py's render_pdf) needs the REAL, final --doc-hdr-h/
+     *  --doc-ftr-h in place at the exact moment it calls page.pdf(), not
+     *  "whenever the browser next happens to paint a frame". Those two
+     *  vars feed .hdr-space/.ftr-space's own reserved-height calc (see
+     *  the stylesheet's own comment), which is what actually decides how
+     *  much of each page free-flowing body content gets — a stale 0px
+     *  default (this component's own :host starting value, before its
+     *  first real measurement has ever run) reserves LESS space than the
+     *  header/footer really need, so more content fits per page than
+     *  print will actually allow once the real value lands. This was a
+     *  real, reported bug: "sometimes the same draft is 1 page, sometimes
+     *  2" for byte-identical content — a genuine race between this
+     *  element's own rAF-scheduled measurement (re-triggered again after
+     *  document.fonts.ready, since header text reflows once real fonts
+     *  swap in) and whenever Playwright's own already-resolved
+     *  document.fonts.ready wait happened to let page.pdf() fire, which
+     *  is a DIFFERENT async signal with no ordering guarantee relative to
+     *  a rAF callback chained off the same promise. Cancels any pending
+     *  scheduled measurement first so a stale queued rAF can't re-fire and
+     *  redundantly re-measure right after this already did it correctly. */
+    forceMeasure() {
+      if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
+      this._measure();
+    }
   }
 
   if (!customElements.get('doc-page')) {
