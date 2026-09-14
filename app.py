@@ -7821,7 +7821,7 @@ async function loadPrinterScannerSettings(){
   // that plainly instead of leaving it looking identical to "nothing
   // chosen yet, and that's fine."
   $('set-scanner-status').textContent=(scannersR.scanners||[]).length?'':
-    'No scanner detected by Windows right now — if one is plugged in and powered on, install its scanner/WIA driver (the print driver alone usually isn\'t enough) or check Settings > Bluetooth & devices > Printers & scanners.';
+    'No scanner detected by Windows right now — if one is plugged in and powered on, install its scanner/WIA driver (the print driver alone usually isn\'t enough) or check Settings > Bluetooth & devices > Printers & scanners.'}
 async function savePrinterPref(){
   const r=await fetch('/api/print-prefs',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({printer:$('set-default-printer').value,scanner_device_id:$('set-default-scanner').value})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
