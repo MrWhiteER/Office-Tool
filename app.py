@@ -3752,7 +3752,16 @@ def _api_doc_from_pdf(rel, path, meta):
         # Design) can start a submission exactly like a legacy xlsx one.
         sidecar = engine.read_sidecar(path)
         if not sidecar:
-            return jsonify({"error": "No saved data found for this document."}), 404
+            # CAT (Sololuce Datasheet) is the one HTML_DOC_TYPE with a real
+            # recovery path — its own "Import from PDF" pipeline works on
+            # ANY PDF, this document's own included (see
+            # /api/cat-import/from-existing). QTN2/EXP have no such tool,
+            # so they still get the plain dead-end message.
+            resp = {"error": "No saved data found for this document."}
+            if doc_type == "CAT":
+                resp["offer_pdf_import"] = True
+                resp["rel"] = rel
+            return jsonify(resp), 404
         sidecar = dict(sidecar)
         sidecar["original"] = rel
         sidecar["doc_type"] = doc_type
@@ -4960,6 +4969,40 @@ def api_cat_import_upload():
         with open(pdf_path, "wb") as f:
             f.write(base64.b64decode(b64))
         pages = engine.to_png_pages(pdf_path, folder, "src", dpi=CAT_IMPORT_DPI)
+        return jsonify({"ok": True, "importId": import_id, "pages": pages})
+    except Exception as e:
+        shutil.rmtree(folder, ignore_errors=True)
+        return jsonify({"error": f"Couldn't read that PDF: {e}"}), 400
+
+@app.post("/api/cat-import/from-existing")
+def api_cat_import_from_existing():
+    """Feeds an ALREADY-GENERATED Sololuce Datasheet's own PDF into the
+    exact same Import-from-PDF pipeline as api_cat_import_upload above —
+    same importId/pages response shape, so the frontend reuses that whole
+    review UI unchanged. Per explicit request ("no saved data - fix
+    this"): a document generated before the v1.1.58 sidecar-sync fix has
+    no editable JSON anywhere (checked exhaustively, genuinely gone, not
+    recoverable exactly as it was) — Edit used to just dead-end there.
+    This can't bring back the ORIGINAL data, but the PDF itself still
+    has every field printed on it, so running it through the same
+    text/layout extraction a manufacturer's own PDF gets gives the user
+    a real starting point to review and fix instead of retyping from
+    scratch. Reads the file straight off disk (the server already has
+    it) rather than round-tripping it through the browser as a fresh
+    upload the way a genuinely external PDF has to."""
+    rel = (request.json or {}).get("rel", "")
+    _folder, path = resolve_rel(rel)
+    if not path:
+        return jsonify({"error": "File not found."}), 404
+    pdf_path = path if path.lower().endswith(".pdf") else os.path.splitext(path)[0] + ".pdf"
+    if not os.path.isfile(pdf_path):
+        return jsonify({"error": "No PDF exists for this document."}), 400
+    import_id = str(uuid.uuid4())
+    folder = os.path.join(CAT_IMPORT_DIR, import_id)
+    os.makedirs(folder, exist_ok=True)
+    try:
+        shutil.copy(pdf_path, os.path.join(folder, "source.pdf"))
+        pages = engine.to_png_pages(os.path.join(folder, "source.pdf"), folder, "src", dpi=CAT_IMPORT_DPI)
         return jsonify({"ok": True, "importId": import_id, "pages": pages})
     except Exception as e:
         shutil.rmtree(folder, ignore_errors=True)
@@ -7376,6 +7419,22 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
   <div class=editmodalbar><b id=editmodaltitle>Editing document</b><button class=btn onclick=exitEditMode()>Close ✕</button></div>
   <div class=editwarnbanner>⚠️ You're editing a document that was already created — nothing is saved until you press Generate, and you'll be asked to confirm before it overwrites anything.</div>
   <div class=editmodalbody id=editmodalbody></div>
+</div>
+<!-- Offered from openDoc() instead of a dead-end "No saved data" alert —
+     see offerCatPdfRecovery()/startCatPdfRecovery()'s own comment. Global
+     sibling, same "never nest a modal inside a view container that
+     carries .hide outside its own screen" reasoning as every other
+     .clientmodal here. -->
+<div class="clientmodal hide" id=catrecovermodal>
+  <div class=clientmodalbox style="max-width:420px">
+    <div class=clientmodalbar><b>Editable data missing</b><button class=btn onclick=closeCatRecoverModal()>Close</button></div>
+    <div class=clientmodalbody>
+      <p class=muted style="font-size:12.5px;margin:0 0 14px">This document's editable data isn't saved anywhere — it was most likely generated before automatic cloud backup existed, and that can't be recovered.</p>
+      <p class=muted style="font-size:12.5px;margin:0 0 14px">You can try automatically importing the fields straight from its own PDF instead — the same way a manufacturer's own datasheet gets imported. It won't be perfect, but it's a real starting point you can review and fix rather than retyping everything from scratch.</p>
+      <button type=button class="btn dark" style="width:100%;margin-bottom:8px" onclick="startCatPdfRecovery(this)">Try Import from PDF</button>
+      <button type=button class=btn style="width:100%" onclick=closeCatRecoverModal()>Cancel</button>
+    </div>
+  </div>
 </div>
 <div class="catimportmodal hide" id=catimportmodal>
   <div class=catimportbar>
@@ -13259,6 +13318,33 @@ function findLibraryBadgeForConcept(conceptKey){
 }
 let IMP_ID=null, IMP_PAGES=0, IMP_FIELDS=[], IMP_SELECTED=null, IMP_DRAW=false, IMP_ZOOM=100, impFieldSeq=0, impDrag=null, impPendingBox=null;
 
+// Offered instead of a dead-end alert when Edit finds a CAT document with
+// no saved sidecar data at all (see /api/cat-import/from-existing's own
+// comment for why this can happen and what this recovers) — real modal,
+// not window.confirm() (silently no-ops in this app's embedded webview,
+// same reasoning as every other confirm here).
+let CAT_RECOVER_REL=null;
+function offerCatPdfRecovery(rel){
+  CAT_RECOVER_REL=rel;
+  $('catrecovermodal').classList.remove('hide')}
+function closeCatRecoverModal(){$('catrecovermodal').classList.add('hide');CAT_RECOVER_REL=null}
+async function startCatPdfRecovery(btn){
+  const rel=CAT_RECOVER_REL;
+  const restore=startBtnLoading(btn,'Reading PDF…');
+  const r=await fetch('/api/cat-import/from-existing',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rel})}).then(r=>r.json()).catch(e=>({error:e.message}));
+  restore();
+  if(r.error){alert(r.error);return}
+  closeCatRecoverModal();
+  // Same "open the review overlay, then run extraction" sequence
+  // onCatImportFile() uses after a manual upload — importId/pages are the
+  // exact same response shape, so every bit of that existing review UI
+  // (page thumbnails, field list, box drawing, Apply to Datasheet) just
+  // works unmodified here too.
+  openCatImportModal();
+  IMP_ID=r.importId;IMP_PAGES=r.pages;IMP_FIELDS=[];IMP_SELECTED=null;
+  renderImpPages();renderImpFields();
+  runCatExtraction()}
 function pickCatImportFile(){$('catimportfile').click()}
 function onCatImportFile(input){
   const f=input.files[0];if(!f)return;
@@ -14541,7 +14627,11 @@ async function confirmAndGenerate(){
 
 async function openDoc(rel){
   const r=await fetch('/api/doc?rel='+encodeURIComponent(rel)).then(r=>r.json());
-  if(r.error){alert(r.error);return}
+  if(r.error){
+    // A real recovery path, not just a dead-end alert — see
+    // /api/cat-import/from-existing's own comment for the full reasoning.
+    if(r.offer_pdf_import){offerCatPdfRecovery(r.rel||rel);return}
+    alert(r.error);return}
   setType(r.doc_type,true);
   EDITING=r.imported?null:r.original;   // imported docs save as a new file, not an overwrite
   EDITING_DRAFT=null;
