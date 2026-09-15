@@ -5838,6 +5838,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .toast.show{opacity:1}
 .updatedot{position:absolute;top:-2px;right:-3px;width:8px;height:8px;border-radius:50%;background:#e0464f;box-shadow:0 0 0 2px var(--brand-dark);animation:updatePulse 1.8s ease-in-out infinite}
 @keyframes updatePulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:.7}}
+/* Shared "Apple-style" circular loading spinner for any button doing
+   real async work — per explicit request ("a loading circular shaped
+   something like in apple that its loading or lounching... for all the
+   button which are required to load"). currentColor so it always matches
+   whatever text color the button already has, no per-button tuning
+   needed; sized/spaced to sit inline right before a label. See
+   startBtnLoading()/stopBtnLoading() in the page script for how this
+   gets swapped in and back out. */
+.btn-spinner{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:-2.5px;margin-right:7px;opacity:.75;animation:btnSpin .7s linear infinite}
+@keyframes btnSpin{to{transform:rotate(360deg)}}
 /* Same launch-banner artwork as the splash screen (--splash-banner, see
    its own definition further down), but glossy/blurred behind the login
    card instead of shown crisp full-screen. The blur/tint/sheen all live
@@ -7578,6 +7588,30 @@ let TYPE='QTN2', INDEX=[], items=[], EDITING=null, EDITING_DRAFT=null, hoverTime
 async function loadUnits(){const r=await fetch('/api/units').then(r=>r.json());if(r.units&&r.units.length)UNITS=r.units}
 const $=id=>document.getElementById(id);
 function escHtml(s){return (s??'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+// Shared button-loading helper — see .btn-spinner's own CSS comment for
+// the "why". Accepts either a real button element or an id string (some
+// call sites only have the id handy, e.g. a button looked up after a
+// modal opens). Swaps in a spinner + label, disables the button, and
+// returns a restore() function that puts everything back exactly as it
+// was — callers don't need to remember/re-derive the original label
+// themselves. Re-entrant: calling start twice on the same button (e.g. a
+// double-click that slips through) just returns a no-op the second time
+// instead of clobbering the saved original state.
+function startBtnLoading(btnOrId,label){
+  const btn=typeof btnOrId==='string'?$(btnOrId):btnOrId;
+  if(!btn||btn.dataset.loading==='1')return function(){};
+  btn.dataset.loading='1';
+  btn.dataset.origHtml=btn.innerHTML;
+  btn.dataset.origDisabled=btn.disabled?'1':'';
+  btn.disabled=true;
+  btn.innerHTML='<span class=btn-spinner></span>'+(label!=null?escHtml(label):btn.dataset.origHtml);
+  return function stopBtnLoading(){
+    if(btn.dataset.loading!=='1')return;
+    btn.dataset.loading='';
+    btn.disabled=btn.dataset.origDisabled==='1';
+    btn.innerHTML=btn.dataset.origHtml;
+  }
+}
 // Filter/sort persistence — per explicit request: "all the filter in the
 // system should always be remembered as last settup filters." One shared
 // pair instead of hand-rolling localStorage reads/writes at every
@@ -7924,7 +7958,7 @@ async function startUpdateFromTray(downloadUrl,targetVersion){
 // shared dimmed overlay (real percentage bars for BOTH the download and
 // the extract/install phase) the instant the backend confirms it started.
 async function actuallyInstallUpdate(btn){
-  btn.disabled=true;btn.textContent='Starting…';
+  startBtnLoading(btn,'Starting…');
   try{
     const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({download_url:UPDATE_INFO.download_url,target_version:UPDATE_INFO.latest})}).then(r=>r.json());
@@ -7953,7 +7987,7 @@ function loginInstallUpdate(chip){
   actuallyInstallLoginUpdate(chip)}
 async function actuallyInstallLoginUpdate(chip){
   chip.onclick=null;chip.style.cursor='default';
-  $('login-update-chip-text').textContent='Starting…';
+  $('login-update-chip-text').innerHTML='<span class=btn-spinner></span>Starting…';
   try{
     const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({download_url:UPDATE_INFO.download_url,target_version:UPDATE_INFO.latest})}).then(r=>r.json());
@@ -8231,11 +8265,9 @@ async function savePrinterPref(){
   $('set-printer-status').textContent=r.ok?'Saved.':('Could not save: '+(r.error||'unknown error'))}
 function saveScannerPref(){savePrinterPref()}   // same prefs object, one shared save
 async function refreshPrinterScannerSettings(){
-  const btn=$('set-printer-refresh-btn');
-  const orig=btn.textContent;
-  btn.disabled=true;btn.textContent='Refreshing…';
+  const restore=startBtnLoading('set-printer-refresh-btn','Refreshing…');
   await loadPrinterScannerSettings();
-  btn.disabled=false;btn.textContent=orig}
+  restore()}
 
 function openAdminTools(){view('settings');showSettingsAdminPanel()}
 function showSettingsAdminPanel(){
@@ -8325,10 +8357,10 @@ async function loadGoogleOAuthAdminSettings(){
   $('goauth-secret-label').textContent=r.has_secret?'Client Secret (saved — leave blank to keep it)':'Client Secret'}
 // Same one-save-does-both shape as savePhotoStoreConfig() just above.
 async function saveGoogleOAuthConfig(btn){
-  btn.disabled=true;btn.textContent='Saving…';
+  const restore=startBtnLoading(btn,'Saving…');
   const r=await fetch('/api/oauth/google-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
     client_id:$('goauth-client_id').value.trim(),client_secret:$('goauth-client_secret').value})}).then(r=>r.json());
-  btn.disabled=false;btn.textContent='Save Google Sign-In';
+  restore();
   $('goauth-bundle-note').textContent=r.bundled?'Bundled for future builds too — rebuild + GUPDATE to ship it to everyone.':('Saved for this machine, but not bundled: '+(r.bundle_error||'unknown error'));
   toast('Saved');
   loadGoogleOAuthAdminSettings()}
@@ -8337,11 +8369,11 @@ async function saveGoogleOAuthConfig(btn){
 // bundle half only actually lands from the admin's dev checkout, so
 // report that separately rather than failing the whole save over it.
 async function savePhotoStoreConfig(btn){
-  btn.disabled=true;btn.textContent='Saving…';
+  const restore=startBtnLoading(btn,'Saving…');
   const r=await fetch('/api/photostore-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
     account_id:$('ps-account_id').value.trim(),bucket:$('ps-bucket').value.trim(),
     access_key_id:$('ps-access_key_id').value.trim(),secret_access_key:$('ps-secret_access_key').value})}).then(r=>r.json());
-  btn.disabled=false;btn.textContent='Save Cloud Storage Key';
+  restore();
   $('ps-bundle-note').textContent=r.bundled?'Bundled for future builds too — rebuild + GUPDATE to ship it to everyone.':('Saved for this machine, but not bundled: '+(r.bundle_error||'unknown error'));
   toast('Saved — checking connection…');
   loadPhotoStoreAdminSettings()}
@@ -8355,9 +8387,9 @@ async function refreshPhotoStoreStatus(){
     '<div style="height:6px;border-radius:4px;background:var(--tint);margin-top:5px;overflow:hidden">'+
     '<div style="height:100%;width:'+pct+'%;background:'+(pct>90?'var(--danger)':'var(--brand-dark)')+'"></div></div>'}
 async function syncPhotoStore(btn){
-  btn.disabled=true;btn.textContent='Syncing…';
+  const restore=startBtnLoading(btn,'Syncing…');
   const r=await fetch('/api/photostore-sync',{method:'POST'}).then(r=>r.json());
-  btn.disabled=false;btn.textContent='Sync Now — Download New Photos';
+  restore();
   toast(r.ok?(r.downloaded?'Downloaded '+r.downloaded+' new photo'+(r.downloaded!==1?'s':''):'Already up to date'):('Sync failed: '+(r.error||'unknown error')));
   refreshPhotoStoreStatus()}
 async function loadPhotoStoreList(){
@@ -8395,13 +8427,16 @@ async function uploadPhotosToStore(inputId,btn,progressId,onDone){
   const pngs=all.filter(f=>f.name.toLowerCase().endsWith('.png'));
   const skipped=all.length-pngs.length;
   if(!pngs.length){toast(all.length?'None of those were .png files — only .png is matched by the app':'Choose at least one photo first');return}
-  const origLabel=btn.textContent;
-  btn.disabled=true;
+  const restore=startBtnLoading(btn,'Uploading…');
   const prog=$(progressId||'photostore-upload-progress');prog.classList.remove('hide');
   let uploadedTotal=0,errorList=[];
   for(let i=0;i<pngs.length;i+=UPLOAD_BATCH_SIZE){
     const batch=pngs.slice(i,i+UPLOAD_BATCH_SIZE);
-    btn.textContent='Uploading '+Math.min(i+UPLOAD_BATCH_SIZE,pngs.length)+' / '+pngs.length+'…';
+    // Update the label next to the spinner directly rather than through
+    // startBtnLoading again — that would re-save "Uploading…" as the
+    // "original" label to restore to, instead of the real pre-upload
+    // label this loop needs to come back to when it's done.
+    btn.innerHTML='<span class=btn-spinner></span>'+escHtml('Uploading '+Math.min(i+UPLOAD_BATCH_SIZE,pngs.length)+' / '+pngs.length+'…');
     prog.textContent='Uploading '+Math.min(i+UPLOAD_BATCH_SIZE,pngs.length)+' of '+pngs.length+' photos'+(skipped?' ('+skipped+' non-.png file'+(skipped!==1?'s':'')+' skipped)':'');
     const fd=new FormData();
     batch.forEach(f=>fd.append('files',f,f.webkitRelativePath||f.name));
@@ -8409,7 +8444,7 @@ async function uploadPhotosToStore(inputId,btn,progressId,onDone){
     uploadedTotal+=(r.uploaded||[]).length;
     errorList=errorList.concat(r.errors||[]);
   }
-  btn.disabled=false;btn.textContent=origLabel;
+  restore();
   prog.classList.add('hide');
   input.value='';
   toast(uploadedTotal+' photo'+(uploadedTotal!==1?'s':'')+' uploaded'+(errorList.length?', '+errorList.length+' failed':'')+(skipped?' — '+skipped+' non-.png skipped':''));
@@ -8894,15 +8929,14 @@ let fcBuilding=false;
 async function buildFullCatalog(){
   if(fcBuilding)return;
   fcBuilding=true;
-  const btn=$('fc-buildbtn'),origText=btn.textContent;
-  btn.disabled=true;btn.textContent='Building… this can take up to a minute';
+  const restore=startBtnLoading('fc-buildbtn','Building… this can take up to a minute');
   try{
     const r=await fetch('/api/full-catalog/build',{method:'POST'}).then(r=>r.json());
     if(r.error){alert(r.error);return}
     renderFcLastBuild(r);
     toast('Catalogue built — '+r.total_pages+' pages')
   }finally{
-    fcBuilding=false;btn.disabled=false;btn.textContent=origText}}
+    fcBuilding=false;restore()}}
 function renderFcLastBuild(result){
   if(!result||!result.total_pages){$('fc-lastbuild-card').style.display='none';fcSetPreviewTotal(0);return}
   $('fc-lastbuild-card').style.display='';
@@ -14127,7 +14161,9 @@ async function generate(){
       if(!ok)return null;
       data.replace=existingRel}}
   toast('Generating…');
+  const restoreGenBtn=startBtnLoading('genbtn','Generating…');
   const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json());
+  restoreGenBtn();
   if(r.error){alert(r.error);return r}
   EDITING=r.xlsx||null;
   // a draft's job is done once it becomes a real generated document
@@ -14545,11 +14581,10 @@ async function downloadDocFromAllDocs(rel){
 // — both just hand a rel to the same backend route; this is the one that
 // actually calls it and gives feedback, so neither caller repeats itself.
 async function printDocFromAllDocs(rel,btn){
-  const orig=btn?btn.textContent:null;
-  if(btn){btn.disabled=true;btn.textContent='Printing…'}
+  const restore=btn?startBtnLoading(btn,'Printing…'):function(){};
   const r=await fetch('/api/print-document',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({rel})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-  if(btn){btn.disabled=false;btn.textContent=orig}
+  restore();
   toast(r.ok?'Sent to printer.':('Could not print: '+(r.error||'unknown error')))}
 // Top-bar Print button — see its own HTML comment. EDITING only ever
 // holds a real saved document's rel (openDoc()'s own comment: null for
@@ -14875,8 +14910,7 @@ async function loadClientsView(){
   refreshClientNamesDatalist();
   renderClientsGrid()}
 async function importClients(){
-  const btn=$('clientsimportbtn');
-  const orig=btn.textContent;btn.disabled=true;btn.textContent='Scanning documents…';
+  const restore=startBtnLoading('clientsimportbtn','Scanning documents…');
   try{
     const r=await fetch('/api/clients-import',{method:'POST'}).then(r=>r.json());
     CLIENT_RECORDS=r.clients||[];
@@ -14887,7 +14921,7 @@ async function importClients(){
     if(r.enriched)parts.push('filled in details for '+r.enriched);
     toast(parts.length?('Imported from documents: '+parts.join(', ')+'.')
                       :'Nothing new found — everything is already in your list.');
-  }finally{btn.disabled=false;btn.textContent=orig}}
+  }finally{restore()}}
 function clientInitial(name){return escHtml((name||'?').trim().charAt(0).toUpperCase())}
 function clientCardHtml(c){
   const logo=c.logo?'<img class=clientlogo src="'+c.logo+'">':'<div class="clientlogo ph">'+clientInitial(c.name)+'</div>';
@@ -15066,13 +15100,13 @@ async function scanNextPage(){
   if(SCANNOW_SCANNING)return;
   SCANNOW_SCANNING=true;
   const btn=$('scannow-scan-btn');
-  btn.disabled=true;btn.textContent='Scanning…';
+  const restore=startBtnLoading(btn,'Scanning…');
   $('scannow-status').textContent='Scanning — please wait…';
   const deviceSel=$('scannow-device');
   const device_id=deviceSel.options.length?deviceSel.value:undefined;
   const r=await fetch('/api/scanner-scan-page',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({session_id:SCANNOW_SESSION,device_id})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-  btn.disabled=false;btn.textContent='Scan Page';
+  restore();
   SCANNOW_SCANNING=false;
   if(!r.ok){$('scannow-status').textContent='Scan failed: '+(r.error||'unknown error');return}
   SCANNOW_SESSION=r.session_id;
@@ -15148,13 +15182,13 @@ async function scanToolNextPage(){
   if(SCANTOOL_SCANNING)return;
   SCANTOOL_SCANNING=true;
   const btn=$('scanner-scan-btn');
-  btn.disabled=true;btn.textContent='Scanning…';
+  const restore=startBtnLoading(btn,'Scanning…');
   $('scanner-status').textContent='Scanning — please wait…';
   const deviceSel=$('scanner-device');
   const device_id=deviceSel.options.length?deviceSel.value:undefined;
   const r=await fetch('/api/scanner-scan-page',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({session_id:SCANTOOL_SESSION,device_id})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-  btn.disabled=false;btn.textContent='Scan Page';
+  restore();
   SCANTOOL_SCANNING=false;
   if(!r.ok){$('scanner-status').textContent='Scan failed: '+(r.error||'unknown error');return}
   SCANTOOL_SESSION=r.session_id;
@@ -16183,14 +16217,14 @@ function updateAvatarBadge(){
 async function doLogin(ev){
   ev.preventDefault();
   const btn=$('login-submit'),err=$('login-error');
-  btn.disabled=true;btn.textContent='Signing in…';err.classList.add('hide');
+  const restore=startBtnLoading(btn,'Signing in…');err.classList.add('hide');
   try{
     const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:$('login-username').value,password:$('login-password').value,remember:$('login-remember').checked})}).then(r=>r.json());
-    if(!r.ok){err.textContent=r.error||'Sign in failed';err.classList.remove('hide');btn.disabled=false;btn.textContent='Sign In';return false}
+    if(!r.ok){err.textContent=r.error||'Sign in failed';err.classList.remove('hide');restore();return false}
     $('login-password').value='';
     applySession(r);$('loginoverlay').classList.add('hide');bootApp()
-  }catch(e){err.textContent='Could not reach the app — try again';err.classList.remove('hide');btn.disabled=false;btn.textContent='Sign In'}
+  }catch(e){err.textContent='Could not reach the app — try again';err.classList.remove('hide');restore()}
   return false}
 // Opens the user's REAL system browser (see google_oauth.py's own
 // docstring on why — Google blocks OAuth from any embedded webview,
@@ -16199,14 +16233,14 @@ async function doLogin(ev){
 // (see checkLogin()).
 async function loginWithGoogle(btn){
   const err=$('login-error');err.classList.add('hide');
-  const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Opening Google…';
+  const restore=startBtnLoading(btn,'Opening Google…');
   const start=await fetch('/api/oauth/google-start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({intent:'login'})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-  if(!start.ok){err.textContent=start.error||'Could not start Google sign-in';err.classList.remove('hide');btn.disabled=false;btn.textContent=origLabel;return}
-  btn.textContent='Waiting for Google…';
+  if(!start.ok){err.textContent=start.error||'Could not start Google sign-in';err.classList.remove('hide');restore();return}
+  btn.innerHTML='<span class=btn-spinner></span>Waiting for Google…';
   const poll=async()=>{
     const r=await fetch('/api/oauth/google-finish?state='+encodeURIComponent(start.state)).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
     if(r.pending){setTimeout(poll,1500);return}
-    btn.disabled=false;btn.textContent=origLabel;
+    restore();
     if(!r.ok){err.textContent=r.error||'Google sign-in failed';err.classList.remove('hide');return}
     applySession(r);$('loginoverlay').classList.add('hide');bootApp()};
   setTimeout(poll,1500)}
@@ -16272,33 +16306,32 @@ function renderGoogleAccountSection(){
   }}
 async function toggleGoogleAccount(btn){
   const note=$('profile-google-note');note.textContent='';
-  const origLabel=btn.textContent;
   if(CURRENT_GOOGLE_EMAIL){
     // Disconnect — no Google round trip needed, just clear the link.
-    btn.disabled=true;btn.textContent='Disconnecting…';
+    const restore=startBtnLoading(btn,'Disconnecting…');
     const r=await fetch('/api/oauth/google-link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({google_email:''})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-    btn.disabled=false;
-    if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not disconnect.';btn.textContent=origLabel;return}
+    if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not disconnect.';restore();return}
+    restore();
     CURRENT_GOOGLE_EMAIL='';renderGoogleAccountSection();
     note.style.color='var(--success)';note.textContent='Disconnected.';
     return}
   // Connect — same system-browser + poll flow as loginWithGoogle(), just
   // with intent="link" so google-finish attaches it to THIS session's
   // user instead of trying to log anyone in.
-  btn.disabled=true;btn.textContent='Opening Google…';
+  const restore=startBtnLoading(btn,'Opening Google…');
   const start=await fetch('/api/oauth/google-start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({intent:'link'})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-  if(!start.ok){note.style.color='var(--danger)';note.textContent=start.error||'Could not start Google sign-in';btn.disabled=false;btn.textContent=origLabel;return}
-  btn.textContent='Waiting for Google…';
+  if(!start.ok){note.style.color='var(--danger)';note.textContent=start.error||'Could not start Google sign-in';restore();return}
+  btn.innerHTML='<span class=btn-spinner></span>Waiting for Google…';
   const poll=async()=>{
     const r=await fetch('/api/oauth/google-finish?state='+encodeURIComponent(start.state)).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
     if(r.pending){setTimeout(poll,1500);return}
-    btn.disabled=false;
-    if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not connect Google account.';btn.textContent=origLabel;return}
+    if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not connect Google account.';restore();return}
+    restore();
     CURRENT_GOOGLE_EMAIL=r.email||'';renderGoogleAccountSection();
     note.style.color='var(--success)';note.textContent='Connected.'};
   setTimeout(poll,1500)}
 async function saveProfileInfo(btn){
-  const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Saving…';
+  const restore=startBtnLoading(btn,'Saving…');
   const values={};
   // Sequential, NOT Promise.all — accounts.save_user_setting() does its
   // own independent pull-freshest-copy-then-write-one-field round trip
@@ -16311,7 +16344,7 @@ async function saveProfileInfo(btn){
   for(const k of PROFILE_INFO_FIELDS){
     values[k]=$('profile-'+k).value.trim();
     results.push(await fetch('/api/user-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,value:values[k]})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message})))}
-  btn.disabled=false;btn.textContent=origLabel;
+  restore();
   const note=$('profile-info-note');
   const failed=results.find(r=>!r.ok);
   if(!failed){
@@ -16324,9 +16357,9 @@ async function changeOwnPassword(btn){
   const note=$('profile-password-note');note.style.color='var(--danger)';
   if(!current||!next){note.textContent='Fill in both password fields.';return}
   if(next!==confirm){note.textContent='New passwords don\'t match.';return}
-  const origLabel=btn.textContent;btn.disabled=true;btn.textContent='Updating…';
+  const restore=startBtnLoading(btn,'Updating…');
   const r=await fetch('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:current,new_password:next})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
-  btn.disabled=false;btn.textContent=origLabel;
+  restore();
   if(r.ok){
     note.style.color='var(--success)';note.textContent='Password updated.';
     $('profile-current-password').value='';$('profile-new-password').value='';$('profile-confirm-password').value=''
@@ -16450,9 +16483,9 @@ async function actuallyDeleteUser(username){
   if(!r.ok){toast(r.error||'Could not delete user');return}
   toast('Removed '+username+' — remember to Publish');loadUsersAdmin()}
 async function publishAccounts(btn){
-  btn.disabled=true;btn.textContent='Publishing…';
+  const restore=startBtnLoading(btn,'Publishing…');
   const r=await fetch('/api/accounts-publish',{method:'POST'}).then(r=>r.json());
-  btn.disabled=false;btn.textContent='Publish Changes to Cloud';
+  restore();
   $('users-publish-note').textContent=r.ok?'Published — other installs pick this up automatically the next time anyone logs in.':('Could not publish: '+(r.error||'unknown error'));
   toast(r.ok?'Published to GitHub':'Publish failed — see note below the button')}
 
