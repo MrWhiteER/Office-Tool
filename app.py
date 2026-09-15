@@ -1240,11 +1240,15 @@ def _upload_doc_meta(doc_path, key_suffix):
     """key_suffix is the SAME brand/doctype/filename key the document
     itself was uploaded under (see photo_store.upload_document) — the
     .meta.json rides alongside it as filename.meta.json instead of
-    filename.pdf, same pairing scheme as the local files."""
+    filename.pdf, same pairing scheme as the local files. Returns the
+    real upload outcome now (used by _backup_doc_to_cloud's own success
+    check, see its comment) — previously discarded, which silently
+    counted as "succeeded" even on a real failure."""
     meta_path = _doc_meta_path(doc_path)
-    if os.path.isfile(meta_path):
-        meta_key = os.path.splitext(key_suffix)[0] + ".meta.json"
-        photo_store.upload_document(meta_path, meta_key)
+    if not os.path.isfile(meta_path):
+        return True  # nothing to upload yet isn't a failure
+    meta_key = os.path.splitext(key_suffix)[0] + ".meta.json"
+    return photo_store.upload_document(meta_path, meta_key)
 
 # Cloud backup — every generated document (Quotation/Invoice/DO/Datasheet/
 # Expense Report) gets a copy pushed to the shared R2 bucket right after its
@@ -1269,6 +1273,24 @@ def _upload_doc_meta(doc_path, key_suffix):
 # down by any other install (unlike every document made through the normal
 # Generate button, which already went through this).
 def _backup_doc_to_cloud(pdf_path, xlsx_path, brand, doctype, generated_by):
+    """Returns True only if every file that needed uploading actually
+    made it — investigated directly after a real report ("the file...
+    edited by the user in All Docs...doesn't update in the Cloudflare as
+    well"): the call path here was already correct (this runs
+    unconditionally after every /api/generate, edit-and-replace included
+    — confirmed by reading api_generate) and a real end-to-end R2 write
+    test succeeded live, so this specific failure couldn't be reproduced.
+    But photo_store.upload_document() was already designed to silently
+    swallow EVERY failure and return False with zero signal anywhere
+    (deliberately, so a flaky connection never makes local Generate look
+    like it failed) — meaning if it ever DOES fail for real (a brief
+    network hiccup, R2 rate limit, momentary outage), that document
+    simply never syncs, forever, with no error, no retry, and no way for
+    the user to even know. That gap is real regardless of whether this
+    exact incident reproduces — returning a real success/fail signal here
+    is what lets the caller (_backup_doc_to_cloud_async below) queue a
+    retry instead of just discarding the outcome like it did before."""
+    ok = True
     main_path = pdf_path or xlsx_path
     if main_path:
         meta = _read_doc_meta(main_path)
@@ -1281,17 +1303,94 @@ def _backup_doc_to_cloud(pdf_path, xlsx_path, brand, doctype, generated_by):
         meta.setdefault("downloads", [])
         _write_doc_meta(main_path, meta)
     if pdf_path and os.path.isfile(pdf_path):
-        photo_store.upload_document(pdf_path, f"{brand}/{doctype}/{os.path.basename(pdf_path)}")
+        ok = photo_store.upload_document(pdf_path, f"{brand}/{doctype}/{os.path.basename(pdf_path)}") and ok
     if xlsx_path and os.path.isfile(xlsx_path):
-        photo_store.upload_document(xlsx_path, f"{brand}/{doctype}/{os.path.basename(xlsx_path)}")
+        ok = photo_store.upload_document(xlsx_path, f"{brand}/{doctype}/{os.path.basename(xlsx_path)}") and ok
     if main_path:
-        _upload_doc_meta(main_path, f"{brand}/{doctype}/{os.path.basename(main_path)}")
+        ok = _upload_doc_meta(main_path, f"{brand}/{doctype}/{os.path.basename(main_path)}") and ok
+    # The JSON SIDECAR — a real, separate bug found while investigating
+    # the report above, distinct from the retry-queue hardening: this is
+    # the actual editable source data engine.save_sidecar() writes next
+    # to the PDF (every field, photos, badges, ordering table — what
+    # openDoc()/populateCatForm() reads back to let a REAL edit happen at
+    # all, not the PDF or the .meta.json attribution stamp). It was never
+    # uploaded here at all — only the rendered PDF/xlsx output and the
+    # attribution stamp were. On the SAME machine that generated a
+    # document this went unnoticed (the sidecar's still sitting right
+    # there locally), but on any OTHER install — including this machine's
+    # own copy the next time cloud_documents\ needs rebuilding — the
+    # sidecar was never in the cloud for sync_down_documents to pull down
+    # in the first place, so reopening that document for editing there
+    # had no real saved data to load at all. Same brand/doctype/filename
+    # key as the PDF, just its own .json extension — sync_down_documents
+    # already pulls down every object under the prefix regardless of
+    # extension, so nothing needed changing on the download side.
+    if main_path:
+        sidecar_path = engine.sidecar_path(pdf_path or xlsx_path)
+        if os.path.isfile(sidecar_path):
+            ok = photo_store.upload_document(sidecar_path, f"{brand}/{doctype}/{os.path.basename(sidecar_path)}") and ok
+    return ok
+
+# Retry queue for a failed cloud backup — see _backup_doc_to_cloud's own
+# comment for why this exists. A plain local JSON file, same "small local
+# state, no database" shape as everything else this app persists outside
+# the cloud (config.json, drafts/*.json). Entries are de-duped by their
+# own pdf/xlsx path — a document regenerated again before its previous
+# failure has even retried shouldn't pile up duplicate queue entries for
+# the same file.
+PENDING_CLOUD_UPLOADS_FILE = os.path.join(engine.DATA_BASE, "_pending_cloud_uploads.json")
+
+def _load_pending_cloud_uploads():
+    try:
+        with open(PENDING_CLOUD_UPLOADS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_pending_cloud_uploads(items):
+    try:
+        with open(PENDING_CLOUD_UPLOADS_FILE, "w", encoding="utf-8") as f:
+            json.dump(items, f)
+    except Exception:
+        pass  # best-effort — worst case, this one failure isn't queued, same as before this feature existed
+
+def _queue_pending_cloud_upload(pdf_path, xlsx_path, brand, doctype, generated_by):
+    items = [it for it in _load_pending_cloud_uploads() if it.get("pdf") != pdf_path or it.get("xlsx") != xlsx_path]
+    items.append({"pdf": pdf_path, "xlsx": xlsx_path, "brand": brand, "doctype": doctype,
+                   "generated_by": generated_by, "queued_at": datetime.datetime.now().isoformat()})
+    _save_pending_cloud_uploads(items)
+
+def retry_pending_cloud_uploads():
+    """Called on a startup delay AND periodically (see the caller's own
+    loop) — best-effort re-attempt of every backup that failed last time.
+    A file deleted/moved since it was queued (replace= renamed it, or it
+    was removed) just quietly drops out of the queue rather than erroring
+    forever on a target that no longer exists."""
+    items = _load_pending_cloud_uploads()
+    if not items:
+        return
+    still_pending = []
+    for it in items:
+        pdf_path, xlsx_path = it.get("pdf"), it.get("xlsx")
+        if not (pdf_path and os.path.isfile(pdf_path)) and not (xlsx_path and os.path.isfile(xlsx_path)):
+            continue  # gone — nothing left to retry uploading
+        try:
+            ok = _backup_doc_to_cloud(pdf_path, xlsx_path, it.get("brand", ""), it.get("doctype", ""), it.get("generated_by", ""))
+        except Exception:
+            ok = False
+        if not ok:
+            still_pending.append(it)
+    _save_pending_cloud_uploads(still_pending)
 
 def _backup_doc_to_cloud_async(pdf_path, xlsx_path, brand, doctype, generated_by):
     """Fire-and-forget wrapper — the one every real call site should use
     (see _backup_doc_to_cloud's own comment for why this must never block
-    the request)."""
-    threading.Thread(target=_backup_doc_to_cloud, args=(pdf_path, xlsx_path, brand, doctype, generated_by), daemon=True).start()
+    the request). Queues a retry (see retry_pending_cloud_uploads) on
+    failure instead of the previous behavior of just losing that outcome."""
+    def _run():
+        if not _backup_doc_to_cloud(pdf_path, xlsx_path, brand, doctype, generated_by):
+            _queue_pending_cloud_upload(pdf_path, xlsx_path, brand, doctype, generated_by)
+    threading.Thread(target=_run, daemon=True).start()
 
 def all_doc_folders(brand=None):
     """Every distinct auto-managed document folder (INV/DO/QTN2/...) for a
@@ -16313,6 +16412,23 @@ def _documents_sync_loop():
             pass
         time.sleep(30)
 threading.Thread(target=_documents_sync_loop, daemon=True).start()
+
+# Retries whatever's left in the pending-cloud-upload queue (see
+# _backup_doc_to_cloud's own comment for the real report this exists
+# for) — an initial attempt right at startup catches anything that failed
+# while the app was closed last time (offline, R2 briefly down), then
+# every 60s while running. Longer than the 30s document PULL above on
+# purpose: this only ever has real work to do after an actual failure,
+# not on every normal tick, so there's no reason to poll it as
+# aggressively.
+def _pending_cloud_uploads_loop():
+    while True:
+        try:
+            retry_pending_cloud_uploads()
+        except Exception:
+            pass
+        time.sleep(60)
+threading.Thread(target=_pending_cloud_uploads_loop, daemon=True).start()
 
 # Shared client list (see _migrate_clients_to_cloud()'s own comment — fixes
 # "clients list is visible only to Artemis profile, it should be available

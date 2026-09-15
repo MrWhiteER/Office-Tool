@@ -70,3 +70,8 @@ last_update_install.log
 # WebView2's persistent cookie/session storage (see app.py's webview.start()
 # call) — runtime browser profile data, not source.
 webview_data/
+
+# Retry queue for a failed cloud document backup (see app.py's
+# _backup_doc_to_cloud/retry_pending_cloud_uploads) — local runtime state,
+# same category as config.json/drafts/ above, not source.
+_pending_cloud_uploads.json
