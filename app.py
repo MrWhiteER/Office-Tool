@@ -3207,6 +3207,26 @@ def api_photostore_fetch():
 # R2 object. See photo_store.get_zone()'s own comment for what this is for.
 _PHOTO_ZONE_SLOTS = ("main", "lifestyle", "diagram", "extra1", "extra2", "extra3")
 
+# Display names for the R2 folder a loose upload lands in — same names as
+# CAT_IMG_ZONE_NAME (page script), kept as its own backend copy for the
+# same allow-list reasoning as _PHOTO_ZONE_SLOTS above. Per explicit
+# request ("subfolders to understand where it was uploaded from and who
+# uploaded... MainProduct Photos, or application or others"): every loose
+# upload's key now encodes both WHERE (which zone) and WHO uploaded it,
+# purely for browsing the bucket directly in Cloudflare's dashboard — the
+# app itself always reads zone/uploader from photo_zones.json/
+# photo_attribution.json (see list_photos()), never by parsing the key's
+# folder path, so this is safe to change freely without touching any
+# actual app behavior.
+_PHOTO_ZONE_FOLDER_NAME = {
+    "main": "Main Product Photo",
+    "lifestyle": "Application Photo",
+    "diagram": "Bottom Right",
+    "extra1": "Top Left",
+    "extra2": "Top Right",
+    "extra3": "Bottom Left",
+}
+
 @app.post("/api/photostore-upload")
 def api_photostore_upload():
     """Accepts either loose files or a whole folder (the frontend sends
@@ -3241,7 +3261,9 @@ def api_photostore_upload():
             continue
         key = "/".join(parts)
         if "/" not in key:
-            key = photo_store.UPLOADED_PHOTOS_PREFIX + key
+            zone_folder = _PHOTO_ZONE_FOLDER_NAME.get(zone, "Other")
+            uploader_folder = (session.get("user", "") or "").replace("/", "_").strip() or "Unknown"
+            key = photo_store.UPLOADED_PHOTOS_PREFIX + zone_folder + "/" + uploader_folder + "/" + key
         tmp_path = os.path.join(engine.DATA_BASE, "_photostore_tmp_" + uuid.uuid4().hex + "_" + parts[-1])
         try:
             f.save(tmp_path)
