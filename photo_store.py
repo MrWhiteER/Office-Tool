@@ -71,6 +71,16 @@ HARD_LIMIT_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB — see module docstring
 # excludes this prefix so app bookkeeping never shows up as a "photo".
 SYSTEM_PREFIX = "system/"
 
+# Home for a single loose photo upload (no folder chosen by the browser —
+# only a webkitRelativePath FOLDER upload produces a "/" in f.filename,
+# see api_photostore_upload()'s own comment) — per explicit request
+# ("each file should be in its own category and folderised properly"), a
+# lone upload (e.g. a Datasheet zone's "Choose image…") no longer lands
+# bare at the bucket root next to "2. Index Pictures/"/"documents/"/
+# "system/". A real, intentional folder upload keeps its own structure
+# untouched — this only ever applies to a key with zero "/" in it.
+UPLOADED_PHOTOS_PREFIX = "Uploaded Photos/"
+
 # Image extensions actual photos can have — used by list_photos() below as
 # defense in depth alongside the SYSTEM_PREFIX/DOCUMENTS_PREFIX exclusions,
 # so any FUTURE top-level key prefix (another non-photo feature added later

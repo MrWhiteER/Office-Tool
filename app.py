@@ -3240,6 +3240,8 @@ def api_photostore_upload():
         if not parts:
             continue
         key = "/".join(parts)
+        if "/" not in key:
+            key = photo_store.UPLOADED_PHOTOS_PREFIX + key
         tmp_path = os.path.join(engine.DATA_BASE, "_photostore_tmp_" + uuid.uuid4().hex + "_" + parts[-1])
         try:
             f.save(tmp_path)
