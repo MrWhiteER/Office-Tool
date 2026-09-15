@@ -529,20 +529,22 @@
        actually protects the "fixed 6px gap" promise from the previous
        follow-up while still guaranteeing this alignment — see its own
        comment for how. -->
-  <!-- gap:48px -> 96px (doubled) -> 91.2px (5% less than that) — per
-       explicit request ("increese this gap, but dont touch the left
+  <!-- gap:48px -> 96px (doubled) -> 91.2px (-5%) -> 86.64px (-5% again) —
+       per explicit request ("increese this gap, but dont touch the left
        side, you can touch only the right side... increese it by double
-       of the current gap", then "you went too much, reduce it by 5%" —
-       5% of the doubled 96px, not of the original 48px). Flexbox gap
-       only ever adds space BETWEEN items, never before the first one —
-       LEFT (Main Product Photo/Application Photo) stays anchored at
-       exactly the same position regardless of this value; only RIGHT
-       (Technical Specifications etc.) shifts to make room for the gap,
-       which is exactly "touch only the right side." RIGHT is flex:1, so
-       it also gets correspondingly narrower (its own content already
-       reflows/shrinks to fit — see the badges/spec-list comments further
-       down), nothing else needed for that. -->
-  <div style="display:flex;gap:91.2px;margin-top:-23.7pt;">
+       of the current gap", then "you went too much, reduce it by 5%",
+       then "still the gap is too much, reduce the gap by 5%" — each 5%
+       taken off whatever the gap currently was, compounding, not off the
+       original 48px each time). Flexbox gap only ever adds space BETWEEN
+       items, never before the first one — LEFT (Main Product Photo/
+       Application Photo) stays anchored at exactly the same position
+       regardless of this value; only RIGHT (Technical Specifications
+       etc.) shifts to make room for the gap, which is exactly "touch
+       only the right side." RIGHT is flex:1, so it also gets
+       correspondingly narrower (its own content already reflows/shrinks
+       to fit — see the badges/spec-list comments further down), nothing
+       else needed for that. -->
+  <div style="display:flex;gap:86.64px;margin-top:-23.7pt;">
 
     <!-- LEFT: photo, description, lifestyle photo. Fixed 7.5cm wide, not
          flex:1 filling whatever's left of the row — per explicit request
