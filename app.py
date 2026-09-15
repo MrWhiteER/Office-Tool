@@ -4475,8 +4475,9 @@ def api_scanner_scan_page():
     data = request.json or {}
     scan_quality = load_cfg().get("print_prefs", {}).get("scan_quality")
     dpi = SCAN_QUALITY_DPI.get(scan_quality, SCAN_QUALITY_DPI["balanced"])
+    grayscale = SCAN_QUALITY_GRAYSCALE.get(scan_quality, False)
     try:
-        result = scanner.scan_one_page(device_id=data.get("device_id") or None, session_id=data.get("session_id"), dpi=dpi)
+        result = scanner.scan_one_page(device_id=data.get("device_id") or None, session_id=data.get("session_id"), dpi=dpi, grayscale=grayscale)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
@@ -4697,7 +4698,15 @@ def api_print_prefs_save():
 # fields whose meaning varies by driver/manufacturer — not something this
 # app can safely set the same way for an arbitrary installed printer); it
 # only controls the resolution of what WE send.
-PRINT_QUALITY_DPI = {"eco": 150, "balanced": 300, "quality": 600}
+#
+# Eco per explicit request ("the eco print and scan options should be
+# also fast to print and scan as possible") is tuned to genuinely be the
+# fastest option, not just "a bit lower than Balanced" — 100 (down from
+# an earlier 150) plus PRINT_QUALITY_GRAYSCALE below (grayscale halves
+# the color data rasterized AND blitted to the printer, a real speed win
+# independent of DPI). Balanced/Quality are unchanged.
+PRINT_QUALITY_DPI = {"eco": 100, "balanced": 300, "quality": 600}
+PRINT_QUALITY_GRAYSCALE = {"eco": True, "balanced": False, "quality": False}
 
 # Scan Quality (Settings > Printer & Scanner) — same idea as
 # PRINT_QUALITY_DPI above, per explicit request ("the scan option should
@@ -4709,8 +4718,13 @@ PRINT_QUALITY_DPI = {"eco": 150, "balanced": 300, "quality": 600}
 # something else. Document scans rarely benefit from going past 300 —
 # unlike printing there's no printer-native-DPI ceiling to cap against,
 # so "quality" stops at a sensible document-scan ceiling instead of
-# matching print's own 600.
-SCAN_QUALITY_DPI = {"eco": 150, "balanced": 200, "quality": 300}
+# matching print's own 600. Eco tuned the same way as print's own Eco —
+# see PRINT_QUALITY_DPI's comment — 100 DPI plus SCAN_QUALITY_GRAYSCALE
+# (most scanner drivers move noticeably faster in grayscale/B&W than
+# full color, independent of DPI: less data over USB per line, less for
+# the driver to process).
+SCAN_QUALITY_DPI = {"eco": 100, "balanced": 200, "quality": 300}
+SCAN_QUALITY_GRAYSCALE = {"eco": True, "balanced": False, "quality": False}
 
 def _print_pdf_native(pdf_path, printer_name, quality="balanced"):
     """Prints a PDF using ONLY Windows' own GDI printing API plus PyMuPDF
@@ -4736,12 +4750,15 @@ def _print_pdf_native(pdf_path, printer_name, quality="balanced"):
     TARGET PRINTER's own reported native DPI via GetDeviceCaps
     LOGPIXELSX/Y) — never higher than the printer can actually resolve
     (see PRINT_QUALITY_DPI's own comment), and never a blind guess either.
-    Scaled to fit the printable area (GetDeviceCaps HORZRES/VERTRES)
-    preserving aspect ratio and centered, rather than assumed to exactly
-    match the configured paper size — protects against a cut-off or
-    corner-shrunk page if a document's own page size and the printer's
-    current paper size ever disagree, without distorting either
-    dimension."""
+    Eco additionally rasterizes and blits in grayscale (see
+    PRINT_QUALITY_GRAYSCALE) — real, meaningful extra speed on top of the
+    lower DPI, not just DPI alone, per explicit request that Eco be
+    genuinely the fastest option. Scaled to fit the printable area
+    (GetDeviceCaps HORZRES/VERTRES) preserving aspect ratio and centered,
+    rather than assumed to exactly match the configured paper size —
+    protects against a cut-off or corner-shrunk page if a document's own
+    page size and the printer's current paper size ever disagree, without
+    distorting either dimension."""
     import fitz
     import win32ui
     import win32con
@@ -4755,16 +4772,23 @@ def _print_pdf_native(pdf_path, printer_name, quality="balanced"):
         native_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX) or 300
         native_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY) or 300
         target_dpi = PRINT_QUALITY_DPI.get(quality, PRINT_QUALITY_DPI["balanced"])
+        grayscale = PRINT_QUALITY_GRAYSCALE.get(quality, False)
         dpi_x = min(target_dpi, native_dpi_x)
         dpi_y = min(target_dpi, native_dpi_y)
         doc = fitz.open(pdf_path)
         try:
             hdc.StartDoc(os.path.basename(pdf_path))
             matrix = fitz.Matrix(dpi_x / 72.0, dpi_y / 72.0)
+            colorspace = fitz.csGRAY if grayscale else fitz.csRGB
             for page in doc:
                 hdc.StartPage()
-                pix = page.get_pixmap(matrix=matrix)
+                pix = page.get_pixmap(matrix=matrix, colorspace=colorspace)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
+                # GDI's blit below expects RGB either way — a grayscale
+                # PNG converts to RGB cheaply (each pixel just gets
+                # replicated across 3 channels), the real saving already
+                # happened at render time (1 byte/pixel through fitz
+                # instead of 3) and in what actually reaches the printer.
                 if img.mode != "RGB":
                     img = img.convert("RGB")
                 scale = min(printable_w / img.width, printable_h / img.height)
@@ -5751,6 +5775,22 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .updateoverlaycard .updateprogress-track{margin-top:16px}
 .updateoverlaycard .updateprogress-text{margin-top:10px}
 .updateoverlayhint{margin-top:10px;font-size:11px;color:var(--muted)}
+/* Compact update notification — see #update-notif's own HTML comment.
+   Fixed bottom-left, near its rail trigger, but NOT anchored to the
+   trigger's own rect the way the old rect-based openUpdateMenu() was —
+   a fixed corner position plus a hard width cap is what actually keeps
+   this "nice and compact" regardless of how long the release notes are. */
+.updatenotif{position:fixed;left:16px;bottom:16px;z-index:190;width:280px;max-width:calc(100vw - 32px);background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-lg);padding:12px 14px 12px;display:none;animation:brandOpen .18s cubic-bezier(.24,.9,.32,1.2)}
+.updatenotif.show{display:block}
+.updatenotifclose{position:absolute;top:7px;right:7px;width:19px;height:19px;border:none;background:transparent;color:var(--muted);font-size:11px;line-height:1;cursor:pointer;border-radius:50%;display:flex;align-items:center;justify-content:center;padding:0}
+.updatenotifclose:hover{background:var(--tint);color:var(--ink)}
+.updatenotifhead{display:flex;align-items:center;gap:6px;padding-right:18px}
+.updatenotifdot{width:6px;height:6px;border-radius:50%;background:var(--amber);flex-shrink:0;box-shadow:0 0 0 3px rgba(226,149,44,.18)}
+.updatenotiftitle{font-size:11.5px;font-weight:700}
+.updatenotifver{font-size:11px;color:var(--muted);margin:3px 0 8px}
+.updatenotifnotes{font-size:11px;color:var(--ink);line-height:1.4;margin:0 0 9px}
+.updatenotifnotes a{color:var(--amber2);cursor:pointer;font-weight:600;text-decoration:none}
+.updatenotifnotes a:hover{text-decoration:underline}
 .clientmodalbox{background:var(--glass-bg);border-radius:var(--r-lg);width:100%;max-width:460px;max-height:88vh;overflow:auto;box-shadow:var(--shadow-xl);animation:brandOpen .2s cubic-bezier(.24,.9,.32,1.24)}
 /* Sticky, not static — per explicit report (a screenshot: scrolled deep
    into a long cloud photo grid, the header/Close button had scrolled
@@ -5798,8 +5838,6 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .toast.show{opacity:1}
 .updatedot{position:absolute;top:-2px;right:-3px;width:8px;height:8px;border-radius:50%;background:#e0464f;box-shadow:0 0 0 2px var(--brand-dark);animation:updatePulse 1.8s ease-in-out infinite}
 @keyframes updatePulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:.7}}
-.fmupdatever{font-size:12px;color:var(--muted);padding:0 12px 6px}
-.fmupdatenotes{font-size:12px;color:var(--ink);padding:0 12px 10px;max-height:140px;overflow-y:auto;white-space:pre-wrap;line-height:1.4}
 /* Same launch-banner artwork as the splash screen (--splash-banner, see
    its own definition further down), but glossy/blurred behind the login
    card instead of shown crisp full-screen. The blur/tint/sheen all live
@@ -5991,10 +6029,13 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    <button class=nav id=n-settings onclick="view('settings')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=3 /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg><span class=navlabel>Settings</span></button>
    <!-- Hidden until checkForAppUpdate() (called on launch, then every few
         hours) finds a newer GitHub release than APP_VERSION — see
-        update_checker.py. Click opens the shared #filemenu popover with
+        update_checker.py. Click opens #update-notif, a small fixed-
+        position notification card (own element, not the generic
+        #filemenu popover — that one sizes to content with no cap, which
+        is what made this balloon to nearly full window width) with
         version/notes and an install button (same double-click-to-confirm
         pattern used elsewhere in this app — see installUpdate()). -->
-   <button class="nav hide" id=n-update onclick="openUpdateMenu(this.getBoundingClientRect())" title="An update is available">
+   <button class="nav hide" id=n-update onclick="openUpdateMenu()" title="An update is available">
      <span style="position:relative;display:inline-flex">
        <svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M21 12a9 9 0 1 1-3.02-6.74"/><path d="M21 3v6h-6"/></svg>
        <span class=updatedot></span>
@@ -6944,7 +6985,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
            genuinely faster/less data to the printer, not just a label. -->
       <div class=f style="margin-top:10px"><label>Print quality</label>
         <div class=seg id=set-print-quality-seg>
-          <button type=button data-q=eco onclick="setPrintQuality('eco')" title="Fastest, lowest detail — good for internal drafts">Eco</button>
+          <button type=button data-q=eco onclick="setPrintQuality('eco')" title="Fastest — lower resolution, grayscale — good for internal drafts">Eco</button>
           <button type=button data-q=balanced onclick="setPrintQuality('balanced')" title="The default — a good match for most printers and documents">Balanced</button>
           <button type=button data-q=quality onclick="setPrintQuality('quality')" title="Sharpest detail, slower — best for client-facing documents">Quality</button>
         </div>
@@ -6961,7 +7002,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
            driver (see app.py's SCAN_QUALITY_DPI). -->
       <div class=f style="margin-top:10px"><label>Scan quality</label>
         <div class=seg id=set-scan-quality-seg>
-          <button type=button data-q=eco onclick="setScanQuality('eco')" title="Fastest, lowest detail — good for quick internal records">Eco</button>
+          <button type=button data-q=eco onclick="setScanQuality('eco')" title="Fastest — lower resolution, grayscale — good for quick internal records">Eco</button>
           <button type=button data-q=balanced onclick="setScanQuality('balanced')" title="The default — a good match for most documents">Balanced</button>
           <button type=button data-q=quality onclick="setScanQuality('quality')" title="Sharpest detail, slower, larger file — best for client-facing scans">Quality</button>
         </div>
@@ -7254,6 +7295,21 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div id=update-overlay-text class=updateprogress-text>Starting…</div>
     <div class=updateoverlayhint>Please don't close the app — it will come back on its own.</div>
   </div>
+</div>
+<!-- Compact update notification — per explicit request ("fix this update
+     window, make it so it will be nice and compact, and also let it be
+     like a notification window"). Own small fixed-width card (not the
+     generic #filemenu popover, which sizes to content with no cap — that
+     was what let it balloon to nearly the full window width). Notes are
+     truncated short; "Read more" opens the full Update Center modal
+     (already shows the complete notes, scrollable) instead of growing
+     this card to fit — see openUpdateMenu()/renderUpdateMenu(). -->
+<div class=updatenotif id=update-notif>
+  <button type=button class=updatenotifclose onclick="closeUpdateNotif()" title="Dismiss">✕</button>
+  <div class=updatenotifhead><span class=updatenotifdot></span><span class=updatenotiftitle>Update available</span></div>
+  <div class=updatenotifver id=update-notif-ver></div>
+  <div class="updatenotifnotes hide" id=update-notif-notes></div>
+  <button type=button class="btn dark" id=update-notif-btn style="width:100%" onclick="event.stopPropagation();installUpdate(this)">Install &amp; Restart</button>
 </div>
 <div class=toast id=toast></div>
 <div class=hoverprev id=hoverprev></div>
@@ -7726,26 +7782,35 @@ async function checkForAppUpdate(manual){
       const fakeBtn=document.createElement('button');fakeBtn.dataset.confirm='1';
       actuallyInstallUpdate(fakeBtn)}
   }catch(e){/* offline or GitHub unreachable — silently skip, try again later */}}
-function openUpdateMenu(rect){
+function openUpdateMenu(){
   if(!UPDATE_INFO)return;
-  const menu=$('filemenu');
   renderUpdateMenu();
-  menu.style.display='block';
-  const r=rect||{left:0,bottom:0};
-  const w=menu.offsetWidth||260,h=menu.offsetHeight||160;
-  let x=r.left,y=r.bottom+4;
-  if(x+w>window.innerWidth-8)x=window.innerWidth-w-8;
-  if(y+h>window.innerHeight-8)y=r.top-h-4;
-  menu.style.left=x+'px';menu.style.top=y+'px';
-  setTimeout(()=>document.addEventListener('click',closeFileMenu,{once:true}),0)}
+  $('update-notif').classList.add('show')}
+function closeUpdateNotif(){$('update-notif').classList.remove('show')}
+// Opens the full Update Center modal (already shows the complete notes,
+// scrollable) instead of growing this compact card to fit — per explicit
+// request ("let the explanation text be short... an option to read all,
+// and that will take him to the update window where he can read fully").
+function readFullUpdateNotes(){closeUpdateNotif();openUpdateCenter()}
+const UPDATE_NOTIF_NOTES_MAXLEN=90;
 function renderUpdateMenu(){
   const u=UPDATE_INFO;if(!u)return;
-  $('filemenu').innerHTML=
-    '<div class=fmtitle>Update available</div>'+
-    '<div class=fmupdatever>v'+escHtml(u.current)+' → <b>v'+escHtml(u.latest)+'</b></div>'+
-    (u.notes?'<div class=fmupdatenotes>'+escHtml(u.notes)+'</div>':'')+
-    '<button type=button class=btn style="width:100%;margin:2px 12px 8px;width:calc(100% - 24px)" '+
-      'onclick="event.stopPropagation();installUpdate(this)">Install &amp; Restart</button>'}
+  $('update-notif-ver').innerHTML='v'+escHtml(u.current)+' → <b>v'+escHtml(u.latest)+'</b>';
+  const notesEl=$('update-notif-notes');
+  if(u.notes){
+    notesEl.classList.remove('hide');
+    const notes=u.notes.trim();
+    if(notes.length>UPDATE_NOTIF_NOTES_MAXLEN){
+      // Cut at the last whole word inside the limit rather than mid-word.
+      let cut=notes.slice(0,UPDATE_NOTIF_NOTES_MAXLEN);
+      cut=cut.slice(0,Math.max(cut.lastIndexOf(' '),1));
+      notesEl.innerHTML=escHtml(cut)+'… <a onclick="readFullUpdateNotes()">Read more</a>'
+    }else{
+      notesEl.textContent=notes
+    }
+  }else{
+    notesEl.classList.add('hide');notesEl.innerHTML=''
+  }}
 // Same click-to-arm-then-confirm pattern as deleteManageListItem() —
 // window.confirm() silently no-ops in this environment (pywebview/WebView2).
 function installUpdate(btn){

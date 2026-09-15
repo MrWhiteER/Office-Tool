@@ -67,6 +67,13 @@ photo_cache/
 unins*.dat
 last_update_install.log
 
+# The in-app update system's own cache + log (see update_checker.py's
+# UPDATE_CACHE_DIR and _swap_and_relaunch) — same reasoning as
+# last_update_install.log above, just the newer no-external-installer
+# path instead of the old Inno Setup one.
+update_cache/
+last_inapp_update.log
+
 # WebView2's persistent cookie/session storage (see app.py's webview.start()
 # call) — runtime browser profile data, not source.
 webview_data/
