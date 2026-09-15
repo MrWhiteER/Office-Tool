@@ -73,16 +73,38 @@
 #define MyAppRepo "MrWhiteER/Office-Tool"
 #define MyPayloadUrl "https://github.com/" + MyAppRepo + "/releases/download/v" + MyAppVersion + "/OfficeTool-Payload.zip"
 
+; TESTING ONLY — real, hard-learned lesson (see
+; feedback_installer_test_isolation.md): /DIR= alone is NOT isolation for
+; a live test run on a machine that already has the real app installed.
+; Inno's [Icons]/uninstall-registry writes are keyed by AppId, not by
+; install path, so a same-AppId test run overwrites the REAL Desktop/
+; Start Menu shortcuts and the real Apps&Features entry no matter what
+; /DIR= says. Pass /DTestBuild=1 on the ISCC command line (never from
+; build.bat/GUPDATE — only for a live manual test) to compile under a
+; completely different AppId + app name instead, so Inno treats it as an
+; unrelated program that can never collide with the real install.
+#ifdef TestBuild
+  #define MyAppIdGuid "{{4C6E9A5E-6B2B-4B9E-9C7A-8E7B1E7F2A99}"
+  #define MyAppDisplayName "Office Tool (TEST BUILD)"
+#else
+  ; Kept the SAME GUID from before the rename — renaming the product does
+  ; not need a new AppId, and changing it would break update-in-place for
+  ; anyone who already installed under the old name.
+  #define MyAppIdGuid "{{4C6E9A5E-6B2B-4B9E-9C7A-8E7B1E7F2A11}"
+  #define MyAppDisplayName MyAppName
+#endif
+
 [Setup]
-; Kept the SAME GUID from before this rename — renaming the product does
-; not need a new AppId, and changing it would break update-in-place for
-; anyone who already installed under the old name.
-AppId={{4C6E9A5E-6B2B-4B9E-9C7A-8E7B1E7F2A11}
-AppName={#MyAppName}
+AppId={#MyAppIdGuid}
+AppName={#MyAppDisplayName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\Programs\OfficeTool
-DefaultGroupName={#MyAppName}
+#ifdef TestBuild
+  DefaultDirName={localappdata}\Programs\OfficeToolTestBuild
+#else
+  DefaultDirName={localappdata}\Programs\OfficeTool
+#endif
+DefaultGroupName={#MyAppDisplayName}
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 OutputDir=installer_output
@@ -105,9 +127,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &Desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{group}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\Uninstall {#MyAppDisplayName}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [UninstallDelete]
 ; The [Code] section below places these via a download+extract, not a
@@ -199,18 +221,51 @@ end;
 // Page.SetProgress/SetText as real bytes arrive — see this section's own
 // top comment for why this shells out to PowerShell/.NET rather than
 // calling WinINet directly.
+//
+// RESUMABLE — per explicit request: "in case of the crash of the
+// software mid update... it should always check if the software was
+// successfully updated or not, if not... don't delete the update files
+// which were downloaded... let the installation retry again." LocalPath
+// is now a PERSISTENT, version-named location (see
+// GetUpdateCacheZipPath below), not Inno's own auto-cleaned {tmp} — and
+// whatever's already sitting there when this runs is resumed via an
+// HTTP Range request, not silently discarded and restarted from 0.
+// Three real server-response cases, all handled: 206 Partial Content
+// (resume honored — appends past the existing bytes, and reads the true
+// full size back out of the Content-Range response header, since a
+// partial response's own Content-Length is only the REMAINING bytes,
+// not the whole file); plain 200 OK (server ignored the Range request —
+// falls back to a full fresh download, truncating whatever partial file
+// was already there so old and new bytes can never end up concatenated
+// into a corrupt file); 416 Range Not Satisfiable (the local file is
+// already the complete size from a previous run that crashed AFTER
+// finishing the download but before finishing install — reports DONE
+// immediately with zero network activity, straight to extraction).
 function DownloadFileWithProgress(Url, LocalPath: String; Page: TOutputProgressWizardPage): Boolean;
 var
   ScriptPath, ProgressPath, PSScript, Status: String;
   Line: AnsiString;
   ResultCode: Integer;
-  LastDownloaded, StalledMs, Downloaded, TotalSize: Int64;
+  LastDownloaded, StalledMs, Downloaded, TotalSize, StartOffset: Int64;
   Finished: Boolean;
+  FindRec: TFindRec;
 begin
   Result := False;
   ScriptPath := ExpandConstant('{tmp}\OfficeToolDownload.ps1');
   ProgressPath := ExpandConstant('{tmp}\OfficeToolDownload.progress');
   DeleteFile(ProgressPath);
+
+  // TFindRec.Size (Int64), not a dedicated file-size function — Inno's
+  // own RTL doesn't have one under the name a person would guess first;
+  // FindFirst/TFindRec is the real, documented way to get a file's size
+  // in Pascal Script.
+  StartOffset := 0;
+  if FindFirst(LocalPath, FindRec) then begin
+    StartOffset := FindRec.SizeHigh shl 32 + FindRec.SizeLow;
+    FindClose(FindRec);
+  end;
+  if StartOffset > 0 then
+    Log('DownloadFileWithProgress: found ' + IntToStr(StartOffset) + ' bytes already at ' + LocalPath + ' — attempting to resume');
 
   // ASCII, not UTF8/Unicode, on every Set-Content below — keeps the
   // progress file trivially readable back in Pascal Script via
@@ -220,15 +275,32 @@ begin
   PSScript :=
     '$ErrorActionPreference=''Stop''; $ProgressPreference=''SilentlyContinue''; ' +
     '[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ' +
-    '$prog=' + '''' + ProgressPath + '''' + '; ' +
+    '$prog=' + '''' + ProgressPath + '''' + '; $dest=' + '''' + LocalPath + '''' + '; $startOffset=' + IntToStr(StartOffset) + ';' + #13#10 +
     'try {' + #13#10 +
     '  $req=[Net.HttpWebRequest]::Create(' + '''' + Url + '''' + ');' + #13#10 +
     '  $req.UserAgent=''OfficeTool-Setup/1.0''; $req.AllowAutoRedirect=$true;' + #13#10 +
-    '  $resp=$req.GetResponse();' + #13#10 +
-    '  $total=$resp.ContentLength;' + #13#10 +
+    '  if($startOffset -gt 0){$req.AddRange($startOffset)}' + #13#10 +
+    '  try {' + #13#10 +
+    '    $resp=$req.GetResponse();' + #13#10 +
+    '  } catch [Net.WebException] {' + #13#10 +
+    '    if($_.Exception.Response -and ([int]$_.Exception.Response.StatusCode -eq 416)){' + #13#10 +
+    '      Set-Content -Path $prog -Value "DONE:$startOffset" -NoNewline -Encoding ASCII; exit 0' + #13#10 +
+    '    }' + #13#10 +
+    '    throw' + #13#10 +
+    '  }' + #13#10 +
+    '  $isPartial=([int]$resp.StatusCode -eq 206);' + #13#10 +
+    '  if($isPartial){' + #13#10 +
+    '    $cr=$resp.Headers["Content-Range"];' + #13#10 +
+    '    if($cr -match ''/(\d+)$''){$total=[int64]$matches[1]}else{$total=$startOffset+$resp.ContentLength}' + #13#10 +
+    '    $downloaded=$startOffset;' + #13#10 +
+    '    $fileStream=[IO.File]::Open($dest,[IO.FileMode]::Append,[IO.FileAccess]::Write);' + #13#10 +
+    '  } else {' + #13#10 +
+    '    $total=$resp.ContentLength; $downloaded=0;' + #13#10 +
+    '    $fileStream=[IO.File]::Create($dest);' + #13#10 +
+    '  }' + #13#10 +
     '  $stream=$resp.GetResponseStream();' + #13#10 +
-    '  $fileStream=[IO.File]::Create(' + '''' + LocalPath + '''' + ');' + #13#10 +
-    '  $buffer=New-Object byte[] 65536; $downloaded=0; $last=Get-Date;' + #13#10 +
+    '  $buffer=New-Object byte[] 65536; $last=Get-Date;' + #13#10 +
+    '  Set-Content -Path $prog -Value "PROGRESS:$downloaded`:$total" -NoNewline -Encoding ASCII' + #13#10 +
     '  while(($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0){' + #13#10 +
     '    $fileStream.Write($buffer,0,$read); $downloaded+=$read;' + #13#10 +
     '    $now=Get-Date;' + #13#10 +
@@ -318,6 +390,21 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
+// A PERSISTENT (not Inno's own auto-cleaned {tmp}), version-named cache
+// location for the payload zip — per explicit request, so a crash mid-
+// update never throws away download progress. Versioned filename: a
+// half-downloaded v1.1.58 zip sitting here must never be mistaken for
+// (or block downloading) a genuinely different v1.1.59 payload the next
+// time Setup runs for a newer release.
+function GetUpdateCacheZipPath(): String;
+begin
+#ifdef TestBuild
+  Result := ExpandConstant('{localappdata}\OfficeToolUpdateCacheTestBuild\OfficeTool-Payload-v{#MyAppVersion}.zip');
+#else
+  Result := ExpandConstant('{localappdata}\OfficeToolUpdateCache\OfficeTool-Payload-v{#MyAppVersion}.zip');
+#endif
+end;
+
 // Downloads OfficeTool-Payload.zip from this exact release (the URL is
 // fully known at compile time — MyAppVersion is baked in via build.bat's
 // /DMyAppVersion, so there's never a version mismatch between this
@@ -328,7 +415,8 @@ function DownloadAndExtractPayload(Page: TOutputProgressWizardPage): Boolean;
 var
   ZipPath: String;
 begin
-  ZipPath := ExpandConstant('{tmp}\OfficeTool-Payload.zip');
+  ZipPath := GetUpdateCacheZipPath();
+  ForceDirectories(ExtractFileDir(ZipPath));
   Page.SetText('Downloading Office Tool…', 'Connecting…');
   Result := DownloadFileWithProgress('{#MyPayloadUrl}', ZipPath, Page);
   if Result then
@@ -336,7 +424,6 @@ begin
     Page.SetText('Installing Office Tool…', 'Extracting application files…');
     Result := ExtractPayload(ZipPath);
   end;
-  DeleteFile(ZipPath);
   // Belt-and-braces: even a reported success is only trusted once the
   // one file every later step actually needs is confirmed to really be
   // sitting there — a partial/corrupt extract (a truncated download
@@ -345,6 +432,15 @@ begin
   // open" with no obvious cause.
   if Result then
     Result := FileExists(ExpandConstant('{app}\{#MyAppExeName}'));
+  // Only clean up the cached zip once it's ACTUALLY confirmed no longer
+  // needed — on any failure (this attempt or an earlier one that
+  // crashed outright) it stays right where it is, so the very next
+  // attempt — this same run's own retry loop, or a completely fresh
+  // launch of Setup after a real crash — resumes instead of
+  // re-downloading from zero. See DownloadFileWithProgress's own
+  // comment for how a partial file left here gets resumed.
+  if Result then
+    DeleteFile(ZipPath);
 end;
 
 // Real, live testing surfaced a genuine reliability finding, not a bug in
