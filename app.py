@@ -5248,6 +5248,22 @@ PAGE = r"""<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
    the final snap into place animate instead of just jumping. */
 .rail-resizer.active{transition:none}
 .rail.dragging{transition:none}
+/* The two lines above were the FIRST fix for this (v1.1.52) but missed
+   the labels themselves — .navlabel/.brandswitchlabel each carry their
+   OWN separate transition (see their own rules below), inherited from
+   whichever state rule currently matches (:hover included, which stays
+   true for most of a rightward drag since the cursor tracks right along
+   with the resizer handle). initRailResizer()'s apply() sets their
+   max-width/opacity directly on every mousemove intending instant 1:1
+   tracking (see that function's own comment) — without this, THEIR
+   transition still fights it exactly the same way .rail's own width
+   transition used to, so the container snaps to its new size instantly
+   while the text inside is still catching up/fading — real, reported
+   misalignment during an active drag specifically ("when the user drags
+   the bar to make it bigger and holds it with the mouse, not letting it
+   go"), self-correcting on release once .manualpin settles it. Fixed the
+   same way as the container: switched off for the duration. */
+.rail.dragging .navlabel,.rail.dragging .brandswitchlabel{transition:none}
 .rail::-webkit-scrollbar{width:6px}
 .rail::-webkit-scrollbar-track{background:transparent}
 .rail::-webkit-scrollbar-thumb{background:rgba(255,255,255,.22);border-radius:3px}
