@@ -2967,7 +2967,11 @@ def api_apply_update():
     # UPDATE_CACHE_DIR) so a failed attempt doesn't cost another 80MB+
     # download next time — optional/backward-compatible, an older
     # frontend that doesn't send it just always downloads fresh.
-    update_checker.start_inapp_update_async(url, target_version=data.get("target_version"))
+    # on_before_exit=_stop_tray_icon: see that function's own comment —
+    # without this, every update orphaned a stale tray icon that Windows
+    # never cleaned up (the real cause of "sometime there are 2 softwares
+    # in this trail, some time even more").
+    update_checker.start_inapp_update_async(url, target_version=data.get("target_version"), on_before_exit=_stop_tray_icon)
     return jsonify({"ok": True})
 
 @app.get("/api/apply-update-progress")
@@ -16676,6 +16680,35 @@ def _clients_sync_loop():
             pass
 threading.Thread(target=_clients_sync_loop, daemon=True).start()
 
+# Set once _run_tray() below actually creates the tray icon — lets code
+# OUTSIDE that closure (update_checker.py's in-app update, a different
+# module entirely) still gracefully tear the icon down before this
+# process exits. See _stop_tray_icon()'s own comment for why this exists.
+_TRAY_ICON = None
+
+def _stop_tray_icon():
+    """
+    Per explicit report ("sometime there are 2 softwares in this trail,
+    some time even more") — every in-app update calls os._exit(0)
+    directly (update_checker.py's start_inapp_update_async), which never
+    gives pystray a chance to send the Shell_NotifyIcon(NIM_DELETE) that
+    actually removes its icon from the notification area. The tray
+    menu's own Restart/Exit handlers already call icon.stop() first and
+    never had this problem — this is the missing equivalent for the
+    UPDATE exit path specifically, which lives in a different module and
+    has no direct reference to the tray object otherwise. Without this,
+    Windows leaves a stale, disconnected icon sitting in the tray (it
+    only disappears once something — usually the user hovering over it —
+    makes Explorer notice the owning process is gone) — one extra
+    orphaned icon per update, exactly matching "sometimes even more."
+    Best-effort: never let a teardown failure block the actual exit.
+    """
+    if _TRAY_ICON is not None:
+        try:
+            _TRAY_ICON.stop()
+        except Exception:
+            pass
+
 if __name__ == "__main__":
     # Single instance only — per explicit request: "if the software is
     # already open, don't let another one launch". A named Windows mutex
@@ -17126,6 +17159,8 @@ if __name__ == "__main__":
                 pystray.MenuItem("Exit", _exit_app),
             )
             tray = pystray.Icon("OfficeTool", icon_img, "Office Tool", menu)
+            global _TRAY_ICON
+            _TRAY_ICON = tray
             tray.run()
 
         threading.Thread(target=_run_tray, daemon=True).start()

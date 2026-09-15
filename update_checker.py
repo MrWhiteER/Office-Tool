@@ -582,7 +582,7 @@ def get_progress():
     return dict(_PROGRESS)
 
 
-def start_inapp_update_async(download_url, target_version=None):
+def start_inapp_update_async(download_url, target_version=None, on_before_exit=None):
     """
     Kicks off download_and_stage_payload() + _swap_and_relaunch() on a
     background thread and returns immediately, so the calling HTTP
@@ -594,6 +594,20 @@ def start_inapp_update_async(download_url, target_version=None):
     well") this never launches Inno Setup at all — see
     download_and_stage_payload()/_swap_and_relaunch() above for the
     actual mechanism.
+
+    on_before_exit: optional zero-arg callback run right before
+    os._exit(0) — per explicit report ("sometime there are 2 softwares in
+    this trail, some time even more"): this module has no reference to
+    app.py's own tray icon object (a different module entirely), so
+    os._exit(0) here used to skip pystray's own icon.stop() call
+    entirely, meaning Windows never got the Shell_NotifyIcon(NIM_DELETE)
+    that actually removes the icon from the notification area — it just
+    sits there orphaned until something makes Explorer notice the owning
+    process is gone. app.py passes its own _stop_tray_icon() here so this
+    module can trigger that teardown without needing to import app.py
+    itself (which would be circular — app.py is what imports THIS
+    module). Best-effort: any failure here must never block the actual
+    exit, same reasoning as _stop_tray_icon()'s own try/except.
     """
     _PROGRESS.update(status="downloading", done=0, total=0, error=None)
 
@@ -611,6 +625,11 @@ def start_inapp_update_async(download_url, target_version=None):
             # message) before this process actually disappears — same
             # grace-period rationale as the old start_update_async().
             time.sleep(1.5)
+            if on_before_exit:
+                try:
+                    on_before_exit()
+                except Exception:
+                    pass
             os._exit(0)
         except Exception as e:
             _PROGRESS["status"] = "error"
