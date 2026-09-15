@@ -8014,7 +8014,23 @@ function renderUpdateCenter(){
     installBtn.dataset.confirm='';installBtn.disabled=false;installBtn.textContent='Install & Restart';
     if(u.notes){notes.textContent=u.notes;notes.classList.remove('hide')}else notes.classList.add('hide')
   }else{
-    $('uc-status').textContent=u.error?'Could not check for updates.':"You're on the latest version.";
+    // "Could not check" used to cover BOTH "genuinely up to date" and
+    // "the check itself failed" with the same vague line — per explicit
+    // request ("more smart, so when the user clicks it will show that
+    // its on the latest update"), a rate-limited check now says so
+    // specifically (GitHub's public API is capped at 60/hour per office
+    // IP — see check_for_update()'s own comment — a real, temporary,
+    // self-resolving condition, not a broken app) instead of reading
+    // like something's wrong, and any other real failure still says so
+    // rather than silently claiming "latest" when that was never
+    // actually confirmed.
+    if(!u.error){
+      $('uc-status').textContent="You're on the latest version."
+    }else if(/rate limit/i.test(u.error)){
+      $('uc-status').textContent='GitHub limits how often this can check — try again in a few minutes.'
+    }else{
+      $('uc-status').textContent='Could not check for updates right now.'
+    }
     installBtn.classList.add('hide');notes.classList.add('hide')}}
 async function saveUpdatePrefs(){
   UPDATE_PREFS={check_on_start:$('uc-check-on-start').checked,auto_update:$('uc-auto-update').checked};
