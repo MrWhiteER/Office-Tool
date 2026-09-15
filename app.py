@@ -10830,17 +10830,17 @@ function openZoneSettings(slot,btn){
 // (too-square) guide shape, showed meaningfully MORE of a mismatched-aspect
 // photo filling the frame than the real page (the true, more elongated
 // 280:106 shape) then actually renders — not a pan/zoom bug, a stale
-// cropping-guide constant. main/lifestyle aren't touched here — those two
-// use a real CSS aspect-ratio (1/0.85, 16/9) directly on their own template
-// element, confirmed exact via the same measurement, so they were never
-// approximations to begin with. main was a plain 1/1 square until an
-// explicit request to shorten that box (the empty placeholder AND the
-// real photo frame — one element, both states) by 15%, anchored from the
-// top — sololuce_datasheet.html's own Main Product Photo box carries the
-// identical 1/0.85 ratio, so this modal's drag/zoom/mask preview always
-// matches what the real PDF renders; keep these two in sync if that box
-// ever changes shape again.
-const CAT_IMG_ASPECT={main:1/0.85,lifestyle:16/9,diagram:280/106,extra1:280/106,extra2:280/106,extra3:280/106};
+// cropping-guide constant. lifestyle isn't touched here — it uses a real
+// CSS aspect-ratio (16/9) directly on its own template element, confirmed
+// exact via the same measurement, so it was never an approximation to
+// begin with. main went 1/1 square -> 1/0.85 (a 15% shorter box) -> back
+// to a plain 1/1 square per a later explicit request that it instead be
+// a fixed physical 7.5cm x 7.5cm — a literal cm size has no "shape" of
+// its own to approximate, but 7.5cm:7.5cm IS still exactly 1:1, so this
+// modal's drag/zoom/mask preview keeps matching sololuce_datasheet.html's
+// real Main Product Photo box; keep these two in sync if that box's
+// physical size or shape ever changes again.
+const CAT_IMG_ASPECT={main:1,lifestyle:16/9,diagram:280/106,extra1:280/106,extra2:280/106,extra3:280/106};
 // The 4 bottom-right grid zones (Dimension Diagram + the 3 generic Extra
 // Photo slots) are often used for line-art/diagrams that need to shrink
 // well below their frame rather than fill it, so their zoom floor is

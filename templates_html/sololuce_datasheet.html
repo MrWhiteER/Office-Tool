@@ -531,25 +531,35 @@
        comment for how. -->
   <div style="display:flex;gap:48px;margin-top:-23.7pt;">
 
-    <!-- LEFT: photo, description, lifestyle photo. -->
-    <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
-      <!-- aspect-ratio 1/0.85, not 1/1 — per explicit request, the box (both
-           the empty dashed placeholder AND the real photo frame once one's
-           attached; this is the same single element for both states, so
-           there's nothing to keep in sync between them) is 15% shorter than
-           a full square. Since this div is the FIRST child of its
-           flex-direction:column parent, shrinking its own intrinsic height
-           naturally keeps its top edge exactly where it already was and
-           only moves its bottom edge up — "anchored from top, cut from the
-           bottom" with no separate anchoring rule needed. CAT_IMG_ASPECT.main
-           in app.py carries this same 1/0.85 ratio for the Adjust Photo
-           modal's own preview frame, so a drag/zoom/mask edit there always
-           matches this real shape — see that constant's own comment. The
-           LEFT/RIGHT column height-matching spacer just above (see its own
-           big comment) reacts to whichever column is naturally taller
-           dynamically, so a shorter Main Photo here just means the spacer
-           absorbs a little more — no separate fix needed for that. -->
-      <div style="width:100%;aspect-ratio:1/0.85;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center;{% if main_photo %}background:#e5e5e5;{% elif main_photo_placeholder %}background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
+    <!-- LEFT: photo, description, lifestyle photo. Fixed 7.5cm wide, not
+         flex:1 filling whatever's left of the row — per explicit request
+         ("the size of the placeholder of main product should be 7,5cm
+         exact", then, once Description text and Application Photo below
+         it were still spilling out to the OLD wider flex:1 column width,
+         "the text bellow it and the application photo should be in the
+         same line, so make the application photo sorter from the right
+         side also" + "and the text as well"). Fixing the WIDTH HERE, on
+         the shared column, rather than on Main Product Photo/Description/
+         Application Photo individually, is what actually keeps all three
+         aligned on the same right edge with a single source of truth —
+         each of those three still just says width:100% of its own
+         parent, same as before, so there's nothing that can drift out of
+         sync between them. RIGHT (flex:1 below) simply grows to fill
+         whatever width this fixed-width LEFT no longer takes up — no
+         separate change needed there. `cm` is a real physical CSS unit
+         here, not an approximation — html_engine.py's page.pdf() call
+         uses prefer_css_page_size:True, so the page (and everything on
+         it) already renders at true physical scale; 7.5cm in the CSS is
+         exactly 7.5cm on the printed/exported page. flex-shrink:0 so nothing about the row's own flex math can squeeze this
+         narrower than its fixed size. -->
+    <div style="width:7.5cm;flex-shrink:0;display:flex;flex-direction:column;">
+      <!-- Height fixed at 7.5cm too (a real square box, not just a square
+           RATIO) — applies to both the empty dashed placeholder AND the
+           real photo frame once one's attached, same single element for
+           both states. CAT_IMG_ASPECT.main in app.py is a plain 1
+           (square) to match, so the Adjust Photo modal's own preview
+           frame still has the same shape as this real box. -->
+      <div style="width:100%;height:7.5cm;flex-shrink:0;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center;{% if main_photo %}background:#e5e5e5;{% elif main_photo_placeholder %}background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
         <!-- object-fit:contain + translate/scale, not cover + object-position
              — see photo_cell's own comment above for the full reasoning
              (this slot and Application Photo below now match every other
