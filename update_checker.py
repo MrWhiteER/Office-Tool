@@ -513,6 +513,20 @@ try {
         Log ("ROLLBACK ALSO FAILED: " + $_.Exception.Message)
     }
 }
+
+# This helper script's own job is done either way (swapped, or rolled
+# back) — per explicit request ("after the update was downloaded and
+# installed successfully it should delete all the temp downloaded
+# files... i dont want to have garbage inside the pc"), it deletes
+# itself as the very last action instead of sitting in update_cache\
+# forever. Safe while still running: PowerShell has already read the
+# whole script into memory by this point, and NTFS allows deleting an
+# open file (the actual unlink just waits for the last handle to close).
+# Best-effort, own try/catch — a failure here is cosmetic clutter, never
+# worth surfacing as a swap error this late.
+try {
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+} catch {}
 '''
 
 
