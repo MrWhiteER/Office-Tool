@@ -4479,24 +4479,80 @@ def api_printers():
     except Exception as e:
         return jsonify({"printers": [], "default": "", "error": str(e)})
 
+@app.get("/api/wifi-status")
+def api_wifi_status():
+    """Reads the CURRENT WiFi network Windows is connected to (SSID +
+    signal), via `netsh wlan show interfaces` — a plain OS command, no new
+    dependency (win32/WMI already do the heavier lifting for printers/
+    scanners elsewhere; this is deliberately simpler since there's no
+    per-network detail this app needs beyond the name). Shown next to the
+    printer picker so it's obvious which network a WiFi printer would
+    actually need to be reachable on. Never raises: no adapter, WiFi
+    turned off, or genuinely not connected all just read as connected:
+    false rather than an error — those are normal, expected states here,
+    not failures."""
+    try:
+        out = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        ).stdout
+        ssid = ""
+        signal = ""
+        for line in out.splitlines():
+            line = line.strip()
+            # "SSID" also matches the "BSSID" line below it — the leading-
+            # word check (not just "in line") keeps this on the real one.
+            if line.startswith("SSID") and not line.startswith("BSSID") and ":" in line:
+                ssid = line.split(":", 1)[1].strip()
+            elif line.startswith("Signal") and ":" in line:
+                signal = line.split(":", 1)[1].strip()
+        return jsonify({"connected": bool(ssid), "ssid": ssid, "signal": signal})
+    except Exception as e:
+        return jsonify({"connected": False, "ssid": "", "signal": "", "error": str(e)})
+
 @app.get("/api/print-prefs")
 def api_print_prefs():
     cfg = load_cfg()
     prefs = cfg.get("print_prefs") or {}
-    return jsonify({"printer": prefs.get("printer", ""), "scanner_device_id": prefs.get("scanner_device_id", "")})
+    return jsonify({
+        "printer": prefs.get("printer", ""),
+        "scanner_device_id": prefs.get("scanner_device_id", ""),
+        "quality": prefs.get("quality") if prefs.get("quality") in PRINT_QUALITY_DPI else "balanced",
+    })
 
 @app.post("/api/print-prefs")
 def api_print_prefs_save():
     data = request.json or {}
     cfg = load_cfg()
+    quality = (data.get("quality") or "balanced").strip().lower()
+    if quality not in PRINT_QUALITY_DPI:
+        quality = "balanced"
     cfg["print_prefs"] = {
         "printer": (data.get("printer") or "").strip(),
         "scanner_device_id": (data.get("scanner_device_id") or "").strip(),
+        "quality": quality,
     }
     save_cfg(cfg)
     return jsonify({"ok": True})
 
-def _print_pdf_native(pdf_path, printer_name):
+# Print Quality (Settings > Printer & Scanner) — per explicit request for
+# "3 standard settings... ECO - BALANCED - QUALITY". _print_pdf_native
+# renders each page itself (see its own docstring — there's no PDF reader
+# in this pipeline at all, just a direct rasterize-and-blit), so "quality"
+# here means the DPI it rasterizes at: lower actually renders faster and
+# sends less data to the printer (a real speed/bandwidth win, not just a
+# label), higher renders sharper detail. min()'d against the printer's own
+# reported native DPI in _print_pdf_native below either way — asking for
+# more detail than the printer can physically resolve would only waste
+# render time for a result the printer throws away anyway. This does NOT
+# touch the printer driver's own ink/draft mode (that lives in DEVMODE
+# fields whose meaning varies by driver/manufacturer — not something this
+# app can safely set the same way for an arbitrary installed printer); it
+# only controls the resolution of what WE send.
+PRINT_QUALITY_DPI = {"eco": 150, "balanced": 300, "quality": 600}
+
+def _print_pdf_native(pdf_path, printer_name, quality="balanced"):
     """Prints a PDF using ONLY Windows' own GDI printing API plus PyMuPDF
     (fitz) and Pillow — both already-bundled dependencies (fitz is already
     used by pdf_extract.py/catalog_builder.py; Pillow by half the photo
@@ -4516,14 +4572,15 @@ def _print_pdf_native(pdf_path, printer_name):
     ImageWin.Dib for the actual blit) — the exact same mechanism Windows'
     own built-in apps use, "Microsoft Print to PDF" included.
 
-    Each page is rendered at the TARGET PRINTER's own reported DPI
-    (GetDeviceCaps LOGPIXELSX/Y), not a fixed guess — matches the
-    printer's real resolution exactly, no wasted oversampling and no
-    blurry undersampling. Scaled to fit the printable area (GetDeviceCaps
-    HORZRES/VERTRES) preserving aspect ratio and centered, rather than
-    assumed to exactly match the configured paper size — protects against
-    a cut-off or corner-shrunk page if a document's own page size and the
-    printer's current paper size ever disagree, without distorting either
+    Each page is rendered at min(the chosen Print Quality's DPI, the
+    TARGET PRINTER's own reported native DPI via GetDeviceCaps
+    LOGPIXELSX/Y) — never higher than the printer can actually resolve
+    (see PRINT_QUALITY_DPI's own comment), and never a blind guess either.
+    Scaled to fit the printable area (GetDeviceCaps HORZRES/VERTRES)
+    preserving aspect ratio and centered, rather than assumed to exactly
+    match the configured paper size — protects against a cut-off or
+    corner-shrunk page if a document's own page size and the printer's
+    current paper size ever disagree, without distorting either
     dimension."""
     import fitz
     import win32ui
@@ -4535,8 +4592,11 @@ def _print_pdf_native(pdf_path, printer_name):
     try:
         printable_w = hdc.GetDeviceCaps(win32con.HORZRES)
         printable_h = hdc.GetDeviceCaps(win32con.VERTRES)
-        dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX) or 300
-        dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY) or 300
+        native_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX) or 300
+        native_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY) or 300
+        target_dpi = PRINT_QUALITY_DPI.get(quality, PRINT_QUALITY_DPI["balanced"])
+        dpi_x = min(target_dpi, native_dpi_x)
+        dpi_y = min(target_dpi, native_dpi_y)
         doc = fitz.open(pdf_path)
         try:
             hdc.StartDoc(os.path.basename(pdf_path))
@@ -4579,15 +4639,17 @@ def api_print_document():
     pdf_path = path if path.lower().endswith(".pdf") else os.path.splitext(path)[0] + ".pdf"
     if not os.path.isfile(pdf_path):
         return jsonify({"ok": False, "error": "No PDF for this document yet — generate it first."}), 400
+    prefs = load_cfg().get("print_prefs") or {}
     try:
         import win32print
-        printer = (load_cfg().get("print_prefs") or {}).get("printer") or ""
+        printer = prefs.get("printer") or ""
         if not printer:
             printer = win32print.GetDefaultPrinter()
     except Exception as e:
         return jsonify({"ok": False, "error": "No printer available: " + str(e)}), 500
+    quality = prefs.get("quality") if prefs.get("quality") in PRINT_QUALITY_DPI else "balanced"
     try:
-        _print_pdf_native(pdf_path, printer)
+        _print_pdf_native(pdf_path, printer, quality)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -6696,9 +6758,33 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
          there's exactly one field each here, not a batch of fields worth
          a single combined save. -->
     <div class="settings-tab-panel hide" id=settings-tab-printer>
+    <!-- Refresh — per explicit request: re-run the same load this tab
+         already does on open, on demand, for whoever just plugged in a
+         printer/scanner or joined a different network without wanting to
+         leave and re-enter the whole Settings screen to see it picked up. -->
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+      <button type=button class=btn id=set-printer-refresh-btn onclick=refreshPrinterScannerSettings() style="font-size:11px;padding:6px 10px">↻ Refresh</button>
+    </div>
     <div class=card><div class=ch>Printer</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0 0 10px">Used by every Print button in the app (All Docs, and the top bar while a document is open). Leave on System Default to always use whatever Windows itself currently has set.</p>
+      <!-- Which WiFi network Windows is CURRENTLY on — a WiFi printer is
+           only actually reachable while both it and this PC are on the
+           SAME network, so surfacing that here (rather than the user
+           having to separately open Windows' own WiFi settings to check)
+           answers "why can't it find my printer" before it's even asked. -->
+      <p id=set-wifi-status class=muted style="font-size:11.5px;margin:0 0 10px;display:flex;align-items:center;gap:6px"></p>
       <div class=f><label>Default printer</label><select id=set-default-printer onchange=savePrinterPref()><option value="">(System default)</option></select></div>
+      <!-- Print Quality — per explicit request for "3 standard
+           settings... ECO - BALANCED - QUALITY". Controls the resolution
+           _print_pdf_native renders at (see its own comment) — lower is
+           genuinely faster/less data to the printer, not just a label. -->
+      <div class=f style="margin-top:10px"><label>Print quality</label>
+        <div class=seg id=set-print-quality-seg>
+          <button type=button data-q=eco onclick="setPrintQuality('eco')" title="Fastest, lowest detail — good for internal drafts">Eco</button>
+          <button type=button data-q=balanced onclick="setPrintQuality('balanced')" title="The default — a good match for most printers and documents">Balanced</button>
+          <button type=button data-q=quality onclick="setPrintQuality('quality')" title="Sharpest detail, slower — best for client-facing documents">Quality</button>
+        </div>
+      </div>
       <p id=set-printer-status class=muted style="font-size:11.5px;margin:8px 0 0"></p>
     </div></div>
     <div class=card><div class=ch>Scanner</div><div class=cb>
@@ -7802,11 +7888,22 @@ async function loadSettings(){
 // ever needs to run once per Settings visit (called from loadSettings())
 // to populate the option lists and pre-select whatever's already saved.
 async function loadPrinterScannerSettings(){
-  const [printersR,prefsR,scannersR]=await Promise.all([
+  const [printersR,prefsR,scannersR,wifiR]=await Promise.all([
     fetch('/api/printers').then(r=>r.json()).catch(()=>({printers:[],default:''})),
     fetch('/api/print-prefs').then(r=>r.json()).catch(()=>({printer:'',scanner_device_id:''})),
     fetch('/api/scanner-list').then(r=>r.json()).catch(()=>({scanners:[]})),
+    fetch('/api/wifi-status').then(r=>r.json()).catch(()=>({connected:false,ssid:'',signal:''})),
   ]);
+  // A WiFi printer only actually answers while this PC is on the SAME
+  // network it is — showing which one Windows is on right now answers
+  // "why can't it find my printer" before that's even asked (see this
+  // element's own HTML comment). Text only, no live/blinking dot — this
+  // reads once per tab-open/Refresh click, not a continuously-polled
+  // connection state.
+  const wifiEl=$('set-wifi-status');
+  wifiEl.innerHTML=wifiR.connected
+    ?'📶 On <b>'+escHtml(wifiR.ssid)+'</b>'+(wifiR.signal?' ('+escHtml(wifiR.signal)+')':'')
+    :'📶 Not connected to WiFi right now'+(wifiR.error?' — could not check ('+escHtml(wifiR.error)+')':'');
   const printerSel=$('set-default-printer');
   printerSel.innerHTML='<option value="">(System default'+(printersR.default?' — '+escHtml(printersR.default):'')+')</option>'+
     (printersR.printers||[]).map(p=>'<option value="'+escHtml(p)+'"'+(p===prefsR.printer?' selected':'')+'>'+escHtml(p)+'</option>').join('');
@@ -7821,12 +7918,31 @@ async function loadPrinterScannerSettings(){
   // that plainly instead of leaving it looking identical to "nothing
   // chosen yet, and that's fine."
   $('set-scanner-status').textContent=(scannersR.scanners||[]).length?'':
-    'No scanner detected by Windows right now — if one is plugged in and powered on, install its scanner/WIA driver (the print driver alone usually isn\'t enough) or check Settings > Bluetooth & devices > Printers & scanners.'}
+    'No scanner detected by Windows right now — if one is plugged in and powered on, install its scanner/WIA driver (the print driver alone usually isn\'t enough) or check Settings > Bluetooth & devices > Printers & scanners.';
+  syncPrintQualitySeg(prefsR.quality||'balanced')}
+// Same "read every field's CURRENT on-screen value and save them all
+// together" shape as the rest of this shared prefs object (printer,
+// scanner_device_id) — /api/print-prefs POST replaces the whole object
+// per call, so a save that only sent the field that actually changed
+// would silently blank out the other two every time.
+function currentPrintQuality(){
+  const on=document.querySelector('#set-print-quality-seg button.on');
+  return on?on.dataset.q:'balanced'}
+function syncPrintQualitySeg(q){
+  const seg=$('set-print-quality-seg');if(!seg)return;
+  seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.q===q))}
+function setPrintQuality(q){syncPrintQualitySeg(q);savePrinterPref()}
 async function savePrinterPref(){
   const r=await fetch('/api/print-prefs',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({printer:$('set-default-printer').value,scanner_device_id:$('set-default-scanner').value})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+    body:JSON.stringify({printer:$('set-default-printer').value,scanner_device_id:$('set-default-scanner').value,quality:currentPrintQuality()})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
   $('set-printer-status').textContent=r.ok?'Saved.':('Could not save: '+(r.error||'unknown error'))}
 function saveScannerPref(){savePrinterPref()}   // same prefs object, one shared save
+async function refreshPrinterScannerSettings(){
+  const btn=$('set-printer-refresh-btn');
+  const orig=btn.textContent;
+  btn.disabled=true;btn.textContent='Refreshing…';
+  await loadPrinterScannerSettings();
+  btn.disabled=false;btn.textContent=orig}
 
 function openAdminTools(){view('settings');showSettingsAdminPanel()}
 function showSettingsAdminPanel(){
