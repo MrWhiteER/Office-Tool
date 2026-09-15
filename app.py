@@ -2944,32 +2944,44 @@ def api_update_prefs_save():
     save_cfg(cfg)
     return jsonify({"ok": True})
 
-# Downloads the newer installer and launches it, then this process exits
-# itself shortly after (so the installer isn't stuck trying to close a
-# still-running instance of the app it's about to replace). The installer
-# only ever touches the [Files] it lists — config.json/drafts/submissions
-# survive, same as any manual update — see installer.iss's own comment.
+# Downloads the newer release's payload zip, extracts it, and swaps it
+# into place — then this process exits itself so the detached PowerShell
+# helper (see update_checker._swap_and_relaunch) can replace files this
+# process still has locked open, and relaunches the app on its own. No
+# Inno Setup wizard is involved in this path at all — per explicit
+# request ("do the update inside the software no windows installation or
+# nothing, it will all be on the software only"). config.json/drafts/
+# submissions survive untouched, same as before: the staged payload only
+# ever contains fresh build output (see build.bat), never user data.
 @app.post("/api/apply-update")
 def api_apply_update():
-    """Starts the download on a background thread and returns immediately
-    — /api/apply-update-progress is what the frontend polls for real
-    progress (see update_checker.start_update_async's own comment on why:
-    an 80MB+ installer downloading with zero visible feedback read as
-    "nothing happens" in practice)."""
+    """Starts the download+extract on a background thread and returns
+    immediately — /api/apply-update-progress is what the frontend polls
+    for real progress through both phases (see
+    update_checker.start_inapp_update_async's own comment)."""
     data = request.json or {}
     url = data.get("download_url", "")
     if not url:
         return jsonify({"ok": False, "error": "Missing download_url."}), 400
     # target_version names the cached download (see update_checker's
-    # UPDATE_CACHE_DIR) so a failed install attempt doesn't cost another
-    # 80MB+ download next time — optional/backward-compatible, an older
+    # UPDATE_CACHE_DIR) so a failed attempt doesn't cost another 80MB+
+    # download next time — optional/backward-compatible, an older
     # frontend that doesn't send it just always downloads fresh.
-    update_checker.start_update_async(url, target_version=data.get("target_version"))
+    update_checker.start_inapp_update_async(url, target_version=data.get("target_version"))
     return jsonify({"ok": True})
 
 @app.get("/api/apply-update-progress")
 def api_apply_update_progress():
     return jsonify(update_checker.get_progress())
+
+# Polled by the in-app update overlay AFTER this server process exits for
+# the file swap (see update_checker._swap_and_relaunch) — the relaunched
+# app's own fresh server answering this again is exactly the "we're back"
+# signal the frontend is waiting for, and its version confirms the swap
+# actually landed rather than just "some server is listening again."
+@app.get("/api/ping")
+def api_ping():
+    return jsonify({"ok": True, "version": APP_VERSION})
 
 # Generic read/delete pair the Settings "Manage Lists" UI drives, covering
 # every list in MANAGED_STRING_LISTS uniformly — one route instead of a
@@ -5674,6 +5686,22 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .impgrouphead:first-child{margin-top:0}
 .clientmodal{position:fixed;inset:0;background:rgba(20,18,14,.55);z-index:225;display:flex;align-items:center;justify-content:center;padding:20px}
 .clientmodal.hide{display:none}
+/* The single in-app update overlay — per explicit request ("it can dim
+   the software... nice message in the middle... after the update it
+   will refresh the window"). z-index above EVERY other modal (225) since
+   an update can be started from underneath one (Update Center modal) as
+   well as the rail popover, the login chip, or the tray — it has to sit
+   on top of all of them, dim the whole app including whatever's already
+   open, and block interaction with it until the update finishes. */
+.updateoverlay{position:fixed;inset:0;z-index:400;display:none;align-items:center;justify-content:center;padding:20px;background:rgba(10,9,7,.62);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.updateoverlay.show{display:flex}
+.updateoverlaycard{width:340px;max-width:90vw;padding:30px 26px 26px;border-radius:var(--r-lg);background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--line);box-shadow:var(--shadow-xl);text-align:center;animation:brandOpen .2s cubic-bezier(.24,.9,.32,1.24)}
+.updateoverlayspin{width:32px;height:32px;margin:0 auto 16px;border-radius:50%;border:3px solid var(--tint);border-top-color:var(--amber);animation:updateOverlaySpin .8s linear infinite}
+@keyframes updateOverlaySpin{to{transform:rotate(360deg)}}
+.updateoverlaytitle{font-size:15px;font-weight:700;color:var(--ink)}
+.updateoverlaycard .updateprogress-track{margin-top:16px}
+.updateoverlaycard .updateprogress-text{margin-top:10px}
+.updateoverlayhint{margin-top:10px;font-size:11px;color:var(--muted)}
 .clientmodalbox{background:var(--glass-bg);border-radius:var(--r-lg);width:100%;max-width:460px;max-height:88vh;overflow:auto;box-shadow:var(--shadow-xl);animation:brandOpen .2s cubic-bezier(.24,.9,.32,1.24)}
 /* Sticky, not static — per explicit report (a screenshot: scrolled deep
    into a long cloud photo grid, the header/Close button had scrolled
@@ -5803,22 +5831,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .login-update-chip{display:flex;align-items:center;justify-content:center;gap:7px;margin:0 0 16px;padding:8px 12px;border-radius:10px;background:rgba(226,149,44,.14);border:1px solid rgba(226,149,44,.4);color:var(--amber2);font-size:12.5px;font-weight:600;cursor:pointer;transition:background .15s ease}
 .login-update-chip:hover{background:rgba(226,149,44,.24)}
 .login-update-chip.hide{display:none}
-/* Below the card, near the bottom of the login window — a compact glass
-   card (same treatment as .loginbox itself, so it reads as part of the
-   same UI rather than a bolted-on overlay) holding a big Steam-style
-   progress bar: a real percentage fill with a soft glow and a subtle
-   sheen sweeping across it while active. */
-/* Fixed to the bottom of the login WINDOW itself (.loginoverlay is
-   position:fixed;inset:0, i.e. the whole viewport), not flowing next to
-   .loginbox — .loginoverlay is a flex ROW container, so a plain sibling
-   here would sit beside the card instead of below it. */
-.login-update-progress{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:1;width:360px;max-width:88vw;padding:14px 18px;border-radius:var(--r-lg);background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--line);box-shadow:var(--shadow-lg)}
-.login-update-progress.hide{display:none}
-.login-update-progress-track{height:11px;border-radius:6px;background:rgba(120,120,120,.28);overflow:hidden}
-.login-update-progress-fill{position:relative;height:100%;width:0%;border-radius:6px;overflow:hidden;background:linear-gradient(90deg,var(--amber),var(--amber2));box-shadow:0 0 14px rgba(226,149,44,.6);transition:width .25s ease}
-.login-update-progress-fill::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.4) 50%,transparent 70%);background-size:200% 100%;animation:loginUpdateSheen 1.6s linear infinite}
+/* Steam-style progress bar (real percentage fill, soft glow, a subtle
+   sheen sweeping across it while active) — originally login-page-only,
+   now shared by the single in-app update overlay (#update-overlay,
+   defined further down near .clientmodal) that every update entry point
+   (rail popover, Update Center modal, login chip, tray) funnels into. */
+.updateprogress-track{height:11px;border-radius:6px;background:rgba(120,120,120,.28);overflow:hidden}
+.updateprogress-fill{position:relative;height:100%;width:0%;border-radius:6px;overflow:hidden;background:linear-gradient(90deg,var(--amber),var(--amber2));box-shadow:0 0 14px rgba(226,149,44,.6);transition:width .25s ease}
+.updateprogress-fill::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.4) 50%,transparent 70%);background-size:200% 100%;animation:loginUpdateSheen 1.6s linear infinite}
 @keyframes loginUpdateSheen{from{background-position:200% 0}to{background-position:-200% 0}}
-.login-update-progress-text{margin-top:9px;text-align:center;font-size:12.5px;color:var(--ink);font-weight:600}
+.updateprogress-text{margin-top:9px;text-align:center;font-size:12.5px;color:var(--ink);font-weight:600}
 .usercard{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:11px;border:1px solid var(--line);margin-bottom:6px}
 .usercard b{font-size:13px;flex:1}
 .userbadge{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--tint);color:var(--muted)}
@@ -5886,13 +5908,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button type=button class=btn style="width:100%" onclick="loginWithGoogle(this)">Continue with Google</button>
     </div>
   </form>
-  <!-- Steam-style download/install progress — sits below the card,
-       anchored near the bottom of the login window, hidden until
-       loginInstallUpdate() actually starts a download. -->
-  <div id=login-update-progress class="login-update-progress hide">
-    <div class=login-update-progress-track><div id=login-update-progress-fill class=login-update-progress-fill></div></div>
-    <div id=login-update-progress-text class=login-update-progress-text>Starting…</div>
-  </div>
+
 </div>
 <div class=app>
  <div class=watermark id=watermark></div>
@@ -7162,6 +7178,22 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     </div>
   </div>
 </div>
+<!-- The single in-app update overlay — global sibling like
+     updatecentermodal above (same "never nest a modal inside a view
+     container that carries .hide outside its own screen" rule): an
+     update can be started from the rail popover, this Update Center
+     modal, the login page chip, or the tray, and must dim/block the
+     WHOLE app regardless of which one it started from. See
+     showUpdateOverlay()/pollInAppUpdate() in the page script. -->
+<div class=updateoverlay id=update-overlay>
+  <div class=updateoverlaycard>
+    <div class=updateoverlayspin></div>
+    <div class=updateoverlaytitle>Updating Office Tool</div>
+    <div class=updateprogress-track><div id=update-overlay-fill class=updateprogress-fill></div></div>
+    <div id=update-overlay-text class=updateprogress-text>Starting…</div>
+    <div class=updateoverlayhint>Please don't close the app — it will come back on its own.</div>
+  </div>
+</div>
 <div class=toast id=toast></div>
 <div class=hoverprev id=hoverprev></div>
 <div class=filemenu id=filemenu></div>
@@ -7679,6 +7711,69 @@ function installUpdate(btn){
   btn.dataset.confirm='';
   actuallyInstallUpdate(btn)}
 function fmtMB(n){return (n/1048576).toFixed(1)+' MB'}
+// ---- Shared in-app update overlay ---------------------------------------
+// One dimmed, centered overlay for every update entry point (rail popover,
+// Update Center modal, login-page chip, tray) — per explicit request ("it
+// can dim the software... nice message in the middle... after the update
+// it will refresh the window of the software and it will come back to
+// live"). No external Inno Setup wizard is ever involved in this path at
+// all (see update_checker.start_inapp_update_async/_swap_and_relaunch) —
+// this app downloads the release zip, extracts it, and only THEN this
+// process exits so a detached helper can swap the files in and relaunch.
+function showUpdateOverlay(){$('update-overlay').classList.add('show')}
+function hideUpdateOverlay(){$('update-overlay').classList.remove('show')}
+function updateOverlayProgress(status,done,total){
+  const fill=$('update-overlay-fill'),text=$('update-overlay-text');
+  if(status==='downloading'){
+    const pct=total?Math.round(done/total*100):0;
+    fill.style.width=pct+'%';
+    text.textContent=total?('Downloading update — '+pct+'% ('+fmtMB(done)+' / '+fmtMB(total)+')'):'Downloading update…'
+  }else if(status==='extracting'){
+    const pct=total?Math.round(done/total*100):0;
+    fill.style.width=pct+'%';
+    text.textContent='Preparing update — '+pct+'%'
+  }else if(status==='installing'){
+    fill.style.width='100%';
+    text.textContent='Applying update…'
+  }}
+// Common tail end of every update entry point once POST /api/apply-update
+// has been accepted — shows the overlay, tracks real download+extract
+// progress, and once the backend hands off to the file-swap helper
+// (status="installing") switches to waitForRelaunchAndReload(). onError is
+// called (overlay already hidden) so each caller can restore its own
+// button/chip back to a clickable state.
+function pollInAppUpdate(onError){
+  showUpdateOverlay();
+  updateOverlayProgress('downloading',0,0);
+  const poll=setInterval(async()=>{
+    const p=await fetch('/api/apply-update-progress').then(r=>r.json()).catch(()=>null);
+    if(!p)return;
+    if(p.status==='error'){
+      clearInterval(poll);hideUpdateOverlay();onError(p.error||'unknown error');return}
+    updateOverlayProgress(p.status,p.done,p.total);
+    if(p.status==='installing'){clearInterval(poll);waitForRelaunchAndReload()}
+  },400)}
+// Fires once the backend is seconds from exiting for the actual file swap
+// (see _swap_and_relaunch in update_checker.py) — this server is about to
+// go silent while the swap runs, so /api/apply-update-progress stops being
+// answerable at all. Instead polls the lightweight /api/ping, and only
+// reloads once it sees a GENUINE down-then-up transition: an old server
+// still answering early on must never be mistaken for the new one already
+// being back — this is what actually delivers "it will refresh the window
+// of the software and it will come back to live" instead of the user
+// watching the app just vanish with no explanation.
+function waitForRelaunchAndReload(){
+  $('update-overlay-text').textContent='Restarting…';
+  let sawDown=false,tries=0;
+  const check=setInterval(async()=>{
+    tries++;
+    if(tries===50)$('update-overlay-text').textContent='Still restarting — this can take a little while for a larger update…';
+    try{
+      const r=await fetch('/api/ping',{cache:'no-store'});
+      if(r.ok&&sawDown){clearInterval(check);location.reload()}
+    }catch(e){sawDown=true}
+  },700)}
+
 // Called from the tray's "Update" menu item (see app.py's __main__/
 // _run_tray — the Python side already knows download_url/target_version
 // from its own independent background check, so this doesn't depend on
@@ -7695,64 +7790,27 @@ async function startUpdateFromTray(downloadUrl,targetVersion){
       body:JSON.stringify({download_url:downloadUrl,target_version:targetVersion})}).then(r=>r.json());
     if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));return}
   }catch(e){toast('Update failed: '+e.message);return}
-  const poll=setInterval(async()=>{
-    const p=await fetch('/api/apply-update-progress').then(r=>r.json()).catch(()=>null);
-    if(!p)return;
-    if(p.status==='launched'){
-      clearInterval(poll);
-      toast('Installer launching — this app will close, and the update can take a few minutes. It reopens on its own when done.')
-    }else if(p.status==='error'){
-      clearInterval(poll);toast('Update failed: '+(p.error||'unknown error'))}
-  },400)}
-// Downloads a real installer (80MB+) — the OLD version just said
-// "Downloading…" with zero feedback for however long that took, which
-// (combined with the confirm-timing bug just above) is exactly why this
-// looked like "nothing happens" in practice. Now polls
-// /api/apply-update-progress (backend runs the download on its own
-// thread — see start_update_async()) and shows a real percentage + a
-// fill bar, inserted right after whichever button was clicked (works the
-// same whether that's the rail popover or the Update Center modal).
+  pollInAppUpdate(msg=>toast('Update failed: '+msg))}
+// Downloads the release's payload zip and extracts it — the OLD version
+// just said "Downloading…" with zero feedback for however long that took,
+// which (combined with the confirm-timing bug just above) is exactly why
+// this looked like "nothing happens" in practice. Now hands off to the
+// shared dimmed overlay (real percentage bars for BOTH the download and
+// the extract/install phase) the instant the backend confirms it started.
 async function actuallyInstallUpdate(btn){
   btn.disabled=true;btn.textContent='Starting…';
-  const bar=document.createElement('div');
-  bar.style.cssText='margin-top:8px';
-  bar.innerHTML='<div style="height:6px;border-radius:4px;background:var(--tint);overflow:hidden"><div id=update-progress-fill style="height:100%;width:0%;background:var(--brand-dark);transition:width .2s"></div></div>'+
-    '<div id=update-progress-text class=muted style="font-size:11px;margin-top:4px;text-align:center">Starting…</div>';
-  btn.insertAdjacentElement('afterend',bar);
   try{
     const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({download_url:UPDATE_INFO.download_url,target_version:UPDATE_INFO.latest})}).then(r=>r.json());
-    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));bar.remove();btn.disabled=false;btn.textContent='Install & Restart';return}
-  }catch(e){toast('Update failed: '+e.message);bar.remove();btn.disabled=false;btn.textContent='Install & Restart';return}
-  btn.textContent='Downloading…';
-  const fill=bar.querySelector('#update-progress-fill'),text=bar.querySelector('#update-progress-text');
-  const poll=setInterval(async()=>{
-    const p=await fetch('/api/apply-update-progress').then(r=>r.json()).catch(()=>null);
-    if(!p)return;
-    if(p.status==='downloading'){
-      const pct=p.total?Math.round(p.done/p.total*100):0;
-      fill.style.width=pct+'%';
-      text.textContent=p.total?(pct+'% — '+fmtMB(p.done)+' / '+fmtMB(p.total)):'Downloading…'
-    }else if(p.status==='launched'){
-      clearInterval(poll);fill.style.width='100%';text.textContent='Installing…';btn.textContent='Installing…';
-      // Set real duration expectations here: since Chromium got bundled
-      // into the installer (v1.1.6), the install step alone can genuinely
-      // take a few minutes (a small native progress window shows during
-      // that — installer.iss/update_checker.py run it /SILENT, not
-      // /VERYSILENT, specifically so that's visible) — this app closes
-      // first regardless, so a long, ordinary-looking wait afterward is
-      // expected, not a sign anything failed.
-      toast('Installer launching — this app will close, and the update can take a few minutes. It reopens on its own when done.')
-    }else if(p.status==='error'){
-      clearInterval(poll);bar.remove();btn.disabled=false;btn.textContent='Install & Restart';
-      toast('Update failed: '+(p.error||'unknown error'))}
-  },400)}
+    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));btn.disabled=false;btn.textContent='Install & Restart';return}
+  }catch(e){toast('Update failed: '+e.message);btn.disabled=false;btn.textContent='Install & Restart';return}
+  pollInAppUpdate(msg=>{toast('Update failed: '+msg);btn.disabled=false;btn.textContent='Install & Restart'})}
 
 // The login-page half of the update flow — same double-click-to-confirm
-// pattern as installUpdate(), same /api/apply-update(-progress) backend,
-// but its own Steam-style progress card (see #login-update-progress'
-// own CSS) instead of a bar inserted next to whatever button was
-// clicked, since the login page has no rail/modal button to anchor to.
+// pattern as installUpdate(), same /api/apply-update(-progress) backend
+// and shared dimmed overlay as every other entry point (the login page's
+// own previous Steam-style card is gone — one overlay for the whole app
+// now, not a separate one per screen).
 function loginInstallUpdate(chip){
   if(chip.dataset.confirm!=='1'){
     chip.dataset.confirm='1';
@@ -7770,29 +7828,13 @@ function loginInstallUpdate(chip){
 async function actuallyInstallLoginUpdate(chip){
   chip.onclick=null;chip.style.cursor='default';
   $('login-update-chip-text').textContent='Starting…';
-  const box=$('login-update-progress'),fill=$('login-update-progress-fill'),text=$('login-update-progress-text');
-  box.classList.remove('hide');fill.style.width='0%';text.textContent='Starting…';
   try{
     const r=await fetch('/api/apply-update',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({download_url:UPDATE_INFO.download_url,target_version:UPDATE_INFO.latest})}).then(r=>r.json());
-    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));box.classList.add('hide');resetLoginUpdateChip();return}
-  }catch(e){toast('Update failed: '+e.message);box.classList.add('hide');resetLoginUpdateChip();return}
+    if(!r.ok){toast('Update failed: '+(r.error||'unknown error'));resetLoginUpdateChip();return}
+  }catch(e){toast('Update failed: '+e.message);resetLoginUpdateChip();return}
   chip.classList.add('hide');
-  const poll=setInterval(async()=>{
-    const p=await fetch('/api/apply-update-progress').then(r=>r.json()).catch(()=>null);
-    if(!p)return;
-    if(p.status==='downloading'){
-      const pct=p.total?Math.round(p.done/p.total*100):0;
-      fill.style.width=pct+'%';
-      text.textContent=p.total?(pct+'% — '+fmtMB(p.done)+' / '+fmtMB(p.total)):'Downloading…'
-    }else if(p.status==='launched'){
-      clearInterval(poll);fill.style.width='100%';
-      text.textContent='Installing — this app will close and reopen automatically (can take a few minutes)…'
-    }else if(p.status==='error'){
-      clearInterval(poll);box.classList.add('hide');
-      toast('Update failed: '+(p.error||'unknown error'));
-      resetLoginUpdateChip()}
-  },400)}
+  pollInAppUpdate(msg=>{toast('Update failed: '+msg);resetLoginUpdateChip()})}
 function resetLoginUpdateChip(){
   const chip=$('login-update-chip');
   chip.onclick=()=>loginInstallUpdate(chip);chip.style.cursor='pointer';
@@ -15803,10 +15845,10 @@ function renderList(){
     // Printer &amp; Scanner default when one's been picked.
     if(hasPdf)actions+='<button class=rbtn onclick="event.stopPropagation();printDocFromAllDocs(\''+pdfRel+'\',this)" title="Print this document">🖶 Print</button>';
     actions+=hasXlsx
-      ? '<button class="rbtn cs" onclick="event.stopPropagation();openDoc(\''+xlsxRel+'\')" title="Edit in Company System">Open in CS</button>'
+      ? '<button class="rbtn cs" onclick="event.stopPropagation();openDoc(\''+xlsxRel+'\')" title="Edit in Company System">Edit</button>'
       : (isDoPdf||isEditableHtmlDocType)
-        ? '<button class="rbtn cs" onclick="event.stopPropagation();openDoc(\''+pdfRel+'\')" title="Edit in Company System">Open in CS</button>'
-        : '<button class="rbtn cs" onclick="event.stopPropagation();openCS(\''+rel+'\')" title="Preview in Company System">Open in CS</button>';
+        ? '<button class="rbtn cs" onclick="event.stopPropagation();openDoc(\''+pdfRel+'\')" title="Edit in Company System">Edit</button>'
+        : '<button class="rbtn cs" onclick="event.stopPropagation();openCS(\''+rel+'\')" title="Preview in Company System">Edit</button>';
     // Every sales/billing document can spin off the standard next document
     // in its own chain (Quotation/Proforma Invoice → Delivery Order + Tax
     // Invoice; Delivery Order → Tax Invoice; Tax Invoice → Payment Receipt

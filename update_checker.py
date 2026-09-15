@@ -38,9 +38,9 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import engine
@@ -94,10 +94,20 @@ def check_for_update(timeout=6):
         latest_tag = data.get("tag_name", "") or ""
         latest = _parse_version(latest_tag)
         current = _parse_version(APP_VERSION)
+        # download_url now names the PAYLOAD zip, not Setup.exe — per
+        # explicit request ("do the update inside the software, no
+        # windows installation or nothing... download files with
+        # progress bar, also the installation as well"), updating no
+        # longer launches any external installer at all (see
+        # start_inapp_update_async below); this app downloads+extracts+
+        # swaps its own files in place. installer_output\OfficeTool-
+        # Setup.exe still ships on every release (a first-time install
+        # from the GitHub page still needs it), just never fetched by
+        # THIS path anymore.
         asset_url = None
         for a in data.get("assets", []):
             name = (a.get("name") or "").lower()
-            if name.endswith("setup.exe"):
+            if name.endswith("payload.zip"):
                 asset_url = a.get("browser_download_url")
                 break
         return {
@@ -122,21 +132,27 @@ def check_for_update(timeout=6):
 # file from some earlier, already-superseded update attempt is never
 # mistaken for the one currently being offered.
 UPDATE_CACHE_DIR = os.path.join(engine.DATA_BASE, "update_cache")
-_MIN_VALID_INSTALLER_BYTES = 10 * 1024 * 1024  # guards against a half-written file from a previous crash/interrupt
+
+# Where a downloaded payload zip gets extracted to before it's swapped into
+# place — see download_and_stage_payload()/_swap_and_relaunch() below. Lives
+# under DATA_BASE (this install's own writable folder), never inside the
+# live app folder itself, so a half-finished extract can never leave the
+# running app's own files in a half-swapped state.
+UPDATE_STAGING_DIR = os.path.join(engine.DATA_BASE, "_update_staging")
 
 
-def _cached_installer_path(version):
+def _cached_payload_path(version):
     safe = re.sub(r"[^0-9A-Za-z.]", "", version or "")
-    return os.path.join(UPDATE_CACHE_DIR, "OfficeTool-Setup-v{}.exe".format(safe))
+    return os.path.join(UPDATE_CACHE_DIR, "OfficeTool-Payload-v{}.zip".format(safe))
 
 
 def cleanup_update_cache():
     """
     Called once at startup (see app.py, right alongside the other
     best-effort startup housekeeping). If this install is already AT or
-    PAST some cached installer's own version, that cached file already
-    did its job — remove it. This is what actually closes the loop on
-    "keep it until the system is confirmed updated": the NEXT successful
+    PAST some cached installer's/payload's own version, that cached file
+    already did its job — remove it. This is what actually closes the loop
+    on "keep it until the system is confirmed updated": the NEXT successful
     launch after an update is exactly the confirmation, and this is where
     that gets noticed. Never raises; routine housekeeping, not a
     load-bearing correctness check.
@@ -146,7 +162,7 @@ def cleanup_update_cache():
             return
         current = _parse_version(APP_VERSION)
         for name in os.listdir(UPDATE_CACHE_DIR):
-            m = re.match(r"OfficeTool-Setup-v(.+)\.exe$", name)
+            m = re.match(r"OfficeTool-(?:Setup|Payload)-v(.+)\.(?:exe|zip)$", name)
             if not m:
                 continue
             if _parse_version(m.group(1)) <= current:
@@ -154,6 +170,18 @@ def cleanup_update_cache():
                     os.remove(os.path.join(UPDATE_CACHE_DIR, name))
                 except Exception:
                     pass
+    except Exception:
+        pass
+    # Any leftover staging dir from a crash mid-swap is stale the moment
+    # this app successfully starts back up — either the swap already
+    # finished (staging's copy is now live, nothing to gain by keeping the
+    # extra copy around) or it never got that far in the first place, in
+    # which case a fresh download+extract next time is simpler and safer
+    # than trying to figure out how far a half-swap on disk actually got.
+    try:
+        if os.path.isdir(UPDATE_STAGING_DIR):
+            import shutil
+            shutil.rmtree(UPDATE_STAGING_DIR, ignore_errors=True)
     except Exception:
         pass
 
@@ -252,133 +280,65 @@ def _kill_bundled_browser_processes():
         pass
 
 
-def _launch_installer(dest):
-    """Kills any lock-holding bundled_browser processes, then schedules the
-    installer to run — NOT immediately. Real /LOG= from a fresh reproduced
-    failure (v1.1.28, "again the same issue... Rolling Back Changes"):
-
-        RestartManager found an application using one of our files: OfficeTool.exe
-        Some applications could not be shut down.
-        User canceled the installation process. Rolling back changes.
-
-    ...timestamped under half a second after Setup.exe started. The old
-    code here launched Setup.exe via Popen FIRST, and only THEN had the
-    caller (start_update_async) sleep 3s before os._exit(0) — so Setup's
-    RestartManager check, which fires almost instantly, was GUARANTEED to
-    still find this app's own process alive every single time, no matter
-    how reliably chrome.exe/node.exe get killed above. RestartManager's
-    own "ask it to close" mechanism (CloseApplications=yes in
-    installer.iss) evidently isn't fast/reliable enough either — it's
-    what actually reported "some applications could not be shut down."
-
-    Fix: launch Setup.exe from a detached helper that waits for THIS
-    process's own PID to actually disappear (capped at 10s as a safety
-    net, in case this process somehow never exits on its own — better to
-    install late than hang forever) before starting it, so Setup's very
-    first RestartManager check always runs after this process has
-    already fully exited — never racing it. PowerShell's Get-Process,
-    not a hand-rolled tasklist/findstr/goto batch loop: far less fragile
-    to get right as a single-line invocation, and Get-Process -Id
-    <pid> -ErrorAction SilentlyContinue is a clean, direct "does this PID
-    still exist" check rather than parsing tasklist's text table.
-    -WindowStyle Hidden + CREATE_NO_WINDOW below: this helper (and
-    whatever it briefly spawns) must never itself flash a visible window
-    — see _kill_bundled_browser_processes()'s own comment on the exact
-    live symptom that pattern caused elsewhere in this same fix.
-    /LOG= writes a real install log even under fully silent mode —
-    previously a failure here was invisible even to us; this gives a
-    concrete file to check next time something goes wrong, without
-    changing the silent user experience at all."""
-    _kill_bundled_browser_processes()
-    log_path = os.path.join(engine.DATA_BASE, "last_update_install.log")
-    pid = os.getpid()
-
-    def _pq(s):
-        # Single-quoted PowerShell string literal — doubling any literal
-        # single quote is PowerShell's own escape for that, not related
-        # to cmd.exe's separate (and much hairier) quoting rules.
-        return "'" + s.replace("'", "''") + "'"
-
-    # Deliberately NO -WindowStyle Hidden on THIS Start-Process call — that
-    # would hide Setup.exe's own small native progress window, undoing the
-    # whole point of /SILENT (not /VERYSILENT) established back in v1.1.7:
-    # a completely silent multi-minute install with zero visible feedback
-    # reads exactly like a hang/failure. Hidden is only for the PowerShell
-    # host wrapping this wait — see the Popen call below.
-    ps_script = (
-        "$n=0; while ((Get-Process -Id {pid} -ErrorAction SilentlyContinue) -and ($n -lt 40)) "
-        "{{ Start-Sleep -Milliseconds 250; $n++ }}; "
-        "Start-Process -FilePath {dest} -ArgumentList "
-        "'/SILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG=' + {log}),('/DIR=' + {dir})"
-    ).format(pid=pid, dest=_pq(dest), log=_pq(log_path), dir=_pq(engine.DATA_BASE))
-    subprocess.Popen(
-        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
-        creationflags=subprocess.CREATE_NO_WINDOW,
-        close_fds=True,
-    )
-
-
-def download_and_launch_installer(download_url, target_version=None, on_progress=None):
+def _download_resumable(url, dest, on_progress=None):
     """
-    Downloads the release's Setup.exe and runs it with /SILENT
-    /SUPPRESSMSGBOXES /NORESTART — no wizard, no "Welcome to Setup"
-    screen or license/directory pages, just Inno Setup's own small
-    native progress bar while it works (see installer.iss's [Run] —
-    skipifsilent was removed specifically so a silent run still reopens
-    the app afterward on its own). Same AppId as the current install
-    (installer.iss) means this is always an in-place upgrade, never a
-    fresh install, so config.json/drafts/etc. survive exactly as before.
+    HTTP Range-based resumable download — the Python twin of the
+    Pascal/PowerShell DownloadFileWithProgress() already built and live-
+    tested in installer.iss, reused here for the in-app payload download.
+    Same three response cases:
 
-    target_version, if given, names the download against UPDATE_CACHE_DIR
-    (see above) instead of a throwaway temp folder — and if a complete,
-    valid-looking copy from an earlier attempt is already sitting there,
-    this skips the download entirely and launches straight away. This is
-    what actually saves the user a repeat download after a failed
-    install, per explicit request.
+      - 206 Partial Content: server honored our Range request and is
+        resuming — the TRUE total comes from the Content-Range response
+        header ("bytes start-end/total"), never from this partial
+        response's own Content-Length (that only covers the remaining
+        bytes, not the whole file).
+      - 200 OK: server ignored Range entirely (some CDNs/redirects do)
+        and is sending the file from byte 0 — any local partial is stale
+        and gets overwritten from scratch.
+      - 416 Range Not Satisfiable: our Range start is already at/past the
+        server's EOF, i.e. the local file is already complete — nothing
+        left to do.
 
-    /SILENT, not /VERYSILENT: confirmed directly that once Chromium got
-    bundled into the installer (v1.1.6), the actual file-copy step alone
-    can take several minutes (a real, timed run: ~290s) — and this app's
-    own process has to exit before that starts (Windows won't let the
-    installer overwrite files this process still has open), so with
-    /VERYSILENT there'd be several minutes of NOTHING visible at all:
-    the app just closes, and nothing reappears for a long, silent
-    stretch that reads exactly like a failure (a real user hit this and
-    reported it as one). /SILENT's small native progress window is a
-    minor step back from "never looks like installing software," but a
-    long silent gap with zero feedback is a worse experience than a
-    small progress bar — this is the actual tradeoff, not a preference.
-
-    /DIR= pins the target explicitly to THIS running instance's own
-    folder (engine.DATA_BASE) rather than trusting Inno Setup's registry
-    lookup alone — matters if this is ever a portable copy rather than a
-    real tracked installation (AppId-based upgrade-detection only works
-    for a real install; without /DIR a portable copy's "update" would
-    silently install a SEPARATE fresh copy to the default location
-    instead of updating the one actually running, which is a much worse
-    version of "feels like new software").
-
-    Caller is expected to exit this app shortly after this returns so the
-    installer isn't blocked trying to close a running instance of it.
+    Per explicit request ("In case of the crash of the software mid
+    update or mid install... dont delete the update files which where
+    downloaded to temp file and let the installation retry again"): dest
+    is never touched on failure, so a retry naturally resumes instead of
+    re-downloading from zero.
     """
-    if target_version:
-        os.makedirs(UPDATE_CACHE_DIR, exist_ok=True)
-        dest = _cached_installer_path(target_version)
-        if os.path.isfile(dest) and os.path.getsize(dest) >= _MIN_VALID_INSTALLER_BYTES:
-            size = os.path.getsize(dest)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    resume_from = os.path.getsize(dest) if os.path.isfile(dest) else 0
+
+    headers = {"User-Agent": "OfficeTool-UpdateChecker"}
+    if resume_from > 0:
+        headers["Range"] = "bytes={}-".format(resume_from)
+
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        resp = urllib.request.urlopen(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        if e.code == 416:
+            total = resume_from
             if on_progress:
-                on_progress(size, size)
-            _launch_installer(dest)
+                on_progress(total, total)
             return dest
-    else:
-        os.makedirs(tempfile.gettempdir(), exist_ok=True)
-        dest = os.path.join(tempfile.mkdtemp(prefix="officetool_update_"), "OfficeTool-Setup.exe")
+        raise
 
-    req = urllib.request.Request(download_url, headers={"User-Agent": "OfficeTool-UpdateChecker"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        total = int(resp.headers.get("Content-Length", 0) or 0)
-        done = 0
-        with open(dest, "wb") as f:
+    try:
+        status = resp.status
+    except AttributeError:
+        status = resp.getcode()
+
+    if status == 206:
+        content_range = resp.headers.get("Content-Range", "") or ""
+        m = re.search(r"/(\d+)\s*$", content_range)
+        total = int(m.group(1)) if m else resume_from + int(resp.headers.get("Content-Length", 0) or 0)
+        mode, done = "ab", resume_from
+    else:
+        # Fresh start — either no Range was sent, or the server ignored it.
+        total, mode, done = int(resp.headers.get("Content-Length", 0) or 0), "wb", 0
+
+    try:
+        with open(dest, mode) as f:
             while True:
                 chunk = resp.read(65536)
                 if not chunk:
@@ -387,18 +347,220 @@ def download_and_launch_installer(download_url, target_version=None, on_progress
                 done += len(chunk)
                 if on_progress and total:
                     on_progress(done, total)
-    _launch_installer(dest)
+    finally:
+        resp.close()
     return dest
 
 
-# Real download progress for the UI — the confirm-then-click install flow
-# previously showed only a static "Downloading…" for however long an
-# 80MB+ installer took, with no feedback at all, which (combined with a
-# separate double-click-confirm timing bug) got reported as "nothing
-# happens" after confirming. _PROGRESS is a single shared dict (this app
-# only ever runs one update at a time) polled by the frontend via
-# /api/apply-update-progress while start_update_async() does the real
-# work on a background thread.
+_MIN_VALID_PAYLOAD_BYTES = 10 * 1024 * 1024  # a real payload zip is tens of MB+; anything smaller is a bad/partial download
+
+
+def download_and_stage_payload(download_url, target_version=None, on_progress=None):
+    """
+    Downloads the release's OfficeTool-Payload.zip (resumable, see
+    _download_resumable above) into UPDATE_CACHE_DIR, then extracts it
+    into a clean UPDATE_STAGING_DIR, verifying OfficeTool.exe actually
+    landed before calling it good. Replaces the old download-then-launch-
+    Setup.exe flow entirely — per explicit request ("do the update inside
+    the software no windows installation or nothing... The Update files
+    download with progress bar, also the installation as well"), nothing
+    here ever shells out to an external installer.
+
+    on_progress(phase, done, total) is called for phase in
+    ("downloading", "extracting") so the frontend can show a real bar for
+    both, not just the download.
+
+    Returns UPDATE_STAGING_DIR on success (ready for _swap_and_relaunch).
+    Raises on failure — the caller (start_inapp_update_async) is
+    responsible for surfacing that as _PROGRESS["status"]="error". The
+    cached zip is deliberately NOT deleted until extraction is verified
+    good, so a crash/failure mid-extract still leaves the download itself
+    reusable on retry instead of costing the user another 80MB+ fetch.
+    """
+    os.makedirs(UPDATE_CACHE_DIR, exist_ok=True)
+    zip_path = _cached_payload_path(target_version) if target_version else \
+        os.path.join(UPDATE_CACHE_DIR, "OfficeTool-Payload-latest.zip")
+
+    def _dl_progress(done, total):
+        if on_progress:
+            on_progress("downloading", done, total)
+
+    _download_resumable(download_url, zip_path, on_progress=_dl_progress)
+
+    if os.path.getsize(zip_path) < _MIN_VALID_PAYLOAD_BYTES:
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
+        raise RuntimeError("Downloaded update file is too small — likely a corrupt/interrupted download. Removed so a retry starts clean.")
+
+    import shutil
+    import zipfile
+    if os.path.isdir(UPDATE_STAGING_DIR):
+        shutil.rmtree(UPDATE_STAGING_DIR, ignore_errors=True)
+    os.makedirs(UPDATE_STAGING_DIR, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            members = zf.infolist()
+            total = len(members)
+            for i, member in enumerate(members, 1):
+                zf.extract(member, UPDATE_STAGING_DIR)
+                if on_progress:
+                    on_progress("extracting", i, total)
+    except zipfile.BadZipFile:
+        # A corrupt zip is never salvageable by resuming (unlike a
+        # truncated download, this is a content error) — remove it so a
+        # retry re-downloads instead of re-extracting the same bad file.
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
+        raise
+
+    if not os.path.isfile(os.path.join(UPDATE_STAGING_DIR, "OfficeTool.exe")):
+        raise RuntimeError("Extracted update is missing OfficeTool.exe — refusing to install a broken payload.")
+
+    try:
+        os.remove(zip_path)
+    except Exception:
+        pass
+
+    return UPDATE_STAGING_DIR
+
+
+def _ps_escape(s):
+    """Escapes a value for safe interpolation inside a PowerShell
+    double-quoted string literal (backtick is PS's escape char; $ would
+    otherwise trigger variable expansion)."""
+    return s.replace("`", "``").replace('"', '`"').replace("$", "`$")
+
+
+# The actual file-swap + relaunch happens in a DETACHED PowerShell script,
+# not in this Python process — because this process's own OfficeTool.exe
+# and _internal\*.dll/.pyd files are locked open for as long as it's
+# running, exactly the same constraint _launch_installer() above worked
+# around for the old Setup.exe flow. Written to a real .ps1 file (not
+# passed inline via -Command) so the multi-step swap+rollback logic reads
+# and debugs like a normal script instead of one giant escaped one-liner —
+# installer.iss's own Pascal Format()/'[' parsing traps (see that file's
+# comments) are exactly the class of bug this sidesteps.
+_SWAP_PS_TEMPLATE = r'''$ErrorActionPreference = "Stop"
+$log = "__LOG__"
+$targetPid = __PID__
+$dst = "__DST__"
+$src = "__SRC__"
+$exe = Join-Path $dst "OfficeTool.exe"
+
+function Log($msg) {
+    "$(Get-Date -Format o)  $msg" | Out-File -FilePath $log -Append -Encoding utf8
+}
+
+Log "in-app update swap starting, waiting for pid $targetPid to exit"
+$n = 0
+while ((Get-Process -Id $targetPid -ErrorAction SilentlyContinue) -and ($n -lt 40)) {
+    Start-Sleep -Milliseconds 250
+    $n++
+}
+
+$internalDst = Join-Path $dst "_internal"
+$internalBak = Join-Path $dst "_internal.bak"
+$exeBak = Join-Path $dst "OfficeTool.exe.bak"
+
+try {
+    if (Test-Path $internalBak) { Remove-Item -Recurse -Force $internalBak -ErrorAction SilentlyContinue }
+    if (Test-Path $exeBak) { Remove-Item -Force $exeBak -ErrorAction SilentlyContinue }
+
+    # Back up the CURRENT (working) files before touching anything, so a
+    # failure partway through this block can restore a known-good app
+    # instead of leaving a half-swapped, unlaunchable one.
+    if (Test-Path $internalDst) { Rename-Item -Path $internalDst -NewName "_internal.bak" }
+    if (Test-Path $exe) { Copy-Item -Path $exe -Destination $exeBak -Force }
+
+    Move-Item -Path (Join-Path $src "_internal") -Destination $internalDst -Force
+    Copy-Item -Path (Join-Path $src "OfficeTool.exe") -Destination $exe -Force
+    Get-ChildItem -Path $src -File | Where-Object { $_.Name -ne "OfficeTool.exe" } | ForEach-Object {
+        Copy-Item -Force $_.FullName (Join-Path $dst $_.Name)
+    }
+    Get-ChildItem -Path $src -Directory | Where-Object { $_.Name -ne "_internal" } | ForEach-Object {
+        Copy-Item -Recurse -Force $_.FullName (Join-Path $dst $_.Name)
+    }
+
+    Log "files swapped, launching new exe"
+    Start-Process -FilePath $exe
+    Start-Sleep -Seconds 3
+
+    $running = Get-Process -Name "OfficeTool" -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and ($_.Path -eq $exe)
+    }
+    if ($running) {
+        Log "new version confirmed running, cleaning up backups + staging"
+        Remove-Item -Recurse -Force $internalBak -ErrorAction SilentlyContinue
+        Remove-Item -Force $exeBak -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
+    } else {
+        throw "new OfficeTool.exe did not start"
+    }
+} catch {
+    Log ("swap FAILED: " + $_.Exception.Message + " -- rolling back to the previous version")
+    try {
+        if (Test-Path $internalDst) { Remove-Item -Recurse -Force $internalDst -ErrorAction SilentlyContinue }
+        if (Test-Path $internalBak) { Rename-Item -Path $internalBak -NewName "_internal" }
+        if (Test-Path $exeBak) { Copy-Item -Path $exeBak -Destination $exe -Force }
+        Start-Process -FilePath $exe
+        Log "rollback complete, previous version relaunched"
+    } catch {
+        Log ("ROLLBACK ALSO FAILED: " + $_.Exception.Message)
+    }
+}
+'''
+
+
+def _swap_and_relaunch(staging_dir):
+    """
+    Kills any lock-holding bundled_browser processes (same as the old
+    installer path — see _kill_bundled_browser_processes()'s own
+    docstring for the real RestartManager bug this guards against), then
+    hands off to the detached PowerShell script above: wait for THIS
+    process's own PID to actually exit, back up the current _internal\\ +
+    OfficeTool.exe, swap in the staged ones, relaunch, and only clean up
+    the backups once the new process is confirmed alive — rolling back
+    to the previous working version otherwise. Fire-and-forget: by the
+    time this script's real work starts, the Python process that launched
+    it is already gone.
+    """
+    _kill_bundled_browser_processes()
+    log_path = os.path.join(engine.DATA_BASE, "last_inapp_update.log")
+    ps1_path = os.path.join(UPDATE_CACHE_DIR, "_swap_helper.ps1")
+    os.makedirs(UPDATE_CACHE_DIR, exist_ok=True)
+
+    script = (
+        _SWAP_PS_TEMPLATE
+        .replace("__LOG__", _ps_escape(log_path))
+        .replace("__PID__", str(os.getpid()))
+        .replace("__DST__", _ps_escape(engine.DATA_BASE))
+        .replace("__SRC__", _ps_escape(staging_dir))
+    )
+    with open(ps1_path, "w", encoding="utf-8") as f:
+        f.write(script)
+
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", ps1_path],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        close_fds=True,
+    )
+
+
+# Real download/extract progress for the UI — see the dimmed in-app
+# overlay in app.py's page script. _PROGRESS is a single shared dict
+# (this app only ever runs one update at a time) polled via
+# /api/apply-update-progress while start_inapp_update_async() does the
+# real work on a background thread. status cycles through:
+#   "downloading" -> "extracting" -> "installing" -> (process exits)
+# "installing" is the signal to the frontend that the window is about to
+# vanish and reappear on its own — see actuallyInstallUpdate()'s poll
+# loop for how it turns that into "hold on, restarting..." instead of
+# just going blank.
 _PROGRESS = {"status": "idle", "done": 0, "total": 0, "error": None}
 
 
@@ -406,35 +568,35 @@ def get_progress():
     return dict(_PROGRESS)
 
 
-def start_update_async(download_url, target_version=None):
-    """Kicks off download_and_launch_installer() on a background thread
-    and returns immediately, so the calling HTTP request doesn't block for
-    the whole download — the frontend polls get_progress() instead. The
-    thread updates _PROGRESS as it goes; the caller (app.py) is
-    responsible for exiting the process shortly after status hits
-    "launched", same as before. target_version is threaded straight
-    through to download_and_launch_installer() for the installer cache
-    (see its own docstring)."""
+def start_inapp_update_async(download_url, target_version=None):
+    """
+    Kicks off download_and_stage_payload() + _swap_and_relaunch() on a
+    background thread and returns immediately, so the calling HTTP
+    request doesn't block for the whole download — the frontend polls
+    get_progress() instead. Per explicit final request ("you know if its
+    possilbe you can do the update inside the software no windows
+    installation or nothing, it will all be on the software only. The
+    Update files download with progress bar, also the installation as
+    well") this never launches Inno Setup at all — see
+    download_and_stage_payload()/_swap_and_relaunch() above for the
+    actual mechanism.
+    """
     _PROGRESS.update(status="downloading", done=0, total=0, error=None)
 
     def _run():
         try:
-            def _on_progress(done, total):
+            def _on_progress(phase, done, total):
+                _PROGRESS["status"] = phase
                 _PROGRESS["done"] = done
                 _PROGRESS["total"] = total
-            download_and_launch_installer(download_url, target_version=target_version, on_progress=_on_progress)
-            _PROGRESS["status"] = "launched"
+            staging_dir = download_and_stage_payload(download_url, target_version=target_version, on_progress=_on_progress)
+            _PROGRESS.update(status="installing", done=0, total=0)
+            _swap_and_relaunch(staging_dir)
             # Give the frontend's poll loop a real chance to see
-            # status="launched" — and, now, actually READ the toast
-            # explaining the install can take a few minutes (see the
-            # p.status==='launched' branch in app.py's page script) —
-            # before this window disappears. Was 1.0s (same grace the
-            # old synchronous version gave the HTTP response); too short
-            # to read a toast, not just show it, so the app closing right
-            # after felt abrupt right when the user most needed the
-            # context that a long silent wait afterward is normal, not a
-            # failure.
-            time.sleep(3.0)
+            # status="installing" (and switch to the "restarting now"
+            # message) before this process actually disappears — same
+            # grace-period rationale as the old start_update_async().
+            time.sleep(1.5)
             os._exit(0)
         except Exception as e:
             _PROGRESS["status"] = "error"
