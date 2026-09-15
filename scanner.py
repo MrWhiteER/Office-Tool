@@ -103,11 +103,18 @@ def _connect_device(win32com_client, device_id):
     raise RuntimeError("No scanner found — check it's connected, turned on, and its driver is installed.")
 
 
-def _capture_page_to_file(win32com_client, device_id, dest_path):
+def _capture_page_to_file(win32com_client, device_id, dest_path, dpi=200):
     """Isolated for the same reason as _list_scanner_infos() — connects,
     scans, AND saves to disk all in here, so every COM reference
     (device/item/image) is released before this returns and the caller
     can CoUninitialize() cleanly with nothing left dangling.
+
+    dpi: which resolution to request from the driver — see app.py's
+    SCAN_QUALITY_DPI (Eco/Balanced/Quality, same Settings > Printer &
+    Scanner idea as PRINT_QUALITY_DPI). Same "set defensively, scan with
+    the driver's own default if rejected" reasoning as the intent
+    property below — plenty of drivers only support a fixed set of DPI
+    steps and silently ignore an unsupported value rather than erroring.
 
     Requesting WIA_FORMAT_PNG is a polite ask, not a guarantee — plenty of
     real scanner drivers ignore it and hand back their own native format
@@ -119,7 +126,7 @@ def _capture_page_to_file(win32com_client, device_id, dest_path):
     driver's mood."""
     device = _connect_device(win32com_client, device_id)
     item = device.Items[1]
-    for prop_id, value in ((_WIA_PROP_INTENT, 1), (_WIA_PROP_DPI_X, 200), (_WIA_PROP_DPI_Y, 200)):
+    for prop_id, value in ((_WIA_PROP_INTENT, 1), (_WIA_PROP_DPI_X, dpi), (_WIA_PROP_DPI_Y, dpi)):
         try:
             item.Properties(prop_id).Value = value
         except Exception:
@@ -132,13 +139,17 @@ def _capture_page_to_file(win32com_client, device_id, dest_path):
     os.remove(raw_path)
 
 
-def scan_one_page(device_id=None, session_id=None):
+def scan_one_page(device_id=None, session_id=None, dpi=200):
     """
     Scans a single page and appends it to a scan session (creating one if
     session_id is None/unknown). Returns {"session_id", "page_count",
     "preview"} — preview is a small base64 PNG data URI so the UI can show
     a thumbnail of what was just captured, same pattern as the cloud photo
     gallery's own thumbnails.
+
+    dpi: threaded straight through to _capture_page_to_file — the caller
+    (app.py's /api/scanner-scan-page) resolves this from the saved Scan
+    Quality preference, same shape as printing's own quality->DPI lookup.
     """
     if session_id not in SCAN_SESSIONS:
         session_id = uuid.uuid4().hex
@@ -148,7 +159,7 @@ def scan_one_page(device_id=None, session_id=None):
 
     pythoncom, win32com_client = _com()
     try:
-        _capture_page_to_file(win32com_client, device_id, page_path)
+        _capture_page_to_file(win32com_client, device_id, page_path, dpi=dpi)
     finally:
         pythoncom.CoUninitialize()
     session["pages"].append(page_path)

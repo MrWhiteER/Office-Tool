@@ -4467,9 +4467,16 @@ def api_scanner_list():
 
 @app.post("/api/scanner-scan-page")
 def api_scanner_scan_page():
+    """Uses the saved Scan Quality preference (Settings > Printer &
+    Scanner) automatically — same "read the saved default server-side,
+    no frontend change needed per call site" shape as printing's own
+    quality lookup in api_print_document, so both Scan Now (Submissions)
+    and the standalone Scanner tool pick this up for free."""
     data = request.json or {}
+    scan_quality = load_cfg().get("print_prefs", {}).get("scan_quality")
+    dpi = SCAN_QUALITY_DPI.get(scan_quality, SCAN_QUALITY_DPI["balanced"])
     try:
-        result = scanner.scan_one_page(device_id=data.get("device_id") or None, session_id=data.get("session_id"))
+        result = scanner.scan_one_page(device_id=data.get("device_id") or None, session_id=data.get("session_id"), dpi=dpi)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
@@ -4654,6 +4661,7 @@ def api_print_prefs():
         "printer": prefs.get("printer", ""),
         "scanner_device_id": prefs.get("scanner_device_id", ""),
         "quality": prefs.get("quality") if prefs.get("quality") in PRINT_QUALITY_DPI else "balanced",
+        "scan_quality": prefs.get("scan_quality") if prefs.get("scan_quality") in SCAN_QUALITY_DPI else "balanced",
     })
 
 @app.post("/api/print-prefs")
@@ -4663,10 +4671,14 @@ def api_print_prefs_save():
     quality = (data.get("quality") or "balanced").strip().lower()
     if quality not in PRINT_QUALITY_DPI:
         quality = "balanced"
+    scan_quality = (data.get("scan_quality") or "balanced").strip().lower()
+    if scan_quality not in SCAN_QUALITY_DPI:
+        scan_quality = "balanced"
     cfg["print_prefs"] = {
         "printer": (data.get("printer") or "").strip(),
         "scanner_device_id": (data.get("scanner_device_id") or "").strip(),
         "quality": quality,
+        "scan_quality": scan_quality,
     }
     save_cfg(cfg)
     return jsonify({"ok": True})
@@ -4686,6 +4698,19 @@ def api_print_prefs_save():
 # app can safely set the same way for an arbitrary installed printer); it
 # only controls the resolution of what WE send.
 PRINT_QUALITY_DPI = {"eco": 150, "balanced": 300, "quality": 600}
+
+# Scan Quality (Settings > Printer & Scanner) — same idea as
+# PRINT_QUALITY_DPI above, per explicit request ("the scan option should
+# be with options of quality, the same way as the printing options are").
+# Lower values here are a real, genuine tradeoff (faster scans, smaller
+# files) rather than just a label — same reasoning as printing's own
+# comment. 200 (the old hardcoded default in scanner.py) is kept as
+# "balanced" so nobody's existing behavior changes unless they pick
+# something else. Document scans rarely benefit from going past 300 —
+# unlike printing there's no printer-native-DPI ceiling to cap against,
+# so "quality" stops at a sensible document-scan ceiling instead of
+# matching print's own 600.
+SCAN_QUALITY_DPI = {"eco": 150, "balanced": 200, "quality": 300}
 
 def _print_pdf_native(pdf_path, printer_name, quality="balanced"):
     """Prints a PDF using ONLY Windows' own GDI printing API plus PyMuPDF
@@ -6929,6 +6954,18 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
     <div class=card><div class=ch>Scanner</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0 0 10px">Used by Scan Now (Menu &gt; Scanner) whenever more than one scanner is connected — with only one connected, that one's always used regardless of this.</p>
       <div class=f><label>Default scanner</label><select id=set-default-scanner onchange=saveScannerPref()><option value="">(Ask each time / only one connected)</option></select></div>
+      <!-- Scan Quality — same idea and pattern as Print Quality above,
+           per explicit request ("the scan option should be with options
+           of quality, the same way as the printing options are").
+           Controls the DPI scan_one_page() requests from the scanner
+           driver (see app.py's SCAN_QUALITY_DPI). -->
+      <div class=f style="margin-top:10px"><label>Scan quality</label>
+        <div class=seg id=set-scan-quality-seg>
+          <button type=button data-q=eco onclick="setScanQuality('eco')" title="Fastest, lowest detail — good for quick internal records">Eco</button>
+          <button type=button data-q=balanced onclick="setScanQuality('balanced')" title="The default — a good match for most documents">Balanced</button>
+          <button type=button data-q=quality onclick="setScanQuality('quality')" title="Sharpest detail, slower, larger file — best for client-facing scans">Quality</button>
+        </div>
+      </div>
       <!-- Distinguishes "nothing chosen yet, but Windows sees a scanner"
            (this dropdown option's own label already covers that) from
            "Windows doesn't see ANY scanner at all right now" — the
@@ -8084,12 +8121,13 @@ async function loadPrinterScannerSettings(){
   // chosen yet, and that's fine."
   $('set-scanner-status').textContent=(scannersR.scanners||[]).length?'':
     'No scanner detected by Windows right now — if one is plugged in and powered on, install its scanner/WIA driver (the print driver alone usually isn\'t enough) or check Settings > Bluetooth & devices > Printers & scanners.';
-  syncPrintQualitySeg(prefsR.quality||'balanced')}
+  syncPrintQualitySeg(prefsR.quality||'balanced');
+  syncScanQualitySeg(prefsR.scan_quality||'balanced')}
 // Same "read every field's CURRENT on-screen value and save them all
 // together" shape as the rest of this shared prefs object (printer,
 // scanner_device_id) — /api/print-prefs POST replaces the whole object
 // per call, so a save that only sent the field that actually changed
-// would silently blank out the other two every time.
+// would silently blank out the other three every time.
 function currentPrintQuality(){
   const on=document.querySelector('#set-print-quality-seg button.on');
   return on?on.dataset.q:'balanced'}
@@ -8097,9 +8135,18 @@ function syncPrintQualitySeg(q){
   const seg=$('set-print-quality-seg');if(!seg)return;
   seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.q===q))}
 function setPrintQuality(q){syncPrintQualitySeg(q);savePrinterPref()}
+// Scan Quality — identical shape to Print Quality just above, its own
+// segmented control (Settings > Printer & Scanner > Scanner card).
+function currentScanQuality(){
+  const on=document.querySelector('#set-scan-quality-seg button.on');
+  return on?on.dataset.q:'balanced'}
+function syncScanQualitySeg(q){
+  const seg=$('set-scan-quality-seg');if(!seg)return;
+  seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.q===q))}
+function setScanQuality(q){syncScanQualitySeg(q);savePrinterPref()}
 async function savePrinterPref(){
   const r=await fetch('/api/print-prefs',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({printer:$('set-default-printer').value,scanner_device_id:$('set-default-scanner').value,quality:currentPrintQuality()})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+    body:JSON.stringify({printer:$('set-default-printer').value,scanner_device_id:$('set-default-scanner').value,quality:currentPrintQuality(),scan_quality:currentScanQuality()})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
   $('set-printer-status').textContent=r.ok?'Saved.':('Could not save: '+(r.error||'unknown error'))}
 function saveScannerPref(){savePrinterPref()}   // same prefs object, one shared save
 async function refreshPrinterScannerSettings(){
