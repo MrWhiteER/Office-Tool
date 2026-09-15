@@ -50,6 +50,32 @@ echo Portable use: copy that .exe (and its _internal folder) into THIS
 echo project folder so it finds your existing config.json/drafts/submissions
 echo here — no data migration needed, it just reads/writes right where it's put.
 echo.
+echo ---- Packaging the payload (OfficeTool-Payload.zip) ----
+REM Per explicit request ("make it that the installer will be very
+REM light... hook all the data from github"): installer.iss no longer
+REM bundles dist\OfficeTool\* into Setup.exe directly — it downloads THIS
+REM zip from the matching GitHub release at install time instead (see
+REM installer.iss's own top-of-file comment). Built here, every single
+REM build, same as the .exe itself — it's the exact same
+REM dist\OfficeTool\ contents, just zipped instead of embedded, so there's
+REM nothing extra to keep in sync by hand.
+REM
+REM Compress-Archive (not 7-Zip/WinRAR) — already on every Windows dev
+REM machine that can run this script at all, so no extra build-tool
+REM install beyond what building the .exe itself already needed.
+if not exist installer_output mkdir installer_output
+del /q installer_output\OfficeTool-Payload.zip 2>nul
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\OfficeTool\*' -DestinationPath 'installer_output\OfficeTool-Payload.zip' -CompressionLevel Optimal"
+if not exist installer_output\OfficeTool-Payload.zip (
+  echo Payload zip failed to build — aborting before the installer step.
+  pause
+  exit /b 1
+)
+echo Payload: installer_output\OfficeTool-Payload.zip
+echo IMPORTANT: `gh release create` must attach BOTH OfficeTool-Setup.exe
+echo AND OfficeTool-Payload.zip to the same release tag — the installer has
+echo nothing to install without the payload zip sitting on that same release.
+echo.
 echo ---- Building the installer (installer.iss) ----
 REM Bump the VERSION file at the project root before shipping an update —
 REM it's read here AND by the running app (version.py), so both always

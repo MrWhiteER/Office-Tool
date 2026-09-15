@@ -7,18 +7,32 @@ GitHub's REST API is free and unauthenticated for public repos.
 ---- One-time setup, once the project is pushed to GitHub ----
 1. Set GITHUB_REPO below to "yourusername/Office-Tool".
 2. Create your first Release on GitHub, tagged "v1.0.0" (must match VERSION
-   at the repo root — see version.py), with installer_output\
-   OfficeTool-Setup.exe (built by build.bat) attached as the release asset.
+   at the repo root — see version.py), with BOTH installer_output\
+   OfficeTool-Setup.exe AND installer_output\OfficeTool-Payload.zip
+   (both built by build.bat) attached as release assets.
 
 ---- Shipping every future update ----
 1. Bump the VERSION file (e.g. "1.0.1").
-2. Rerun build.bat — it rebuilds the .exe AND the installer with that
-   version baked in.
-3. On GitHub: Releases -> Draft a new release, tag "v1.0.1", attach the new
-   installer_output\OfficeTool-Setup.exe.
+2. Rerun build.bat — it rebuilds the .exe, the payload zip, and the
+   installer, all with that version baked in.
+3. On GitHub: Releases -> Draft a new release, tag "v1.0.1", attach BOTH
+   installer_output\OfficeTool-Setup.exe AND
+   installer_output\OfficeTool-Payload.zip.
 That's it — every copy of the app already running polls this API on its own
 (see checkForAppUpdate() in app.py's page script) and will offer the update
 automatically next time it's open, no manual download for the user.
+
+---- Why the installer needs the payload zip too (thin-installer split) ----
+Per explicit request ("make it that the installer will be very light...
+hook all the data from github"), Setup.exe no longer embeds the app's own
+files at all — it's just the small Inno Setup wizard shell now, and
+downloads OfficeTool-Payload.zip straight from this SAME release's GitHub
+assets during install (see installer.iss's own top-of-file comment for the
+mechanism). This module's own asset picker below only ever looks for a
+"...setup.exe"-named asset, so the payload zip sitting alongside it never
+confuses THIS lookup — but forgetting to attach the zip breaks every fresh
+install and in-place update alike (Setup.exe would have nothing to fetch),
+so the two assets are never optional independently of each other.
 """
 import json
 import os
