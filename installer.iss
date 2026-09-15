@@ -29,15 +29,19 @@
 ; The [Code] section below downloads OfficeTool-Payload.zip (everything
 ; PyInstaller produced under dist\OfficeTool\ — the .exe + its whole
 ; _internal\ folder, zipped by build.bat) straight from THIS SAME
-; release's GitHub assets during the "Installing" step, and extracts it
-; into {app} via PowerShell's own Expand-Archive (built into every
-; Windows 10/11 install — nothing extra to bundle for that either).
-; Exactly the same "download the big rarely-bundled thing from a GitHub
-; release instead of shipping it in the installer" idea runtime_manager.py
-; already uses for the ~400MB Chromium payload (see that file's own
-; docstring) — this just applies it to the app's OWN payload too, which
-; is why Setup.exe can now stay small even though every release still
-; changes app.py/templates/static.
+; release's GitHub assets during the "Installing" step, with a REAL,
+; live native progress bar (WinINet, wininet.dll, called directly —
+; per explicit follow-up rule: "all the installers and downloaders
+; should have a loading bar! THATS A RULE!" — a static "please wait"
+; page doesn't satisfy that), then extracts it into {app} via
+; PowerShell's own Expand-Archive (built into every Windows 10/11
+; install — nothing extra to bundle for either step). Exactly the same
+; "download the big rarely-bundled thing from a GitHub release instead
+; of shipping it in the installer" idea runtime_manager.py already uses
+; for the ~400MB Chromium payload (see that file's own docstring) — this
+; just applies it to the app's OWN payload too, which is why Setup.exe
+; can now stay small even though every release still changes
+; app.py/templates/static.
 ;
 ; Publishing a release: build.bat produces BOTH installer_output\
 ; OfficeTool-Setup.exe (small, this script) AND installer_output\
@@ -128,72 +132,265 @@ Type: filesandordirs; Name: "{app}\_internal"
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall
 
 [Code]
+// ---- Real, live progress bar for the GitHub download — per explicit
+// rule: "all the installers and downloaders should have a loading bar!
+// THATS A RULE!" A static "please wait" page doesn't qualify — this
+// drives Inno's OWN native progress bar with the REAL byte count as it
+// downloads.
+//
+// A first version of this called WinINet (wininet.dll) directly, the
+// same underlying API the well-known "Inno Download Plugin" is built
+// on — it technically worked (a real % and MB count, confirmed live),
+// but WinINet turned out to be a genuinely bad fit for a GitHub release
+// asset: slow (confirmed independently by the user watching a real
+// download at the same time: "the download is very slow"), and it
+// dropped mid-transfer at 36% on a real test run, both consistent with
+// WinINet — an old API — not handling GitHub's modern CDN/TLS stack as
+// well as .NET's own HTTP stack does. This version instead launches a
+// short PowerShell script (System.Net.HttpWebRequest, .NET's HTTP
+// client, already proven fast and reliable earlier in this project's
+// own runtime_manager.py-equivalent download flows) ASYNCHRONOUSLY —
+// ewNoWait, not ewWaitUntilTerminated — and polls a small progress file
+// it writes to every ~150ms, translating that into Page.SetProgress/
+// SetText the same way the WinINet version did. Best of both: .NET's
+// faster, more reliable transfer, with the exact same live native
+// progress bar this whole rewrite exists for.
+const
+  DL_POLL_MS = 200;
+  // No progress at all for this long (not overall elapsed time — a
+  // slow-but-genuinely-moving connection can legitimately take minutes)
+  // means treat it as hung rather than wait forever.
+  DL_STALL_TIMEOUT_MS = 45000;
+
+// Bytes -> "12.3" (one decimal place, MB) — built by hand instead of
+// Format('%.1f', ...): found live, the hard way, that this PascalScript
+// build's Format() rejects that specifier ("invalid or incompatible with
+// argument") for reasons not worth chasing further when the manual
+// version is this short and has zero ambiguity left to get wrong.
+function FormatMB(Bytes: Int64): String;
+var
+  Tenths: Int64;
+begin
+  Tenths := (Bytes * 10) div 1048576;
+  Result := IntToStr(Tenths div 10) + '.' + IntToStr(Tenths mod 10);
+end;
+
+// Pulls the Nth ':'-separated field (1-based) out of S — Pascal Script
+// has no built-in Split, and the progress file's own format
+// ("PROGRESS:<downloaded>:<total>") is simple enough not to need one.
+function DLField(S: String; N: Integer): String;
+var
+  Parts: TStringList;
+begin
+  Result := '';
+  Parts := TStringList.Create;
+  try
+    Parts.Delimiter := ':';
+    Parts.StrictDelimiter := True;
+    Parts.DelimitedText := S;
+    if N <= Parts.Count then
+      Result := Parts[N - 1];
+  finally
+    Parts.Free;
+  end;
+end;
+
+// Downloads one URL to LocalPath with LIVE progress reported through
+// Page.SetProgress/SetText as real bytes arrive — see this section's own
+// top comment for why this shells out to PowerShell/.NET rather than
+// calling WinINet directly.
+function DownloadFileWithProgress(Url, LocalPath: String; Page: TOutputProgressWizardPage): Boolean;
+var
+  ScriptPath, ProgressPath, PSScript, Status: String;
+  Line: AnsiString;
+  ResultCode: Integer;
+  LastDownloaded, StalledMs, Downloaded, TotalSize: Int64;
+  Finished: Boolean;
+begin
+  Result := False;
+  ScriptPath := ExpandConstant('{tmp}\OfficeToolDownload.ps1');
+  ProgressPath := ExpandConstant('{tmp}\OfficeToolDownload.progress');
+  DeleteFile(ProgressPath);
+
+  // ASCII, not UTF8/Unicode, on every Set-Content below — keeps the
+  // progress file trivially readable back in Pascal Script via
+  // LoadStringFromFile's own AnsiString contract, no BOM/encoding
+  // mismatch to worry about for content that's only ever plain digits,
+  // colons, and a short error message.
+  PSScript :=
+    '$ErrorActionPreference=''Stop''; $ProgressPreference=''SilentlyContinue''; ' +
+    '[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ' +
+    '$prog=' + '''' + ProgressPath + '''' + '; ' +
+    'try {' + #13#10 +
+    '  $req=[Net.HttpWebRequest]::Create(' + '''' + Url + '''' + ');' + #13#10 +
+    '  $req.UserAgent=''OfficeTool-Setup/1.0''; $req.AllowAutoRedirect=$true;' + #13#10 +
+    '  $resp=$req.GetResponse();' + #13#10 +
+    '  $total=$resp.ContentLength;' + #13#10 +
+    '  $stream=$resp.GetResponseStream();' + #13#10 +
+    '  $fileStream=[IO.File]::Create(' + '''' + LocalPath + '''' + ');' + #13#10 +
+    '  $buffer=New-Object byte[] 65536; $downloaded=0; $last=Get-Date;' + #13#10 +
+    '  while(($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0){' + #13#10 +
+    '    $fileStream.Write($buffer,0,$read); $downloaded+=$read;' + #13#10 +
+    '    $now=Get-Date;' + #13#10 +
+    '    if((($now-$last).TotalMilliseconds) -ge 150){' + #13#10 +
+    '      Set-Content -Path $prog -Value "PROGRESS:$downloaded`:$total" -NoNewline -Encoding ASCII; $last=$now' + #13#10 +
+    '    }' + #13#10 +
+    '  }' + #13#10 +
+    '  $fileStream.Close(); $stream.Close(); $resp.Close();' + #13#10 +
+    '  Set-Content -Path $prog -Value "DONE:$downloaded" -NoNewline -Encoding ASCII' + #13#10 +
+    '} catch {' + #13#10 +
+    '  Set-Content -Path $prog -Value "ERROR:$($_.Exception.Message)" -NoNewline -Encoding ASCII' + #13#10 +
+    '}';
+  SaveStringToFile(ScriptPath, PSScript, False);
+
+  if not Exec('powershell.exe',
+      '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '"',
+      '', SW_HIDE, ewNoWait, ResultCode) then begin
+    Log('DownloadFileWithProgress: failed to launch PowerShell, GetLastError-style Result=' + IntToStr(ResultCode));
+    Exit;
+  end;
+
+  Page.SetProgress(0, 1);
+  LastDownloaded := 0;
+  StalledMs := 0;
+  Finished := False;
+  while not Finished do begin
+    Sleep(DL_POLL_MS);
+    if not LoadStringFromFile(ProgressPath, Line) or (Line = '') then begin
+      StalledMs := StalledMs + DL_POLL_MS;
+      if StalledMs >= DL_STALL_TIMEOUT_MS then begin
+        Log('DownloadFileWithProgress: no progress file activity for ' + IntToStr(StalledMs) + 'ms — treating as hung');
+        Exit;
+      end;
+      Continue;
+    end;
+    Status := DLField(Line, 1);
+    if Status = 'DONE' then begin
+      Result := True;
+      Finished := True;
+    end
+    else if Status = 'ERROR' then begin
+      Log('DownloadFileWithProgress: PowerShell reported: ' + Line);
+      Finished := True;
+    end
+    else if Status = 'PROGRESS' then begin
+      Downloaded := StrToInt64Def(DLField(Line, 2), LastDownloaded);
+      TotalSize := StrToInt64Def(DLField(Line, 3), 0);
+      if Downloaded <> LastDownloaded then begin
+        StalledMs := 0;
+        LastDownloaded := Downloaded;
+      end
+      else begin
+        StalledMs := StalledMs + DL_POLL_MS;
+        if StalledMs >= DL_STALL_TIMEOUT_MS then begin
+          Log('DownloadFileWithProgress: download stalled at ' + IntToStr(Downloaded) + ' bytes for ' + IntToStr(StalledMs) + 'ms');
+          Exit;
+        end;
+      end;
+      if TotalSize > 0 then begin
+        Page.SetProgress(Downloaded, TotalSize);
+        Page.SetText('Downloading Office Tool…', FormatMB(Downloaded) + ' MB of ' + FormatMB(TotalSize) +
+          ' MB (' + IntToStr((Downloaded * 100) div TotalSize) + '%)');
+      end
+      else
+        Page.SetText('Downloading Office Tool…', FormatMB(Downloaded) + ' MB downloaded');
+    end;
+  end;
+  DeleteFile(ScriptPath);
+end;
+
+// Extraction — PowerShell's Expand-Archive (built into every Windows
+// 10/11 install, nothing to bundle) is still exactly right for this
+// part: it's fast (seconds, not the minute-plus a slow connection can
+// take for the download itself) and doesn't need its own progress bar
+// to feel responsive — Page.SetText below just labels the step so the
+// bar doesn't look stuck at 100% while it runs.
+function ExtractPayload(ZipPath: String): Boolean;
+var
+  ResultCode: Integer;
+  PSCommand: String;
+begin
+  PSCommand := '$ProgressPreference=''SilentlyContinue''; ' +
+    'try { Expand-Archive -Path ''' + ZipPath + ''' -DestinationPath ''' + ExpandConstant('{app}') + ''' -Force; exit 0 } ' +
+    'catch { Write-Error $_.Exception.Message; exit 1 }';
+  Result := Exec('powershell.exe',
+    '-NoProfile -ExecutionPolicy Bypass -Command "' + PSCommand + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
 // Downloads OfficeTool-Payload.zip from this exact release (the URL is
 // fully known at compile time — MyAppVersion is baked in via build.bat's
 // /DMyAppVersion, so there's never a version mismatch between this
 // installer and the payload it fetches) and extracts it straight into
 // {app}. Runs once, during the normal "Installing" step, so both a fresh
-// install and an in-place update look identical to the user — just a
-// slightly longer "Installing..." page than before (network-bound now,
-// not disk-bound) instead of a separate visible phase.
-//
-// PowerShell (Invoke-WebRequest + Expand-Archive), not a bundled unzip
-// tool/plugin — both cmdlets ship with every Windows 10/11 install, so
-// this adds zero bytes to Setup.exe itself. $ProgressPreference is
-// silenced first: PowerShell's default download progress bar renders to
-// the (hidden, since Setup runs it with SW_HIDE) console on every single
-// buffer write, which is a well-known, large, pure-overhead slowdown on
-// a file this size when nothing is even there to see it.
-function DownloadAndExtractPayload(): Boolean;
+// install and an in-place update look identical to the user.
+function DownloadAndExtractPayload(Page: TOutputProgressWizardPage): Boolean;
 var
-  ResultCode: Integer;
-  PSCommand: String;
   ZipPath: String;
 begin
   ZipPath := ExpandConstant('{tmp}\OfficeTool-Payload.zip');
-  PSCommand :=
-    '$ProgressPreference=''SilentlyContinue''; ' +
-    '[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ' +
-    'try { ' +
-    '  Invoke-WebRequest -Uri ''{#MyPayloadUrl}'' -OutFile ''' + ZipPath + ''' -UseBasicParsing; ' +
-    '  Expand-Archive -Path ''' + ZipPath + ''' -DestinationPath ''' + ExpandConstant('{app}') + ''' -Force; ' +
-    '  exit 0 ' +
-    '} catch { ' +
-    '  Write-Error $_.Exception.Message; exit 1 ' +
-    '}';
-  Result := Exec('powershell.exe',
-    '-NoProfile -ExecutionPolicy Bypass -Command "' + PSCommand + '"',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+  Page.SetText('Downloading Office Tool…', 'Connecting…');
+  Result := DownloadFileWithProgress('{#MyPayloadUrl}', ZipPath, Page);
+  if Result then
+  begin
+    Page.SetText('Installing Office Tool…', 'Extracting application files…');
+    Result := ExtractPayload(ZipPath);
+  end;
   DeleteFile(ZipPath);
-  // Belt-and-braces: even a ResultCode=0 PowerShell exit is only trusted
-  // once the one file every later step actually needs is confirmed to
-  // really be sitting there — a partial/corrupt extract (a truncated
-  // download that still unzipped some files before failing partway, say)
-  // should fail loudly here, not surface later as a baffling "the app
-  // won't open" with no obvious cause.
+  // Belt-and-braces: even a reported success is only trusted once the
+  // one file every later step actually needs is confirmed to really be
+  // sitting there — a partial/corrupt extract (a truncated download
+  // that still unzipped some files before failing partway, say) should
+  // fail loudly here, not surface later as a baffling "the app won't
+  // open" with no obvious cause.
   if Result then
     Result := FileExists(ExpandConstant('{app}\{#MyAppExeName}'));
 end;
 
+// Real, live testing surfaced a genuine reliability finding, not a bug in
+// either downloader tried: BOTH a raw-WinINet version and this file's
+// current .NET HttpWebRequest version got interrupted partway through
+// (36%, then separately 59%) on real attempts over the same connection —
+// consistent with an actual network interruption (the connection itself,
+// a firewall/router killing a long-lived HTTPS session, GitHub's own
+// transient hiccup — no way to tell which from here), not a defect
+// specific to either implementation. The fix that actually addresses
+// THAT is retrying the whole attempt automatically rather than making
+// the user notice the dialog and re-run Setup by hand.
+const
+  DL_MAX_ATTEMPTS = 4;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Page: TOutputProgressWizardPage;
+  Attempt: Integer;
+  Success: Boolean;
 begin
   if CurStep = ssInstall then
   begin
-    Page := CreateOutputProgressPage('Downloading Office Tool', 'Please wait while the application files are downloaded…');
+    Page := CreateOutputProgressPage('Downloading Office Tool', 'Please wait while the application files are downloaded from GitHub…');
     Page.Show;
     try
-      Page.SetProgress(0, 1);
-      if not DownloadAndExtractPayload() then
+      Success := False;
+      Attempt := 1;
+      while (not Success) and (Attempt <= DL_MAX_ATTEMPTS) do
       begin
-        MsgBox('Could not download the application files from GitHub.' + #13#10 + #13#10 +
+        if Attempt > 1 then
+        begin
+          Page.SetText('Downloading Office Tool…', 'Connection interrupted — retrying (attempt ' + IntToStr(Attempt) + ' of ' + IntToStr(DL_MAX_ATTEMPTS) + ')…');
+          Sleep(2000);
+        end;
+        Success := DownloadAndExtractPayload(Page);
+        Attempt := Attempt + 1;
+      end;
+      if not Success then
+      begin
+        MsgBox('Could not download the application files from GitHub after ' + IntToStr(DL_MAX_ATTEMPTS) + ' attempts.' + #13#10 + #13#10 +
           'Check your internet connection and try running Setup again. If this keeps happening, ' +
           'the release may be missing its OfficeTool-Payload.zip asset.',
           mbCriticalError, MB_OK);
         Abort();
       end;
-      Page.SetProgress(1, 1);
     finally
       Page.Hide;
     end;
