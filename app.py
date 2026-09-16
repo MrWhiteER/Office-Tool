@@ -1079,6 +1079,42 @@ def save_drafts(brand, drafts):
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(drafts, f, indent=2)
     os.replace(tmp_path, path)
+    _backup_drafts_to_cloud_async(brand.upper(), drafts)
+
+# Per explicit request ("the software can crash... save the latest data
+# silently every 5 seconds... cloud can work at its max time, but it also
+# should save in cache/short-term memory locally"): the frontend now calls
+# /api/drafts (which lands right here) every 5s while a document Build
+# screen is open (see startDraftAutosaveLoop() in the page script), not just
+# on tab-switch/close like before. The local write above already happens on
+# EVERY one of those calls — fast, atomic, no network dependency, so a hard
+# crash never loses more than ~5s of work regardless of what happens below.
+# This is the SEPARATE, slower half: best-effort mirrors the same drafts
+# file to R2 too, so the in-progress work survives even losing this whole
+# install, not just a crash of it — deliberately decoupled from the 5s local
+# cadence (a real cloud PUT every 5s, per document, is the exact cost this
+# feature was asked to avoid) via a simple per-brand cooldown.
+_DRAFTS_CLOUD_LAST_UPLOAD = {}
+_DRAFTS_CLOUD_MIN_INTERVAL = 45  # seconds between cloud backups of the SAME brand's drafts
+
+def _backup_drafts_to_cloud_async(brand, drafts):
+    now = time.time()
+    if now - _DRAFTS_CLOUD_LAST_UPLOAD.get(brand, 0) < _DRAFTS_CLOUD_MIN_INTERVAL:
+        return
+    _DRAFTS_CLOUD_LAST_UPLOAD[brand] = now
+    payload = json.dumps(drafts, indent=2).encode("utf-8")
+    def _do():
+        try:
+            key = photo_store.SYSTEM_PREFIX + "drafts_backup/" + brand + ".json"
+            # allow_bundled_write=True — same reasoning as accounts.py's
+            # save_user_setting(): a user's own in-progress work backing
+            # itself up must work from any install, not just the admin's.
+            photo_store.put_bytes(key, payload, content_type="application/json", allow_bundled_write=True)
+        except Exception:
+            pass  # best-effort — a failed backup must never surface as a
+            # failed (local) draft save; it just means this snapshot stays
+            # local-only until the next successful one goes through
+    threading.Thread(target=_do, daemon=True).start()
 
 # ---------------------------------------------------------------- submissions (QTN -> LPO -> DO -> scanned DO -> INV, bundled and tracked together)
 SUBMISSIONS_DIR = os.path.join(engine.DATA_BASE, "submissions")
@@ -8289,6 +8325,7 @@ function view(v){
   // minimize (see stmtSetRevealed's own comment for the other 2 triggers).
   if(v!=='statement')stmtSetRevealed(false);
   const isDoc=DOC_VIEW_LIST.includes(v);
+  if(isDoc)startDraftAutosaveLoop();else stopDraftAutosaveLoop();
   $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-cloudmanager').classList.toggle('hide',v!='cloudmanager');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');$('v-scanner').classList.toggle('hide',v!='scanner');
   $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-cloudmanager').classList.toggle('on',v=='cloudmanager');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
   // Update/Admin Tools buttons: only make sense while looking at Settings
@@ -14467,6 +14504,27 @@ function autosaveDraftBeacon(){
   navigator.sendBeacon('/api/drafts',new Blob([JSON.stringify(body)],{type:'application/json'}))}
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')autosaveDraft()});
 window.addEventListener('pagehide',autosaveDraftBeacon);
+// Per explicit request: a crash (or the app being killed outright) doesn't
+// fire visibilitychange/pagehide at all, so until now the ONLY safety net
+// covered a graceful tab-switch/close — anything typed since the last one
+// of those was simply gone. This runs autosaveDraft() on a flat 5s clock
+// the whole time a document Build screen is open (see view()'s own
+// isDoc-gated start/stop call, right where it already toggles bar-print-btn
+// etc.), so at most ~5s of work is ever at risk regardless of how the app
+// goes down. Same autosaveDraft() as the existing triggers — its own
+// `if(!data.company)return` guard already makes this a cheap no-op on an
+// empty/unstarted form, and it's a fast local disk write (see save_drafts's
+// own comment on the atomic write-then-rename), not a network-bound one, so
+// firing it every 5s is not the "hammering the cloud" cost this might
+// sound like — that part (backing the draft up to R2 too, in case the
+// whole install is lost, not just crashed) is deliberately decoupled onto
+// its own much slower cooldown server-side (_backup_drafts_to_cloud_async).
+let draftAutosaveTimer=null;
+function startDraftAutosaveLoop(){
+  if(draftAutosaveTimer)return;
+  draftAutosaveTimer=setInterval(autosaveDraft,5000)}
+function stopDraftAutosaveLoop(){
+  clearInterval(draftAutosaveTimer);draftAutosaveTimer=null}
 // Shown once on launch (see checkUnfinishedDraftsOnLaunch in the init chain
 // below) if the current brand has any saved drafts — autosaved or manual,
 // same list either way. Uses the .clientmodal centered-dialog pattern (not
