@@ -551,6 +551,38 @@ def upload_document(local_path, key_suffix):
         return False
 
 
+def delete_document(key_suffix):
+    """The other half of upload_document() that was missing entirely — per
+    explicit report ("after deleting the files, they come back"): deleting
+    a document in All Docs only ever removed the LOCAL copy
+    (os.remove/glob in app.py's /api/alldocs-delete and /api/file-op).
+    Since every install continuously pulls documents/ back down from R2
+    on its own sync loop (see sync_down_documents, called every 30s), a
+    document whose cloud copy was never actually deleted just gets
+    re-downloaded again within half a minute — exactly the reported
+    symptom, not a caching quirk. key_suffix is the same
+    brand/doctype/filename shape upload_document() uses, so this deletes
+    the exact object a prior upload_document() call for that same file
+    would have written. allow_bundled_write=True for the same reason
+    upload_document() has it: deleting a document you generated (or are
+    editing) needs to work from any install, not just the admin's own.
+    Best-effort like every other write here — a delete that can't reach
+    R2 right now (offline, R2 down) shouldn't block removing the local
+    copy the user asked for; it just means that stale cloud copy lingers
+    until this is called again successfully."""
+    try:
+        client = _client(require_write=True, allow_bundled_write=True)
+        bucket = _bucket(require_write=True, allow_bundled_write=True)
+    except Exception:
+        return False
+    key = DOCUMENTS_PREFIX + key_suffix.replace(os.sep, "/")
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+        return True
+    except Exception:
+        return False
+
+
 def sync_down_documents(local_base_folder, on_progress=None):
     """
     Pulls every object under DOCUMENTS_PREFIX into local_base_folder,

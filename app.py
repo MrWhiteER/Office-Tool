@@ -3797,15 +3797,47 @@ def _api_doc_from_pdf(rel, path, meta):
 
 # ---------------------------------------------------------------- All Docs bulk actions (multi-select Delete/Clone/Cut)
 # A doc's "canonical" path (xlsx if it has one, else pdf) always has up to
-# 4 real sibling files sharing its exact stem: the xlsx/pdf pair itself,
-# engine.markdown_path's .md companion, and — for HTML_DOC_TYPES only —
-# engine.sidecar_path's .json (the exact data the PDF was rendered from).
-# Same file set /api/generate's own `replace` cleanup already touches; this
-# is that same logic, just reachable directly instead of only as a side
-# effect of overwriting a document under a new name.
+# 5 real sibling files sharing its exact stem: the xlsx/pdf pair itself,
+# engine.markdown_path's .md companion, _doc_meta_path's .meta.json
+# (generated-by/download-history attribution), and — for HTML_DOC_TYPES
+# only — engine.sidecar_path's .json (the exact data the PDF was rendered
+# from). Same file set /api/generate's own `replace` cleanup already
+# touches; this is that same logic, just reachable directly instead of
+# only as a side effect of overwriting a document under a new name.
 def _related_doc_files(path):
     stem = os.path.splitext(path)[0]
-    return [f for f in (stem + ".xlsx", stem + ".pdf", stem + ".md", stem + ".json") if os.path.exists(f)]
+    return [f for f in (stem + ".xlsx", stem + ".pdf", stem + ".md", stem + ".json", stem + ".meta.json") if os.path.exists(f)]
+
+# Real bug, reported live ("after deleting the files, they come back"):
+# every LOCAL delete site below only ever called os.remove() — never
+# anything that touched the cloud copy _backup_doc_to_cloud() (see its
+# own comment) uploads on every Generate. Since every install
+# continuously pulls documents/ back down from R2 on its own 30s sync
+# loop (see _documents_sync_loop further down), a document whose cloud
+# copy was never actually deleted just gets re-downloaded again within
+# half a minute — not a caching quirk, the delete genuinely never
+# reached the one place that mattered. Mirrors _backup_doc_to_cloud's own
+# brand/doctype/filename key construction exactly (parse_filename's own
+# "brand" field is None for a pre-multi-brand legacy filename — same
+# current_brand() fallback already used elsewhere, e.g. bulkCloneAllDocs'
+# backend, for that same case) so this deletes precisely the object a
+# prior upload for that same file would have written. Never raises —
+# same "local delete is what the user directly asked for and must always
+# succeed regardless of network state" reasoning photo_store.
+# delete_document() already documents; a cloud delete that can't go
+# through right now just leaves that one object stale until this runs
+# again on a retry/future delete of the same file.
+def _delete_doc_from_cloud(path):
+    meta = engine.parse_filename(os.path.basename(path))
+    if not meta:
+        return
+    brand = meta.get("brand") or current_brand()
+    doctype = meta["type"].upper()
+    for f in _related_doc_files(path):
+        try:
+            photo_store.delete_document(f"{brand}/{doctype}/{os.path.basename(f)}")
+        except Exception:
+            pass
 
 def _resolve_alldocs_rel(rel, brand):
     """All Docs rows are already resolved against the current brand
@@ -3831,6 +3863,7 @@ def api_alldocs_delete():
             continue
         try:
             meta = engine.parse_filename(os.path.basename(path))
+            _delete_doc_from_cloud(path)
             for f in _related_doc_files(path):
                 os.remove(f)
             deleted.append(rel)
@@ -4118,8 +4151,15 @@ def api_generate():
         if replace:
             _rfolder, old_xlsx = resolve_rel(replace)
             if old_xlsx and os.path.abspath(old_xlsx) != os.path.abspath(res.get("xlsx", res.get("pdf"))):
+                # Same "deleted files come back" bug as /api/alldocs-delete and
+                # /api/file-op (see _delete_doc_from_cloud's own comment) — an
+                # edit that renames a document (new number/company/date) left
+                # the OLD filename's cloud copy behind, so the next 30s sync
+                # cycle re-downloaded it right alongside the new one.
+                _delete_doc_from_cloud(old_xlsx)
                 old_pdf = os.path.splitext(old_xlsx)[0] + ".pdf"
-                for f in (old_xlsx, old_pdf):
+                old_meta = _doc_meta_path(old_xlsx)
+                for f in (old_xlsx, old_pdf, old_meta):
                     if os.path.exists(f):
                         os.remove(f)
                 old_md = engine.markdown_path(old_xlsx)
@@ -5080,6 +5120,7 @@ def api_file_op():
     siblings = [f for f in glob.glob(glob.escape(stem) + ".*") if os.path.isfile(f)]
 
     if op == "delete":
+        _delete_doc_from_cloud(src_path)
         deleted = 0
         for f in siblings:
             try:
