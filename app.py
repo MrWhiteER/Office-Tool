@@ -5520,6 +5520,11 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .rtswatches{display:inline-flex;align-items:center;gap:3px}
 .rtswatch{width:17px;height:17px;border-radius:50%;border:1px solid rgba(0,0,0,.18);padding:0;cursor:pointer;flex-shrink:0}
 .rtswatch:hover{transform:scale(1.15)}
+.cat-desc-toolbar{display:flex;align-items:center;gap:2px;flex-wrap:wrap;margin-top:6px;padding:4px;background:var(--seg-bg);border-radius:var(--r-sm)}
+.dtstepper{display:inline-flex;align-items:center;gap:1px}
+.dtstepper button{border:none;background:transparent;color:var(--ink);width:22px;height:26px;border-radius:6px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.dtstepper button:hover{background:var(--tint)}
+.dtstepval{min-width:22px;text-align:center;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
 .autocomplete{position:fixed;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:var(--shadow-md);z-index:190;max-height:220px;overflow:auto;display:none;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
 .acitem{padding:7px 12px;font-size:13px;cursor:pointer;white-space:nowrap}
 .acitem:hover,.acitem.hi{background:var(--tint)}
@@ -6365,7 +6370,43 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
             <div id=cat-img-lifestyle></div>
           </div>
         </div>
-        <div class=f><label>Description</label><textarea id=cat-description rows=4 oninput="schedulePreview()" placeholder="Short product description paragraph…"></textarea></div>
+        <div class=f><label>Description</label><textarea id=cat-description rows=4 oninput="schedulePreview()" placeholder="Short product description paragraph…"></textarea>
+          <!-- Per explicit request: a small persistent toolbar under the
+               Description box for whole-paragraph typography (not
+               per-character rich text like the floating #richtoolbar other
+               free-text fields use elsewhere — a datasheet's description is
+               one consistent style, not word-by-word formatting), saved as
+               part of the document (description_style) so it stays exactly
+               as set until the user changes it again. Bold/Underline were
+               explicitly asked for; Italic/Uppercase/Align/Line-height
+               added alongside as the natural rest of "everything related to
+               text format" for a print paragraph. Renders true WYSIWYG —
+               same description_style flows into html_engine.
+               render_datasheet_pdf for both the live preview and the real
+               PDF, see that function's own context dict. -->
+          <div class=cat-desc-toolbar id=cat-desc-toolbar>
+            <button type=button class=rtbtn data-k=bold onclick="toggleCatDescStyle('bold')" title="Bold"><b>B</b></button>
+            <button type=button class=rtbtn data-k=italic onclick="toggleCatDescStyle('italic')" title="Italic"><i>I</i></button>
+            <button type=button class=rtbtn data-k=underline onclick="toggleCatDescStyle('underline')" title="Underline"><u>U</u></button>
+            <button type=button class=rtbtn data-k=uppercase onclick="toggleCatDescStyle('uppercase')" title="UPPERCASE">AA</button>
+            <span class=rtsep></span>
+            <button type=button class=rtbtn data-align=left onclick="setCatDescAlign('left')" title="Align left">L</button>
+            <button type=button class=rtbtn data-align=center onclick="setCatDescAlign('center')" title="Align centre">C</button>
+            <button type=button class=rtbtn data-align=justify onclick="setCatDescAlign('justify')" title="Justify">J</button>
+            <span class=rtsep></span>
+            <span class=dtstepper title="Letter spacing">
+              <button type=button onclick="stepCatDescStyle('letterSpacing',-0.2)">−</button>
+              <span class=dtstepval id=cat-desc-ls-val>0.0</span>
+              <button type=button onclick="stepCatDescStyle('letterSpacing',0.2)">+</button>
+            </span>
+            <span class=dtstepper title="Line height">
+              <button type=button onclick="stepCatDescStyle('lineHeight',-0.1)">−</button>
+              <span class=dtstepval id=cat-desc-lh-val>1.5</span>
+              <button type=button onclick="stepCatDescStyle('lineHeight',0.1)">+</button>
+            </span>
+            <button type=button class=rtbtn onclick="resetCatDescStyle()" title="Reset formatting">↺</button>
+          </div>
+        </div>
         </div>
       </div>
 
@@ -9402,6 +9443,7 @@ async function loadCatNextPage(){
   $('cat-pagenum').value=r.next_page||1}
 function resetCatForm(){
   ['cat-productname','cat-description','cat-ordcode'].forEach(id=>{$(id).value=''});
+  CAT_DESC_STYLE={...CAT_DESC_STYLE_DEFAULT};applyCatDescStyle();
   loadCatNextPage();
   $('cat-producttype').value='';
   renderCatSeriesField('');
@@ -9748,6 +9790,35 @@ let CAT_BADGE_LIBRARY=[];
 let CAT_BADGE_SEARCH='';
 let CAT_SPECS=[{label:'',values:['']}];
 let CAT_FINISH=[];
+// Description's own whole-paragraph typography — see the toolbar's own HTML
+// comment above #cat-desc-toolbar for why this is a plain saved style
+// object instead of per-character rich text. Defaults match the
+// description block's pre-existing hardcoded look (sololuce_datasheet.html)
+// exactly, so a document saved before this feature existed (no
+// description_style at all) renders identically to before.
+const CAT_DESC_STYLE_DEFAULT={bold:false,italic:false,underline:false,uppercase:false,align:'justify',letterSpacing:0,lineHeight:1.5};
+let CAT_DESC_STYLE={...CAT_DESC_STYLE_DEFAULT};
+function applyCatDescStyle(){
+  const el=$('cat-description');if(!el)return;
+  el.style.fontWeight=CAT_DESC_STYLE.bold?'700':'400';
+  el.style.fontStyle=CAT_DESC_STYLE.italic?'italic':'normal';
+  el.style.textDecoration=CAT_DESC_STYLE.underline?'underline':'none';
+  el.style.textTransform=CAT_DESC_STYLE.uppercase?'uppercase':'none';
+  el.style.textAlign=CAT_DESC_STYLE.align;
+  el.style.letterSpacing=CAT_DESC_STYLE.letterSpacing+'px';
+  el.style.lineHeight=CAT_DESC_STYLE.lineHeight;
+  const tb=$('cat-desc-toolbar');if(!tb)return;
+  tb.querySelectorAll('.rtbtn[data-k]').forEach(b=>b.classList.toggle('on',!!CAT_DESC_STYLE[b.dataset.k]));
+  tb.querySelectorAll('.rtbtn[data-align]').forEach(b=>b.classList.toggle('on',b.dataset.align===CAT_DESC_STYLE.align));
+  $('cat-desc-ls-val').textContent=CAT_DESC_STYLE.letterSpacing.toFixed(1);
+  $('cat-desc-lh-val').textContent=CAT_DESC_STYLE.lineHeight.toFixed(1)}
+function toggleCatDescStyle(k){CAT_DESC_STYLE[k]=!CAT_DESC_STYLE[k];applyCatDescStyle();schedulePreview()}
+function setCatDescAlign(a){CAT_DESC_STYLE.align=a;applyCatDescStyle();schedulePreview()}
+function stepCatDescStyle(k,delta){
+  const min=k==='lineHeight'?1:-2, max=k==='lineHeight'?3:4;
+  CAT_DESC_STYLE[k]=Math.max(min,Math.min(max,+(CAT_DESC_STYLE[k]+delta).toFixed(1)));
+  applyCatDescStyle();schedulePreview()}
+function resetCatDescStyle(){CAT_DESC_STYLE={...CAT_DESC_STYLE_DEFAULT};applyCatDescStyle();schedulePreview()}
 let CAT_IMG={main:catImgDefault(),lifestyle:catImgDefault(),diagram:catImgDefault(),extra1:catImgDefault(),extra2:catImgDefault(),extra3:catImgDefault()};
 // Every column in CAT_ORD_COLS is kept "lockstepped" to the same length —
 // one shared variant count across the whole table — except Finish Options
@@ -13322,6 +13393,7 @@ function collectCatData(){
     product_type:$('cat-producttype').value,
     page_number:parseInt($('cat-pagenum').value,10)||1,
     description:$('cat-description').value.trim(),
+    description_style:{...CAT_DESC_STYLE},
     note:$('cat-note').value.trim(),
     ordering_code_example:$('cat-ordcode').value.trim(),
     main_photo:CAT_IMG.main.src, main_photo_zoom:CAT_IMG.main.zoom, main_photo_x:CAT_IMG.main.x, main_photo_y:CAT_IMG.main.y, main_photo_mask:CAT_IMG.main.mask, main_photo_placeholder:CAT_IMG.main.placeholder!==false,
@@ -14275,7 +14347,18 @@ function showPreviewError(msg){
 
 function collectDocData(){
   const data={doc_type:TYPE,items:items.filter(x=>x.description),company:companyVal()};
-  HEAD[TYPE].forEach(f=>data[f[0]]=fieldVal($('h-'+f[0])));
+  // if(el) guard — found live, via a real console error ("Cannot read
+  // properties of null (reading 'classList')") thrown from fieldVal(null)
+  // straight out of the global autosave-on-visibilitychange/pagehide
+  // handlers (see autosaveDraft/autosaveDraftBeacon below), which call this
+  // function unconditionally regardless of which screen is currently
+  // visible. TYPE stays whatever document type was last open even after
+  // navigating away to All Docs/Settings/etc — so a tab-switch or app-close
+  // at that moment hits a #h-xxx field that isn't mounted on the CURRENT
+  // screen at all. runPreview() (this function's near-duplicate sibling,
+  // just above) already had this exact guard; this loop was simply missing
+  // it — not a design choice to skip null fields here.
+  HEAD[TYPE].forEach(f=>{const el=$('h-'+f[0]);if(el)data[f[0]]=fieldVal(el)});
   if(TYPE!=='DO')Object.assign(data,collectDiscVat());
   if(TYPE==='QTN2')Object.assign(data,collectQtn2Extra());else data.customer_block=customerBlockForXlsx();
   if(TYPE==='CAT')Object.assign(data,collectCatData());
@@ -14447,6 +14530,8 @@ function populateCatForm(data){
   $('cat-producttype').value=data.product_type||'';
   if(data.page_number)$('cat-pagenum').value=data.page_number;else loadCatNextPage();
   $('cat-description').value=data.description||'';
+  CAT_DESC_STYLE=data.description_style?{...CAT_DESC_STYLE_DEFAULT,...data.description_style}:{...CAT_DESC_STYLE_DEFAULT};
+  applyCatDescStyle();
   $('cat-note').value=data.note||CAT_DEFAULT_NOTE;
   $('cat-ordcode').value=data.ordering_code_example||'';
   CAT_BADGES=(data.badges&&data.badges.length)?data.badges:CAT_STANDARD_BADGE_KEYS.map(key=>({key}));

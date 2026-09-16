@@ -1075,6 +1075,29 @@ _WWW_RE = re.compile(r"^www\.", re.I)
 def _strip_www(url):
     return _WWW_RE.sub("", url or "")
 
+# Sololuce Datasheet Description's own persistent, whole-paragraph
+# typography toolbar (app.py's #cat-desc-toolbar / CAT_DESC_STYLE) — a
+# saved style object, not per-character rich text (see that toolbar's own
+# comment for why). Defaults here MUST match sololuce_datasheet.html's
+# description block's original hardcoded values exactly, so a document
+# saved before this feature existed (data has no "description_style" key
+# at all) renders pixel-identical to before.
+_DESC_STYLE_DEFAULT = {"bold": False, "italic": False, "underline": False,
+                       "uppercase": False, "align": "justify",
+                       "letterSpacing": 0, "lineHeight": 1.5}
+
+def _description_style_css(style):
+    s = {**_DESC_STYLE_DEFAULT, **(style or {})}
+    return (
+        f"font-weight:{'700' if s['bold'] else '400'};"
+        f"font-style:{'italic' if s['italic'] else 'normal'};"
+        f"text-decoration:{'underline' if s['underline'] else 'none'};"
+        f"text-transform:{'uppercase' if s['uppercase'] else 'none'};"
+        f"text-align:{s['align'] if s['align'] in ('left', 'center', 'justify') else 'justify'};"
+        f"letter-spacing:{s['letterSpacing']}px;"
+        f"line-height:{s['lineHeight']};"
+    )
+
 # Glues a number to a trailing unit so e.g. "100*50 mm" can't wrap into an
 # orphaned "mm" on its own line in the Ordering Table's narrow columns.
 # Applied here (not just at typing time in the frontend) so it also fixes
@@ -1494,6 +1517,7 @@ def render_datasheet_pdf(data, out_path, brand=None):
         "product_name": data.get("product_name", ""),
         "series": data.get("series", ""),
         "description": data.get("description", ""),
+        "description_style_css": _description_style_css(data.get("description_style")),
         "badges": badges_for(data.get("badges")),
         "specs": [{
             "label": s.get("label", ""),

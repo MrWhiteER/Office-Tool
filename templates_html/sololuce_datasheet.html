@@ -592,7 +592,14 @@
            body's own comment above) — self-scaling with however much
            description text a given product has, unlike a flat one-time
            trim elsewhere on the page. Still comfortably readable at 1.5. -->
-      <div style="font-size:10.5px;line-height:1.5;color:#231f20;text-align:justify;margin-top:6px;">{{ description }}</div>
+      <!-- line-height/text-align/letter-spacing/weight/style/decoration/
+           transform now come from description_style_css (the Description
+           box's own persistent formatting toolbar, app.py's
+           #cat-desc-toolbar) — its defaults match the values hardcoded here
+           before that feature existed, so an older saved document with no
+           description_style renders identically to before. font-size/color/
+           margin-top stay fixed (brand consistency, not user-configurable). -->
+      <div style="font-size:10.5px;color:#231f20;margin-top:6px;{{ description_style_css }}">{{ description }}</div>
       {% endif %}
       <!-- margin-top:6px: Application Photo sits a fixed gap below
            Description, same 6px Description itself sits below Main
