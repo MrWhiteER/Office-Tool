@@ -14849,29 +14849,8 @@ function pickProduct(name,rel){
   renderItems();schedulePreview();
   openProductBuilder(i,rel,name)}
 
-function openFileMenu(ev,rel,company,label){
-  ev.stopPropagation();
-  CTXROW={rel,company,label};
-  const menu=$('filemenu');
-  renderFileMenu();
-  menu.style.display='block';
-  const w=menu.offsetWidth||190,h=menu.offsetHeight||180;
-  let x=ev.clientX,y=ev.clientY;
-  if(x+w>window.innerWidth-8)x=window.innerWidth-w-8;
-  if(y+h>window.innerHeight-8)y=window.innerHeight-h-8;
-  menu.style.left=x+'px';menu.style.top=y+'px';
-  setTimeout(()=>document.addEventListener('click',closeFileMenu,{once:true}),0)}
 function closeFileMenu(){$('filemenu').style.display='none'}
-function renderFileMenu(){
-  const hasClip=!!CLIPBOARD;
-  $('filemenu').innerHTML=
-    '<div class=fmi onclick="fmCopy()"><span class=ic>⧉</span>Copy</div>'+
-    '<div class=fmi onclick="fmCut()"><span class=ic>✂</span>Cut</div>'+
-    '<div class="fmi'+(hasClip?'':' disabled')+'" onclick="fmPaste()"><span class=ic>📋</span>'+(hasClip?'Paste "'+CLIPBOARD.label+'"':'Paste')+'</div>'+
-    '<div class=fmsep></div>'+
-    '<div class="fmi danger" onclick="fmDelete(this,event)"><span class=ic>🗑</span><span class=fmilabel>Delete</span></div>'}
 function fmCopy(){CLIPBOARD={rel:CTXROW.rel,mode:'copy',label:CTXROW.label};toast('Copied "'+CTXROW.label+'" — click Paste on the target row')}
-function fmCut(){CLIPBOARD={rel:CTXROW.rel,mode:'cut',label:CTXROW.label};toast('Cut "'+CTXROW.label+'" — click Paste on the target row')}
 async function fmPaste(){
   if(!CLIPBOARD)return;
   const destCompany=CTXROW.company,mode=CLIPBOARD.mode,srcRel=CLIPBOARD.rel;
@@ -14879,33 +14858,6 @@ async function fmPaste(){
   if(r.error){alert(r.error);return}
   if(mode==='cut')CLIPBOARD=null;
   toast('Pasted');loadIndex()}
-// window.confirm() silently no-ops in this app's embedded webview (see
-// fmDelete's old behavior — the "are you sure" dialog never showed and never
-// returned true, so Delete looked completely dead) — same click-again-to-
-// confirm pattern used everywhere else in the app (e.g. deleteFcCategory)
-// instead of a native dialog. Both clicks stopPropagation so the arming
-// click doesn't trip openFileMenu's own close-on-any-click listener before
-// the second click can land.
-let FM_DELETE_TIMER=null;
-async function fmDelete(el,ev){
-  if(el.dataset.confirm!=='1'){
-    ev.stopPropagation();
-    el.dataset.confirm='1';
-    el.querySelector('.fmilabel').textContent='Click again to confirm';
-    clearTimeout(FM_DELETE_TIMER);
-    FM_DELETE_TIMER=setTimeout(()=>{
-      el.dataset.confirm='';
-      const lbl=el.querySelector('.fmilabel');if(lbl)lbl.textContent='Delete'
-    },2500);
-    return}
-  ev.stopPropagation();
-  clearTimeout(FM_DELETE_TIMER);
-  const label=CTXROW.label,rel=CTXROW.rel;
-  closeFileMenu();
-  const r=await fetch('/api/file-op',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'delete',rel})}).then(r=>r.json());
-  if(r.error){alert(r.error);return}
-  toast('Deleted "'+label+'"');loadIndex()}
-
 function showPrev(ev,rel,canPreview){
   clearTimeout(hoverTimer);
   hoverTimer=setTimeout(()=>{
@@ -15944,7 +15896,7 @@ function exitAllDocsSelectMode(){ALLDOCS_SELECT_MODE=false;$('listbox').classLis
 // Same Explorer/Finder convention as openItemCtxMenu: right-click on an
 // already-selected row acts on the whole selection; right-click on an
 // unselected one replaces the selection with just that row.
-function openAllDocsCtxMenu(rel,ev){
+function openAllDocsCtxMenu(rel,company,label,ev){
   if(!ALLDOCS_SELECTED.has(rel)){ALLDOCS_SELECTED.clear();ALLDOCS_SELECTED.add(rel)}
   enterAllDocsSelectMode();
   renderList();
@@ -15960,9 +15912,23 @@ function openAllDocsCtxMenu(rel,ev){
   const n=ALLDOCS_SELECTED.size;
   const row=INDEX.find(x=>x.rel===rel);
   const isCat=row&&row.type==='CAT';
+  // Copy/Paste (fmCopy/fmPaste — see their own comments) used to live in
+  // a SEPARATE popup that opened on a plain LEFT-click on the row itself
+  // (openFileMenu) — per explicit request ("remove the left click
+  // calling the tools window... in everywhere, if there is anything that
+  // brings the quick tools on left click, please move it to right
+  // click"), that's gone now and folded in here instead, so every
+  // row-level action lives in the one right-click menu. Single-row only
+  // (n===1) — copying/pasting a specific document to a different
+  // company/project group was never a bulk operation to begin with, same
+  // as the old popup only ever working off one row's own CTXROW.
+  if(n===1)CTXROW={rel,company,label};
+  const hasClip=!!CLIPBOARD;
   showCtxMenu(ev,
+    (n===1?'<div class=cpitem style="cursor:pointer" onclick="closeCtxMenu();fmCopy()"><span class=cpname>⧉ Copy</span></div>':'')+
     '<div class=cpitem style="cursor:pointer" onclick="closeCtxMenu();bulkCloneAllDocs()"><span class=cpname>⧉ Clone'+(n>1?' ('+n+')':'')+'</span></div>'+
     (isCat?'':'<div class=cpitem style="cursor:pointer" onclick="closeCtxMenu();bulkCutAllDocs()"><span class=cpname>✂ Cut'+(n>1?' ('+n+')':'')+'</span></div>')+
+    (n===1?'<div class="cpitem'+(hasClip?'':' disabled')+'" style="cursor:pointer" onclick="closeCtxMenu();fmPaste()"><span class=cpname>📋 '+(hasClip?'Paste &quot;'+escHtml(CLIPBOARD.label)+'&quot;':'Paste')+'</span></div>':'')+
     // Delete stays a two-step confirm even from here — the context menu
     // hands off to the bulk bar's own guarded Delete button (see
     // bulkDeleteAllDocs) rather than deleting real files on one click.
@@ -16190,7 +16156,7 @@ function renderList(){
       attrib='<span class=muted style="font-size:10.5px;white-space:nowrap" title="Generated by '+escHtml(r.generated_by)+(dlTitle?' — '+escHtml(dlTitle):'')+'">by '+escHtml(r.generated_by)+
         (downloads.length?' · ⬇'+downloads.length:'')+'</span>';
     }
-    html+='<div class="row'+(r.in_progress?' inprogress':'')+(ALLDOCS_SELECTED.has(rel)?' selected':'')+'" data-rel="'+rel+'" data-type="'+(r.type||'')+'" onclick="openFileMenu(event,\''+rel+'\',\''+folderCompany+'\',\''+label+'\')" oncontextmenu="openAllDocsCtxMenu(\''+rel+'\',event)" onmouseenter="showPrev(event,\''+rel+'\','+canPreview+')" onmousemove=movePrev(event) onmouseleave=hidePrev()>'+
+    html+='<div class="row'+(r.in_progress?' inprogress':'')+(ALLDOCS_SELECTED.has(rel)?' selected':'')+'" data-rel="'+rel+'" data-type="'+(r.type||'')+'" oncontextmenu="openAllDocsCtxMenu(\''+rel+'\',\''+folderCompany+'\',\''+label+'\',event)" onmouseenter="showPrev(event,\''+rel+'\','+canPreview+')" onmousemove=movePrev(event) onmouseleave=hidePrev()>'+
       '<input type=checkbox class=adsel onclick="event.stopPropagation()" onchange="toggleAllDocsSelect(\''+rel+'\',this.checked)"'+(ALLDOCS_SELECTED.has(rel)?' checked':'')+'>'+
       '<span class=pill>'+pillText+'</span><span class=mono style=width:70px>'+(r.number||'—')+'</span>'+
       '<span style=flex:1>'+allDocsRowLabel(r)+'</span>'+
