@@ -15948,6 +15948,15 @@ function openAllDocsCtxMenu(rel,ev){
   if(!ALLDOCS_SELECTED.has(rel)){ALLDOCS_SELECTED.clear();ALLDOCS_SELECTED.add(rel)}
   enterAllDocsSelectMode();
   renderList();
+  // Real reported bug: this mutates ALLDOCS_SELECTED directly instead of
+  // through toggleAllDocsSelect() (the only OTHER place that shows this
+  // bar), so opening the context menu checked the row's own checkbox and
+  // armed the selection but left #alldocsbulkbar hidden — the "Click
+  // Delete in the toolbar to confirm" toast below pointed at a toolbar
+  // that was never actually shown, with no way to complete the delete at
+  // all. Confirmed via a direct call to this function: selectModeOn was
+  // true but the bar stayed hidden the whole time.
+  updateAllDocsBulkBar();
   const n=ALLDOCS_SELECTED.size;
   const row=INDEX.find(x=>x.rel===rel);
   const isCat=row&&row.type==='CAT';
