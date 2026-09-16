@@ -50,6 +50,35 @@ echo Portable use: copy that .exe (and its _internal folder) into THIS
 echo project folder so it finds your existing config.json/drafts/submissions
 echo here — no data migration needed, it just reads/writes right where it's put.
 echo.
+REM Real incident: a v1.1.79 release once shipped with v1.1.78 still
+REM embedded inside dist\OfficeTool\_internal\VERSION — a stale dist\
+REM folder from an EARLIER build sat there while the actual rebuild
+REM silently no-op'd (a shell-invocation quirk, not this script's own
+REM fault — bare "build.bat" failed to launch via one automation path
+REM while ".\build.bat" worked), and every later step (payload zip,
+REM installer, gh release upload) ran against that stale output without
+REM any error, so the wrong app version shipped under the right tag. The
+REM in-app Update Center kept re-showing "update available" after
+REM install, which is how it surfaced. This check can't prevent every
+REM way a build could go stale, but it catches the one symptom that
+REM actually matters: the built package's own VERSION disagreeing with
+REM the one everything else (git tag, release notes) was built from.
+set /p SRC_VERSION=<VERSION
+set /p BUILT_VERSION=<dist\OfficeTool\_internal\VERSION
+if not "%SRC_VERSION%"=="%BUILT_VERSION%" (
+  echo.
+  echo *** BUILD ABORTED: version mismatch ***
+  echo   Source VERSION file says: %SRC_VERSION%
+  echo   Built package embeds:     %BUILT_VERSION%
+  echo This means dist\OfficeTool\ is stale — the rebuild above didn't
+  echo actually run against current source. Do NOT package or release
+  echo this output. Delete build\ and dist\ and rerun this script.
+  echo.
+  pause
+  exit /b 1
+)
+echo Version check OK — built package embeds v%BUILT_VERSION%, matches source.
+echo.
 echo ---- Packaging the payload (OfficeTool-Payload.zip) ----
 REM Per explicit request ("make it that the installer will be very
 REM light... hook all the data from github"): installer.iss no longer
