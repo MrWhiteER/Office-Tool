@@ -531,7 +531,7 @@
        comment for how. -->
   <!-- gap:48px -> 96px -> 91.2px -> 86.64px through several relative
        "double it"/"5% less" follow-ups, then settled on an exact physical
-       2cm — same reasoning as Main Product Photo's own fixed 7.5cm size
+       2cm — same reasoning as Main Product Photo's own fixed 7.7cm size
        just above: `cm` is a real physical CSS unit here (html_engine.py's
        page.pdf() uses prefer_css_page_size:True), so this is exactly 2cm
        on the printed/exported page, not an approximation. Flexbox gap
@@ -544,7 +544,9 @@
        comments further down), nothing else needed for that. -->
   <div style="display:flex;gap:2cm;margin-top:-23.7pt;">
 
-    <!-- LEFT: photo, description, lifestyle photo. Fixed 7.5cm wide, not
+    <!-- LEFT: photo, description, lifestyle photo. Fixed 7.7cm wide (was
+         7.5cm — per a later explicit request, bumped again together with
+         Main Product Photo's own height just below, still square), not
          flex:1 filling whatever's left of the row — per explicit request
          ("the size of the placeholder of main product should be 7,5cm
          exact", then, once Description text and Application Photo below
@@ -557,22 +559,25 @@
          aligned on the same right edge with a single source of truth —
          each of those three still just says width:100% of its own
          parent, same as before, so there's nothing that can drift out of
-         sync between them. RIGHT (flex:1 below) simply grows to fill
-         whatever width this fixed-width LEFT no longer takes up — no
-         separate change needed there. `cm` is a real physical CSS unit
+         sync between them — this is also why bumping ONLY this one value
+         to 7.7cm ("align everything by that placeholder") was enough to
+         widen Description and Application Photo along with it, no
+         separate edit needed on either. RIGHT (flex:1 below) simply grows
+         to fill whatever width this fixed-width LEFT no longer takes up —
+         no separate change needed there. `cm` is a real physical CSS unit
          here, not an approximation — html_engine.py's page.pdf() call
          uses prefer_css_page_size:True, so the page (and everything on
-         it) already renders at true physical scale; 7.5cm in the CSS is
-         exactly 7.5cm on the printed/exported page. flex-shrink:0 so nothing about the row's own flex math can squeeze this
+         it) already renders at true physical scale; 7.7cm in the CSS is
+         exactly 7.7cm on the printed/exported page. flex-shrink:0 so nothing about the row's own flex math can squeeze this
          narrower than its fixed size. -->
-    <div style="width:7.5cm;flex-shrink:0;display:flex;flex-direction:column;">
-      <!-- Height fixed at 7.5cm too (a real square box, not just a square
+    <div style="width:7.7cm;flex-shrink:0;display:flex;flex-direction:column;">
+      <!-- Height fixed at 7.7cm too (a real square box, not just a square
            RATIO) — applies to both the empty dashed placeholder AND the
            real photo frame once one's attached, same single element for
            both states. CAT_IMG_ASPECT.main in app.py is a plain 1
            (square) to match, so the Adjust Photo modal's own preview
            frame still has the same shape as this real box. -->
-      <div style="width:100%;height:7.5cm;flex-shrink:0;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center;{% if main_photo %}background:#e5e5e5;{% elif main_photo_placeholder %}background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
+      <div style="width:100%;height:7.7cm;flex-shrink:0;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center;{% if main_photo %}background:#e5e5e5;{% elif main_photo_placeholder %}background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
         <!-- object-fit:contain + translate/scale, not cover + object-position
              — see photo_cell's own comment above for the full reasoning
              (this slot and Application Photo below now match every other
