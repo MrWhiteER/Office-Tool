@@ -5651,6 +5651,40 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .ordvarpill{display:inline-flex;align-items:center;gap:4px;min-width:26px;justify-content:center;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--muted);background:var(--surface-2);border:1.5px solid var(--border);border-radius:8px;padding:4px 8px;cursor:pointer;transition:background .12s,border-color .12s,color .12s}
 .ordvarpill:hover{border-color:#e0c48f;color:var(--amber2)}
 .ordvarpill.on{background:var(--tint);border-color:var(--amber);color:var(--amber2)}
+/* Document Build tabs — same rounded-pill/active-state vocabulary as
+   .ordvarpill just above (tint+amber for the active one, surface-2+border
+   for the rest) but shaped like a hanging folder tab: flat TOP edge,
+   rounded BOTTOM corners only, sits flush against the strip's own top
+   border so every tab visually hangs DOWN from the title bar above it —
+   per explicit correction ("the tab should come from top not from
+   bottom"), not the browser-tab-rising-from-the-page shape this started
+   as. Small × that only shows on hover/active (not on every inactive
+   tab — quieter row). Reorder drag classes come from the SAME shared
+   .dragrow/dragover-left/dragover-right rules every other horizontal drag
+   list (Ordering Table's own variant tabs) already uses — no new drag CSS
+   needed. */
+/* flex:1 1 0 + min-width:0 (not overflow-x:auto — per explicit correction,
+   "never scrolling") is what makes every tab shrink together to always
+   fit the strip's own width, up to MAX_DOC_TABS=10 — max-width keeps 1-2
+   tabs from stretching absurdly wide when there's little competition for
+   the space; min-width:0 (rather than some small floor) is what makes
+   the no-scroll guarantee unconditional even at the full 10, since flex-
+   shrink can then always reach exactly however little width remains —
+   .doctabtitle's own overflow:hidden+ellipsis (below) degrades gracefully
+   as each tab narrows, and the tab's own title="" attribute (a native
+   tooltip) plus .doctabclose's own flex-shrink:0 keep the close target
+   reachable even at the narrowest. */
+.doctabstrip{display:flex;align-items:flex-start;gap:2px;padding:0 14px 10px;border-top:1px solid var(--line);background:var(--panel-bg);flex-shrink:0}
+.doctab{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0;max-width:180px;font-size:12px;font-weight:600;color:var(--muted);background:var(--surface-2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:7px 10px;cursor:pointer;transition:background .12s,color .12s}
+.doctab:hover{color:var(--ink)}
+.doctab.on{background:var(--tint);border-color:var(--amber);color:var(--amber2);box-shadow:var(--shadow-sm)}
+.doctabtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.doctabclose{border:none;background:transparent;color:var(--muted);width:16px;height:16px;border-radius:4px;font-size:12px;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+.doctab:hover .doctabclose,.doctab.on .doctabclose{display:inline-flex}
+.doctabclose:hover{background:var(--danger-bg);color:var(--danger)}
+.doctabadd{border:none;background:transparent;color:var(--muted);font-size:16px;line-height:1;width:28px;height:28px;border-radius:6px;cursor:pointer;flex-shrink:0;margin-left:2px;display:flex;align-items:center;justify-content:center}
+.doctabadd:hover{background:var(--tint);color:var(--amber2)}
+.doctabadd:disabled{opacity:.35;cursor:default}
 /* Shared drag-to-reorder feedback — every draggable row across Category/
    Section/Index Order, front matter, and the datasheet form's own
    reorderable rows (spec values, ordering table) gets this same class.
@@ -6312,6 +6346,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 
   <!-- BUILD -->
   <div id=v-build class=hide>
+   <!-- Multi-document tabs — per explicit request ("multiple tabs so the
+        user can work on multiple documents at once... like in windows...
+        by the design"), placed exactly where the user's own screenshot
+        showed (directly under the title/Print bar — which lives OUTSIDE
+        #v-build entirely, in .bar — above the Import/Drafts/+New row
+        below). Rendered by renderDocTabs(); kept as #v-build's own FIRST
+        child — exitEditMode() re-inserts buildwrap right after THIS
+        element (not v-build's literal firstChild anymore) when the
+        edit-existing-document overlay closes, see its own comment. -->
+   <div class=doctabstrip id=doctabstrip></div>
    <div class=wrap id=buildwrap>
     <div class=left>
       <div class=card id=modebar><div class=cb style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -7782,6 +7826,21 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 </div>
 <script>
 let TYPE='QTN2', INDEX=[], items=[], EDITING=null, EDITING_DRAFT=null, hoverTimer=null, hoverToken=0, BRAND='ARTEMIS', BRAND_LIST=[], brandMenuOpen=false, CLIPBOARD=null, CTXROW=null, UNITS=['PCS','MTR','PAIRS','ROLLS'];
+// Multi-document Build tabs — per explicit request ("multiple tabs so the
+// user can work on multiple documents at once... like in windows...by the
+// design"), scoped per document type (Quotation has its own up to 10,
+// Sololuce Datasheet its own separate up to 10, etc — matches "on each
+// document generator"). Each tab entry is {data,editing,editingDraft}:
+// `data` is exactly the shape collectDocData()/the populate*Form()
+// functions already use (null for a not-yet-touched blank tab), `editing`/
+// `editingDraft` mirror the EDITING/EDITING_DRAFT globals for that one tab.
+// See switchDocTab/openNewDocTab/closeDocTab/snapshotActiveTab/
+// restoreActiveTabIntoForm near loadDraft() below for the actual logic —
+// kept next to TYPE/items/EDITING here since it's the same category of
+// "what document(s) are currently being worked on" state, just multiplied
+// by up to 10 instead of assumed singular.
+let DOC_TABS={QTN2:[],INV:[],DO:[],CAT:[],EXP:[]}, ACTIVE_TAB={QTN2:0,INV:0,DO:0,CAT:0,EXP:0};
+const MAX_DOC_TABS=10;
 async function loadUnits(){const r=await fetch('/api/units').then(r=>r.json());if(r.units&&r.units.length)UNITS=r.units}
 const $=id=>document.getElementById(id);
 function escHtml(s){return (s??'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
@@ -8342,8 +8401,27 @@ function view(v){
 // The one way to open a document screen — every rail button and Menu tile
 // goes through here. Only resets the form when actually switching type, so
 // clicking the nav item you're already on never wipes work in progress
-// (same behaviour the old openCatBuild had).
-function openDocType(t){view(DOC_VIEWS[t]);if(TYPE!==t)setType(t)}
+// (same behaviour the old openCatBuild had) — now that tabs exist, a
+// genuine type switch RESTORES whatever tab was last active for the
+// target type (setType(t,true) — silent, no wipe) instead of blanking it,
+// which used to be the old cross-type behavior before tabs. Same-type
+// re-click still just refreshes the strip (cheap, keeps tab titles
+// current) without touching the live form at all.
+function openDocType(t){
+  view(DOC_VIEWS[t]);
+  const changing=TYPE!==t;
+  if(changing){snapshotActiveTab();setType(t,true)}
+  // firstVisit: TYPE defaults to 'QTN2' from page load, so the very first
+  // ever click on the Quotation tile has changing===false (TYPE already
+  // equals t) — without this, that one click would skip
+  // restoreActiveTabIntoForm() entirely and leave the title/form exactly
+  // as whatever the raw page skeleton had (e.g. title stuck on "Menu"),
+  // found live while verifying this feature. Every later same-type
+  // re-click is correctly still a no-op restore (preserves in-progress
+  // typing, per this function's own original comment above).
+  const firstVisit=ensureDocTabsInit();
+  if(changing||firstVisit)restoreActiveTabIntoForm();else renderDocTabs();
+}
 // The Sololuce Datasheet form is split into collapsible sections (Basics /
 // Photos / Spec Badges / Technical Specifications / Finish & Ordering)
 // instead of one long card, so a user working on one part can collapse the
@@ -9450,17 +9528,30 @@ function setType(t,silent){TYPE=t;
   $('gencaption').textContent=htmlOnly
     ?'Saves a PDF into your folder, named by the company convention. Preview on the right is the same PDF.'
     :'Saves both files into your folder, named by the company convention. Preview on the right is the PDF.';
-  if(!silent){EDITING=null;EDITING_DRAFT=null;$('title').textContent='New '+LABEL[t];items=[{}];SELECTED_ITEMS.clear();renderItems();onCompany();nextNumber(true);resetDiscVat();
-    setCompanyVal('');$('customer_attn').innerHTML='';$('customer_address').innerHTML='';
-    $('customer_pobox').value='';$('customer_city').value='';setCountryValue('customer','');
-    setQtn2Status('Draft');resetTerms();
-    if(isCat)resetCatForm();
-    if(isExp)resetExpForm();
+  if(!silent){EDITING=null;EDITING_DRAFT=null;resetGenericDocForm(t);
     // Switching tools is a discrete, deliberate action, not a keystroke —
     // skip the normal 700ms typing-debounce and render right away, so the
     // preview pane doesn't sit on the PREVIOUS tool's page for another
     // three-quarters of a second after you've already moved on.
     runPreview()}}
+// The "wipe the live form to a blank new document of type t" logic,
+// pulled out of setType()'s own !silent branch above (which still calls
+// this — behavior there is unchanged) so a new document TAB can blank the
+// form without going through setType()'s full type-SWITCH machinery
+// (card show/hide, HEAD field rebuild etc. — all pointless when staying
+// on the same type). Deliberately does NOT touch EDITING/EDITING_DRAFT —
+// callers that mean "this is truly a fresh, unsaved document" (setType's
+// own call, openNewDocTab()) clear those themselves; a caller restoring a
+// tab's own saved state never calls this at all.
+function resetGenericDocForm(t){
+  $('title').textContent='New '+LABEL[t];
+  items=[{}];SELECTED_ITEMS.clear();renderItems();onCompany();nextNumber(true);resetDiscVat();
+  setCompanyVal('');$('customer_attn').innerHTML='';$('customer_address').innerHTML='';
+  $('customer_pobox').value='';$('customer_city').value='';setCountryValue('customer','');
+  setQtn2Status('Draft');resetTerms();
+  if(t==='CAT')resetCatForm();
+  if(t==='EXP')resetExpForm();
+}
 // The standard layout every new Sololuce Datasheet always starts with —
 // stays fixed regardless of what custom labels get remembered below (those
 // only power the autocomplete suggestions, so a one-off custom spec on one
@@ -14332,11 +14423,35 @@ function showPreviewPages(n){
 // is bumped every time a preview is requested; only the response that still
 // matches the latest bump is ever allowed to touch the screen — any older
 // one is silently dropped, whatever order the responses actually arrive in.
-let previewTimer=null, previewSeq=0;
+let previewTimer=null, previewSeq=0, previewInFlight=false, previewPending=false;
 function schedulePreview(){clearTimeout(previewTimer);previewTimer=setTimeout(runPreview,700)}
 function fieldVal(el){return el.classList.contains('richbox')?richText(el):el.value}
 function setFieldVal(el,v){if(el.classList.contains('richbox'))el.innerHTML=v??'';else el.value=v??el.value}
+// Real bug, found live while verifying multi-document tabs: opening
+// several tabs in quick succession (each one calls runPreview() directly,
+// skipping the debounce — see this function's own comment further down
+// on why a discrete switch does that) fired that many overlapping
+// /api/preview-draft POSTs at once. previewSeq (below) already stops a
+// slow/stale RESPONSE from ever reaching the screen, but it doesn't stop
+// the REQUESTS themselves from racing on the backend's shared temp files
+// (DRAFT_DIR/draft.pdf, reused for every preview regardless of which tab)
+// — server logs showed a genuine transient 500 from that overlap. Fixed
+// by coalescing: a call that arrives while one's already in flight just
+// flags "run once more after this one finishes" instead of firing a
+// second overlapping request — a normal single switch/keystroke still
+// renders immediately, a rapid burst (many tabs opened back to back, or
+// fast typing) collapses into "the first one, then exactly one trailing
+// one with whatever's current by then," never two requests in flight at
+// once.
 async function runPreview(){
+  if(previewInFlight){previewPending=true;return}
+  previewInFlight=true;
+  try{await runPreviewNow()}finally{
+    previewInFlight=false;
+    if(previewPending){previewPending=false;runPreview()}
+  }
+}
+async function runPreviewNow(){
   clearTimeout(previewTimer);
   const mySeq=++previewSeq;
   // Dim (not clear) whatever's already on screen while the new one renders —
@@ -14496,7 +14611,18 @@ async function autosaveDraft(){
   if(!data.company)return;
   const body={id:EDITING_DRAFT||'',doc_type:TYPE,data};
   const r=await fetch('/api/drafts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
-  if(r.draft)EDITING_DRAFT=r.draft.id}
+  if(r.draft)EDITING_DRAFT=r.draft.id;
+  // Cheap (at most 10 tabs) — keeps the active tab's own label following
+  // whatever's been typed since it last saved, without wiring a dedicated
+  // listener onto every field this could depend on (company, product
+  // name...). The tab's OWN stored snapshot still only updates at a real
+  // switch/close (snapshotActiveTab) — this is just the visible label.
+  // editingDraft synced too (not just data) so a tab that just got its
+  // first real draft id from the save above doesn't have to wait for a
+  // later tab-switch to pick it up — closeDocTab needs the current id
+  // immediately if the tab gets closed before the next switch.
+  const tabs=DOC_TABS[TYPE];if(tabs&&tabs[ACTIVE_TAB[TYPE]]){tabs[ACTIVE_TAB[TYPE]].data=data;tabs[ACTIVE_TAB[TYPE]].editingDraft=EDITING_DRAFT}
+  renderDocTabs()}
 function autosaveDraftBeacon(){
   const data=collectDocData();
   if(!data.company)return;
@@ -14664,18 +14790,136 @@ function populateGenericDocForm(doc_type,data){
     $('customer_pobox').value='';$('customer_city').value='';setCountryValue('customer','');
   }
   if(doc_type!=='DO')restoreDiscVat(data.discount,data.vat)}
+// ---------------------------------------------------------------- multi-document Build tabs
+// One shared restore step (data blob -> live form) reused by every path
+// below — exactly the 3-way branch loadDraft() used to do inline.
+function restoreDocData(doc_type,data){
+  if(doc_type==='CAT')populateCatForm(data);
+  else if(doc_type==='EXP')populateExpForm(data);
+  else populateGenericDocForm(doc_type,data);
+}
+// Captures whatever's CURRENTLY live in the DOM/globals back into its own
+// tab slot — called right before anything is about to replace it (a tab
+// switch, a type switch, opening a new tab, closing one). Skipped during
+// EDIT_MODE (the separate "Open in CS" overlay for an already-generated
+// real document — out of scope for tabs, see the tab strip's own HTML
+// comment): buildwrap's fields are showing that document's data at that
+// point, not this type's active tab, so capturing them here would
+// silently overwrite the tab with the wrong content.
+function snapshotActiveTab(){
+  if(EDIT_MODE)return;
+  const tabs=DOC_TABS[TYPE];if(!tabs||!tabs.length)return;
+  const tab=tabs[ACTIVE_TAB[TYPE]];if(!tab)return;
+  tab.data=collectDocData();tab.editing=EDITING;tab.editingDraft=EDITING_DRAFT;
+}
+// The other half — paints DOC_TABS[TYPE][ACTIVE_TAB[TYPE]] into the live
+// form. A tab with data:null (never touched since it was opened) resets
+// to blank instead of populating from nothing, same as a brand-new
+// document today.
+function restoreActiveTabIntoForm(){
+  const tabs=DOC_TABS[TYPE];const tab=tabs&&tabs[ACTIVE_TAB[TYPE]];if(!tab)return;
+  EDITING=tab.editing||null;EDITING_DRAFT=tab.editingDraft||null;
+  if(tab.data){
+    restoreDocData(TYPE,tab.data);
+    $('title').textContent=(tab.editingDraft?'Draft: ':'')+LABEL[TYPE]+(tab.data.company?' — '+tab.data.company:'');
+  }else resetGenericDocForm(TYPE);
+  renderDocTabs();
+  runPreview();  // a tab switch is a discrete action, not a keystroke — see setType's own runPreview() comment for why this skips the debounce
+}
+// First-ever visit to a given type this session (DOC_TABS[TYPE] still
+// empty) seeds exactly one blank tab so the strip is never empty while a
+// Build screen is showing — every other path (loadDraft, openNewDocTab)
+// already pushes its own tab, so this only ever fires once per type.
+function ensureDocTabsInit(){
+  if(DOC_TABS[TYPE].length===0){DOC_TABS[TYPE].push({data:null,editing:null,editingDraft:null});ACTIVE_TAB[TYPE]=0;return true}
+  return false}
+function switchDocTab(t,i){
+  if(EDIT_MODE)return;
+  const tabs=DOC_TABS[t];if(!tabs||i<0||i>=tabs.length||i===ACTIVE_TAB[t]&&t===TYPE)return;
+  snapshotActiveTab();
+  if(TYPE!==t)setType(t,true);
+  ACTIVE_TAB[t]=i;
+  restoreActiveTabIntoForm();
+}
+function openNewDocTab(){
+  if(EDIT_MODE)return;
+  const tabs=DOC_TABS[TYPE];
+  if(tabs.length>=MAX_DOC_TABS){toast(MAX_DOC_TABS+' tabs open — close one first');return}
+  snapshotActiveTab();
+  tabs.push({data:null,editing:null,editingDraft:null});
+  ACTIVE_TAB[TYPE]=tabs.length-1;
+  restoreActiveTabIntoForm()}
+function closeDocTab(i,ev){
+  if(ev)ev.stopPropagation();
+  const tabs=DOC_TABS[TYPE];
+  if(!tabs||tabs.length<=1)return;  // never close the last tab — there must always be a document showing
+  const wasActive=(i===ACTIVE_TAB[TYPE]);
+  if(wasActive)snapshotActiveTab();
+  const tab=tabs[i];
+  if(tab.data&&tab.data.company){
+    // Same save the 5s autosave loop already does (see startDraftAutosaveLoop's
+    // own comment) — reused here fed from this tab's own memory instead of
+    // the live DOM, since the tab being closed may not even be the one
+    // currently showing. Fire-and-forget, same as autosaveDraftBeacon's
+    // reasoning: closing shouldn't wait on a network round-trip.
+    fetch('/api/drafts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:tab.editingDraft||'',doc_type:TYPE,data:tab.data})});
+  }
+  tabs.splice(i,1);
+  if(i<ACTIVE_TAB[TYPE])ACTIVE_TAB[TYPE]--;
+  else if(ACTIVE_TAB[TYPE]>=tabs.length)ACTIVE_TAB[TYPE]=tabs.length-1;
+  if(wasActive)restoreActiveTabIntoForm();else renderDocTabs();
+}
+// Reorder via drag — same shared dragRowStart/dragColOver/dragColLeave/
+// dragRowEnd primitives and the same before/after cursor-half math as the
+// Ordering Table's own variant tabs (ordVariantDrop) use, just splicing
+// DOC_TABS[TYPE] instead of a column's values array.
+function docTabDrop(e,targetI){
+  e.preventDefault();
+  e.currentTarget.classList.remove('dragover-left','dragover-right');
+  if(!DRAG_KEY||DRAG_KEY.kind!=='doctab')return;
+  const i=DRAG_KEY.i;
+  if(i===targetI)return;
+  const tabs=DOC_TABS[TYPE];
+  const rect=e.currentTarget.getBoundingClientRect();
+  const before=(e.clientX-rect.left)<rect.width/2;
+  let insertAt=targetI+(before?0:1);
+  if(i<insertAt)insertAt--;
+  if(i===insertAt)return;
+  const moved=tabs.splice(i,1)[0];
+  tabs.splice(insertAt,0,moved);
+  const active=ACTIVE_TAB[TYPE];
+  if(active===i)ACTIVE_TAB[TYPE]=insertAt;
+  else if(i<active&&insertAt>=active)ACTIVE_TAB[TYPE]--;
+  else if(i>active&&insertAt<=active)ACTIVE_TAB[TYPE]++;
+  renderDocTabs()}
+function renderDocTabs(){
+  const el=$('doctabstrip');if(!el)return;
+  if(!VISIBLE_TYPES.includes(TYPE)){el.innerHTML='';return}
+  const tabs=DOC_TABS[TYPE],active=ACTIVE_TAB[TYPE];
+  el.innerHTML=tabs.map((tab,i)=>{
+    const title=escHtml((tab.data&&(tab.data.company||tab.data.product_name))||'New '+LABEL[TYPE]);
+    return '<div class="dragrow doctab'+(i===active?' on':'')+'" draggable="true" '+
+      'ondragstart="dragRowStart(event,{kind:\'doctab\',i:'+i+'})" ondragover="dragColOver(event)" ondragleave="dragColLeave(event)" ondrop="docTabDrop(event,'+i+')" ondragend="dragRowEnd(event)" '+
+      'onclick="switchDocTab(\''+TYPE+'\','+i+')" title="'+title+'">'+
+      '<span class=doctabtitle>'+title+'</span>'+
+      (tabs.length>1?'<button type=button class=doctabclose onclick="closeDocTab('+i+',event)" title="Close tab">×</button>':'')+
+      '</div>'
+  }).join('')+
+  '<button type=button class=doctabadd onclick="openNewDocTab()"'+(tabs.length>=MAX_DOC_TABS?' disabled title="'+MAX_DOC_TABS+' tabs open — close one first"':' title="New tab"')+'>+</button>'}
+
 function loadDraft(id){
   const d=DRAFTS.find(x=>x.id===id);if(!d)return;
   closeDraftsPicker();
   const data=d.data||{};
-  view(DOC_VIEWS[d.doc_type]||DOC_VIEWS.QTN2);
-  setType(d.doc_type,true);
-  EDITING=null;EDITING_DRAFT=d.id;
-  if(d.doc_type==='CAT')populateCatForm(data);
-  else if(d.doc_type==='EXP')populateExpForm(data);
-  else populateGenericDocForm(d.doc_type,data);
-  $('title').textContent='Draft: '+LABEL[d.doc_type]+(data.company?' — '+data.company:'');
-  runPreview();  // resuming a draft is a discrete switch too — see setType's own runPreview() call for why this skips the typing-debounce
+  const t=d.doc_type;
+  view(DOC_VIEWS[t]||DOC_VIEWS.QTN2);
+  const tabs=DOC_TABS[t];
+  if(tabs.length>=MAX_DOC_TABS){toast(MAX_DOC_TABS+' tabs open for '+LABEL[t]+' — close one first');return}
+  snapshotActiveTab();
+  if(TYPE!==t)setType(t,true);
+  tabs.push({data,editing:null,editingDraft:d.id});
+  ACTIVE_TAB[t]=tabs.length-1;
+  restoreActiveTabIntoForm();
   toast('Loaded draft — Generate to save it as a real document')}
 
 // Opening an existing document ("Open in CS") is a distinct mode from
@@ -14702,7 +14946,10 @@ function enterDocEditMode(label){
 function exitEditMode(){
   EDIT_MODE=false;
   EDIT_SNAPSHOT=null;
-  $('v-build').insertBefore($('buildwrap'),$('v-build').firstChild);
+  // #doctabstrip now owns the true first-child slot (see its own HTML
+  // comment) — buildwrap's restored position is right after it, not
+  // v-build's literal firstChild anymore.
+  $('v-build').insertBefore($('buildwrap'),$('doctabstrip').nextSibling);
   $('modebar').classList.remove('hide');
   $('editmodal').classList.add('hide');
   setType('QTN2')}
