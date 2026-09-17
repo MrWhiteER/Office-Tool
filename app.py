@@ -5675,8 +5675,23 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    tooltip) plus .doctabclose's own flex-shrink:0 keep the close target
    reachable even at the narrowest. */
 .doctabstrip{display:flex;align-items:flex-start;gap:2px;padding:0 14px 10px;border-top:1px solid var(--line);background:var(--panel-bg);flex-shrink:0}
-.doctab{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0;max-width:180px;font-size:12px;font-weight:600;color:var(--muted);background:var(--surface-2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:7px 10px;cursor:pointer;transition:background .12s,color .12s}
-.doctab:hover{color:var(--ink)}
+/* Per explicit request: hover/open/close all animated. Hover is a plain
+   CSS transition (lift + shadow, listed alongside the existing background/
+   color transition below). Open/close use real @keyframes instead, since
+   renderDocTabs() rebuilds the whole strip's innerHTML on every change —
+   a newly INSERTED element still plays a CSS animation automatically (see
+   .entering, applied only to the one tab openNewDocTab()/loadDraft() just
+   created, tracked via JUST_OPENED_TAB_I so a re-render for an unrelated
+   reason — e.g. the 5s title refresh — never replays it), but a REMOVED
+   element does not, so closeDocTab() plays .leaving on the real DOM node
+   first and only actually splices the array (triggering the rebuild)
+   once that animation finishes — see closeDocTab's own comment. */
+@keyframes doctabIn{from{opacity:0;transform:scale(.82) translateY(-8px)}to{opacity:1;transform:scale(1) translateY(0)}}
+@keyframes doctabOut{from{opacity:1;transform:scale(1) translateY(0)}to{opacity:0;transform:scale(.82) translateY(-8px)}}
+.doctab.entering{animation:doctabIn .18s cubic-bezier(.24,.9,.32,1.2)}
+.doctab.leaving{animation:doctabOut .14s ease-in forwards;pointer-events:none}
+.doctab{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0;max-width:180px;font-size:12px;font-weight:600;color:var(--muted);background:var(--surface-2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:7px 10px;cursor:pointer;transition:background .12s,color .12s,transform .12s,box-shadow .12s}
+.doctab:hover{color:var(--ink);transform:translateY(-2px);box-shadow:var(--shadow-sm)}
 .doctab.on{background:var(--tint);border-color:var(--amber);color:var(--amber2);box-shadow:var(--shadow-sm)}
 .doctabtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .doctabclose{border:none;background:transparent;color:var(--muted);width:16px;height:16px;border-radius:4px;font-size:12px;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
@@ -7840,6 +7855,12 @@ let TYPE='QTN2', INDEX=[], items=[], EDITING=null, EDITING_DRAFT=null, hoverTime
 // "what document(s) are currently being worked on" state, just multiplied
 // by up to 10 instead of assumed singular.
 let DOC_TABS={QTN2:[],INV:[],DO:[],CAT:[],EXP:[]}, ACTIVE_TAB={QTN2:0,INV:0,DO:0,CAT:0,EXP:0};
+// Index of the tab that should play its .entering open-animation on the
+// VERY NEXT renderDocTabs() call, then null itself out — set by
+// openNewDocTab()/loadDraft() right before they trigger that render, so a
+// LATER unrelated render (title refresh, a different tab's switch) never
+// replays it on the wrong tab or replays it at all.
+let JUST_OPENED_TAB_I=null;
 const MAX_DOC_TABS=10;
 async function loadUnits(){const r=await fetch('/api/units').then(r=>r.json());if(r.units&&r.units.length)UNITS=r.units}
 const $=id=>document.getElementById(id);
@@ -14848,6 +14869,7 @@ function openNewDocTab(){
   snapshotActiveTab();
   tabs.push({data:null,editing:null,editingDraft:null});
   ACTIVE_TAB[TYPE]=tabs.length-1;
+  JUST_OPENED_TAB_I=ACTIVE_TAB[TYPE];
   restoreActiveTabIntoForm()}
 function closeDocTab(i,ev){
   if(ev)ev.stopPropagation();
@@ -14867,7 +14889,25 @@ function closeDocTab(i,ev){
   tabs.splice(i,1);
   if(i<ACTIVE_TAB[TYPE])ACTIVE_TAB[TYPE]--;
   else if(ACTIVE_TAB[TYPE]>=tabs.length)ACTIVE_TAB[TYPE]=tabs.length-1;
-  if(wasActive)restoreActiveTabIntoForm();else renderDocTabs();
+  // All the STATE changes above happen immediately, same as before — only
+  // the VISUAL removal is deferred to let the closing tab play its own
+  // .leaving exit animation on the real DOM node first. Necessary because
+  // renderDocTabs() below is a full innerHTML rebuild: an element that's
+  // simply gone the instant that runs never gets a chance to transition
+  // out on its own (CSS can animate a property change on an element that
+  // stays in the DOM, not the disappearance of one that doesn't). Falls
+  // back to an immediate rebuild if the node isn't there to animate, or
+  // the user has reduced-motion on. The 200ms setTimeout is a safety net
+  // in case animationend never fires for some reason — the `ran` guard
+  // stops it from double-firing if both do.
+  const el=$('doctabstrip')&&$('doctabstrip').querySelector('.doctab[data-i="'+i+'"]');
+  let ran=false;
+  const finish=()=>{if(ran)return;ran=true;if(wasActive)restoreActiveTabIntoForm();else renderDocTabs()};
+  if(el&&!window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+    el.classList.add('leaving');
+    el.addEventListener('animationend',finish,{once:true});
+    setTimeout(finish,200);
+  }else finish();
 }
 // Reorder via drag — same shared dragRowStart/dragColOver/dragColLeave/
 // dragRowEnd primitives and the same before/after cursor-half math as the
@@ -14898,14 +14938,16 @@ function renderDocTabs(){
   const tabs=DOC_TABS[TYPE],active=ACTIVE_TAB[TYPE];
   el.innerHTML=tabs.map((tab,i)=>{
     const title=escHtml((tab.data&&(tab.data.company||tab.data.product_name))||'New '+LABEL[TYPE]);
-    return '<div class="dragrow doctab'+(i===active?' on':'')+'" draggable="true" '+
+    return '<div class="dragrow doctab'+(i===active?' on':'')+(i===JUST_OPENED_TAB_I?' entering':'')+'" data-i="'+i+'" draggable="true" '+
       'ondragstart="dragRowStart(event,{kind:\'doctab\',i:'+i+'})" ondragover="dragColOver(event)" ondragleave="dragColLeave(event)" ondrop="docTabDrop(event,'+i+')" ondragend="dragRowEnd(event)" '+
       'onclick="switchDocTab(\''+TYPE+'\','+i+')" title="'+title+'">'+
       '<span class=doctabtitle>'+title+'</span>'+
       (tabs.length>1?'<button type=button class=doctabclose onclick="closeDocTab('+i+',event)" title="Close tab">×</button>':'')+
       '</div>'
   }).join('')+
-  '<button type=button class=doctabadd onclick="openNewDocTab()"'+(tabs.length>=MAX_DOC_TABS?' disabled title="'+MAX_DOC_TABS+' tabs open — close one first"':' title="New tab"')+'>+</button>'}
+  '<button type=button class=doctabadd onclick="openNewDocTab()"'+(tabs.length>=MAX_DOC_TABS?' disabled title="'+MAX_DOC_TABS+' tabs open — close one first"':' title="New tab"')+'>+</button>';
+  JUST_OPENED_TAB_I=null;  // consumed — only the render right after opening plays the entrance
+}
 
 function loadDraft(id){
   const d=DRAFTS.find(x=>x.id===id);if(!d)return;
@@ -14919,6 +14961,7 @@ function loadDraft(id){
   if(TYPE!==t)setType(t,true);
   tabs.push({data,editing:null,editingDraft:d.id});
   ACTIVE_TAB[t]=tabs.length-1;
+  JUST_OPENED_TAB_I=ACTIVE_TAB[t];
   restoreActiveTabIntoForm();
   toast('Loaded draft — Generate to save it as a real document')}
 
