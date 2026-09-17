@@ -5611,6 +5611,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .cpitem:hover{background:var(--tint)}
 .cpph,.cpitem img{width:24px;height:24px;border-radius:50%;object-fit:cover;flex-shrink:0;background:var(--tint);display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:700;color:var(--amber2)}
 .cpname{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.draftopenbadge{flex-shrink:0;font-size:9px;font-weight:700;letter-spacing:.2px;padding:1.5px 7px;border-radius:20px;background:var(--tint);color:var(--amber2);border:1px solid var(--amber)}
+.draftopenbadge.open{background:var(--surface-2);color:var(--muted);border-color:var(--border)}
 .countrybtn{display:flex;align-items:center;gap:8px;width:100%;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:13px;cursor:pointer;text-align:left;color:var(--ink)}
 .countrybtn:hover{border-color:var(--amber)}
 .countrybtn .flag{font-size:16px}
@@ -14671,15 +14673,38 @@ async function openDraftsPicker(ev){
 function closeDraftsPicker(){$('draftspicker').style.display='none'}
 document.addEventListener('click',e=>{
   if($('draftspicker').style.display==='block'&&!e.target.closest('#draftspicker')&&!e.target.closest('#draftsbtn'))closeDraftsPicker()});
+// Same-named drafts (e.g. several "Sololuce Datasheet — AQUA" saves) are
+// otherwise indistinguishable in the picker — this tells them apart by
+// cross-referencing every open Build tab's own editingDraft against the
+// draft id. The CURRENT type's ACTIVE_TAB entry is checked against the
+// live EDITING_DRAFT global instead of its own DOC_TABS slot: that slot
+// only gets refreshed by the 5s autosave loop/snapshotActiveTab (see
+// their own comments), so it can lag a few seconds behind whichever draft
+// is actually showing on screen right now.
+function findOpenTabsForDraft(id){
+  const hits=[];
+  for(const t in DOC_TABS){
+    const tabs=DOC_TABS[t];
+    for(let i=0;i<tabs.length;i++){
+      const isLiveActive=(t===TYPE&&i===ACTIVE_TAB[TYPE]);
+      const editingDraft=isLiveActive?EDITING_DRAFT:tabs[i].editingDraft;
+      if(editingDraft===id)hits.push({t,i,active:isLiveActive})}}
+  return hits}
 function renderDraftsPicker(){
   const q=($('dp-search').value||'').trim().toLowerCase();
   const rows=DRAFTS.filter(d=>!q||(d.label||'').toLowerCase().includes(q)).sort((a,b)=>(b.updated||'').localeCompare(a.updated||''));
-  $('dp-list').innerHTML=rows.length?rows.map(d=>
-    '<div class=cpitem style="justify-content:space-between" onclick="loadDraft(\''+d.id+'\')">'+
-      '<span class=cpname>'+escHtml(d.label)+'</span>'+
+  $('dp-list').innerHTML=rows.length?rows.map(d=>{
+    const hits=findOpenTabsForDraft(d.id);
+    const isActive=hits.some(h=>h.active);
+    const badge=isActive?'<span class=draftopenbadge title="Open in your current tab">● Active tab</span>'
+      :hits.length?'<span class="draftopenbadge open" title="Open in another tab ('+escHtml(LABEL[hits[0].t]||hits[0].t)+')">● Open</span>':'';
+    return '<div class=cpitem style="justify-content:space-between" onclick="loadDraft(\''+d.id+'\')">'+
+      '<span style="display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden">'+
+        '<span class=cpname>'+escHtml(d.label)+'</span>'+badge+
+      '</span>'+
       '<button class=rm onclick="event.stopPropagation();deleteDraft(\''+d.id+'\')" title="Delete draft">✕</button>'+
     '</div>'
-  ).join(''):'<p class="muted" style="font-size:12px;padding:6px 4px;margin:0">No drafts saved yet.</p>'}
+  }).join(''):'<p class="muted" style="font-size:12px;padding:6px 4px;margin:0">No drafts saved yet.</p>'}
 async function deleteDraft(id){
   const r=await fetch('/api/drafts-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
   DRAFTS=r.drafts||[];
