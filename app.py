@@ -12219,6 +12219,21 @@ function catFinishFullText(label){
   const m=(label||'').match(/^RAL\s*\d{3,4}\s*(.*)$/i);
   if(m&&m[1].trim())return m[1].trim().toUpperCase();
   return (label||'').toUpperCase()}
+// A Power cell isn't always a single wattage — a multi-emitter fixture is
+// typed as "6*2W"/"6x2 W"/"6×2W" (per-emitter wattage × emitter count), and
+// the REAL total draw is their product, not whichever number happens to
+// come first in the string. Reported directly: "6*2 W" and "8*2 W" rows
+// were showing the exact same Lumen figure as the plain "6W"/"8W" rows —
+// traced to this parse only ever grabbing the first number it found and
+// ignoring "*2" entirely, so a 2-emitter fixture's real ~2x lumen output
+// never made it into the calc. Used everywhere a Power cell needs to become
+// a real number (currently just the Lumen derivation below).
+function parseCatPowerWatts(v){
+  const s=(v||'').trim();
+  const mult=s.match(/([\d.]+)\s*[x×*]\s*([\d.]+)/i);
+  if(mult)return parseFloat(mult[1])*parseFloat(mult[2]);
+  const m=s.match(/[\d.]+/);
+  return m?parseFloat(m[0]):null}
 function recomputeCatSpecialOrdColumns(){
   const fin=CAT_ORD_COLS.find(c=>(c.label||'').trim()==='Finish Options');
   if(fin){
@@ -12246,9 +12261,8 @@ function recomputeCatSpecialOrdColumns(){
       return m?parseFloat(m[0]):null}).filter(e=>e!=null);
     if(pow&&pow.values.length&&effs.length){
       lum.values=pow.values.map(v=>{
-        const pm=(v||'').match(/[\d.]+/);
-        if(!pm)return '';
-        const p=parseFloat(pm[0]);
+        const p=parseCatPowerWatts(v);
+        if(p==null)return '';
         return effs.map(eff=>Math.round(p*eff)+' lm').join('\n')})}
     else lum.values=['']}}
 // Size gets a short "D{n}" index (D for Dimension) instead of the raw
