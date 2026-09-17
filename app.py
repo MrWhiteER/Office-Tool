@@ -4962,14 +4962,49 @@ def cs_thumb():
     return send_file(cache_path, mimetype="image/png")
 
 DRAFT_DIR = os.path.join(engine.DATA_BASE, "_cs_draft")
-DRAFT_XLSX = os.path.join(DRAFT_DIR, "draft.xlsx")
+DRAFT_STALE_SECS = 5 * 60  # best-effort sweep threshold — see _cleanup_stale_drafts
+
+def _draft_req_dir(req_id):
+    """Validates req_id looks like a uuid4 hex we generated — never trust a
+    client-supplied path segment directly (this feeds straight into
+    os.path.join for a folder we then read from), same guard as
+    _cat_import_dir below."""
+    try:
+        uuid.UUID(req_id)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return os.path.join(DRAFT_DIR, req_id)
+
+def _cleanup_stale_drafts():
+    """Best-effort removal of old per-request draft folders left behind by
+    prior /api/preview-draft calls (a closed tab, a request that errored
+    before it could clean up after itself, ...). Age-based, not "everything
+    but this request's own folder" — two overlapping requests must never be
+    able to delete each other's still-loading files, which is exactly the
+    race the per-request layout below replaced."""
+    try:
+        now = time.time()
+        for name in os.listdir(DRAFT_DIR):
+            path = os.path.join(DRAFT_DIR, name)
+            try:
+                if os.path.isdir(path) and now - os.path.getmtime(path) > DRAFT_STALE_SECS:
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 @app.post("/api/preview-draft")
 def api_preview_draft():
     """Render the Build form's current (unsaved) state as a live preview —
     every page of it, for the multi-page preview pane. Never touches the
-    user's documents folder — just a throwaway temp render overwritten on
-    every call."""
+    user's documents folder — just a throwaway temp render in its own
+    per-request subfolder (DRAFT_DIR/<uuid>/...) so two overlapping preview
+    requests (e.g. several Build tabs opened in quick succession) can never
+    collide over shared temp files, however the client happens to time them
+    — see runPreview()'s own comment for the request-coalescing half of
+    this fix, which alone couldn't close the race since it's against an
+    un-awaited client-side <img> load, not another POST."""
     data = request.json or {}
     dtype = data.get("doc_type", "QTN2").upper()
     if dtype not in engine.FILLERS and dtype not in engine.HTML_DOC_TYPES:
@@ -4980,11 +5015,11 @@ def api_preview_draft():
     draft["rev"] = data.get("rev") or "0"
     if dtype == "CAT":
         draft["cat_ordering_default_widths"] = load_cfg().get("cat_ordering_default_widths", {})
+    req_id = uuid.uuid4().hex
+    req_dir = os.path.join(DRAFT_DIR, req_id)
     try:
-        os.makedirs(DRAFT_DIR, exist_ok=True)
-        for f in os.listdir(DRAFT_DIR):
-            if f.startswith("draft_") and f.endswith(".png"):
-                os.remove(os.path.join(DRAFT_DIR, f))
+        os.makedirs(req_dir, exist_ok=True)
+        _cleanup_stale_drafts()
         # INV/DO are xlsx types (real .xlsx still generated on Generate —
         # see engine.HTML_PDF_DOC_TYPES's own comment) but their PDF, here
         # included, is rendered via html_engine same as the true
@@ -4992,21 +5027,26 @@ def api_preview_draft():
         # plain LibreOffice-converted look while the real Generate button
         # produces the new pixel-fidelity design, visibly disagreeing.
         if dtype in engine.HTML_DOC_TYPES or dtype in engine.HTML_PDF_DOC_TYPES:
-            draft_pdf = os.path.join(DRAFT_DIR, "draft.pdf")
+            draft_pdf = os.path.join(req_dir, "draft.pdf")
             html_engine.RENDERERS[dtype](draft, draft_pdf, brand=current_brand())
             pdf = draft_pdf
         else:
-            engine.FILLERS[dtype](draft, DRAFT_XLSX, brand=current_brand())
-            pdf = engine.to_pdf(DRAFT_XLSX, DRAFT_DIR)
-        pages = engine.to_png_pages(pdf, DRAFT_DIR, "draft")
-        return jsonify({"ok": True, "pages": pages})
+            draft_xlsx = os.path.join(req_dir, "draft.xlsx")
+            engine.FILLERS[dtype](draft, draft_xlsx, brand=current_brand())
+            pdf = engine.to_pdf(draft_xlsx, req_dir)
+        pages = engine.to_png_pages(pdf, req_dir, "draft")
+        return jsonify({"ok": True, "pages": pages, "draft_id": req_id})
     except Exception as e:
+        shutil.rmtree(req_dir, ignore_errors=True)
         return jsonify({"error": str(e)}), 500
 
 @app.get("/draft-preview")
 def draft_preview():
     page = request.args.get("page", "1")
-    path = os.path.join(DRAFT_DIR, f"draft_{page}.png")
+    req_dir = _draft_req_dir(request.args.get("draft", ""))
+    if not req_dir:
+        return "Not found", 404
+    path = os.path.join(req_dir, f"draft_{page}.png")
     if not os.path.exists(path):
         return "Not found", 404
     resp = send_file(path, mimetype="image/png")
@@ -9604,7 +9644,10 @@ function resetCatForm(){
   CAT_SPECS=CAT_DEFAULT_SPEC_LABELS.map(label=>({label,values:['']}));
   CAT_FINISH=[];CAT_COL_SEQ=0;CAT_ORD_COL_CLIPBOARD=null;CAT_ORD_CURRENT_VARIANT=0;CAT_ORD_ALIGN_ROWS=false;
   CAT_ORD_COLS=CAT_DEFAULT_ORD_LABELS.map(label=>({key:'col'+(CAT_COL_SEQ++),label,values:['']}));
-  CAT_IMG={main:catImgDefault(),lifestyle:catImgDefault(),diagram:catImgDefault(),extra1:catImgDefault(),extra2:catImgDefault(),extra3:catImgDefault()};
+  // catImgDefaultForSlot: Dimension Diagram gets its own default zoom/pan
+  // here (see that function's own comment) — every other slot the plain
+  // centered/zoom:1 start.
+  CAT_IMG={main:catImgDefaultForSlot('main'),lifestyle:catImgDefaultForSlot('lifestyle'),diagram:catImgDefaultForSlot('diagram'),extra1:catImgDefaultForSlot('extra1'),extra2:catImgDefaultForSlot('extra2'),extra3:catImgDefaultForSlot('extra3')};
   renderCatBadges();renderCatSpecs();renderCatFinish();renderCatOrdTable();renderCatImages()}
 function renderHead(){
   const isQtn2=TYPE==='QTN2';
@@ -9968,7 +10011,7 @@ function stepCatDescStyle(k,delta){
   CAT_DESC_STYLE[k]=Math.max(min,Math.min(max,+(CAT_DESC_STYLE[k]+delta).toFixed(1)));
   applyCatDescStyle();schedulePreview()}
 function resetCatDescStyle(){CAT_DESC_STYLE={...CAT_DESC_STYLE_DEFAULT};applyCatDescStyle();schedulePreview()}
-let CAT_IMG={main:catImgDefault(),lifestyle:catImgDefault(),diagram:catImgDefault(),extra1:catImgDefault(),extra2:catImgDefault(),extra3:catImgDefault()};
+let CAT_IMG={main:catImgDefaultForSlot('main'),lifestyle:catImgDefaultForSlot('lifestyle'),diagram:catImgDefaultForSlot('diagram'),extra1:catImgDefaultForSlot('extra1'),extra2:catImgDefaultForSlot('extra2'),extra3:catImgDefaultForSlot('extra3')};
 // Every column in CAT_ORD_COLS is kept "lockstepped" to the same length —
 // one shared variant count across the whole table — except Finish Options
 // and Lumen, which are computed/derived and keep their own independent
@@ -10800,7 +10843,29 @@ async function removeCatFinishPreset(label){
 // the fixed position those 4 slots always used before this was
 // configurable, so an old saved product renders identically until the
 // user actually touches the new Mask Position buttons.
-function catImgDefault(){return {src:'',zoom:1,x:50,y:50,mask:100,maskAnchorX:100,maskAnchorY:100,label:'',show:false,placeholder:true}}
+// overrides (optional) lets one specific slot start from a different
+// zoom/pan than the plain centered/zoom:1 default every other slot uses —
+// see the Dimension Diagram call sites below (CAT_IMG's initial value and
+// resetCatForm()) for why: per explicit request, matched to the exact
+// live zoom/pan the user had dialed in on a real product (AQUA) at the
+// moment they asked for it to become the new standard starting point, not
+// a guessed/rounded approximation.
+function catImgDefault(overrides){return Object.assign({src:'',zoom:1,x:50,y:50,mask:100,maskAnchorX:100,maskAnchorY:100,label:'',show:false,placeholder:true}, overrides||{})}
+// Per-slot starting point — every slot uses the plain centered/zoom:1
+// default above except Dimension Diagram, which per explicit request
+// ("make it so the bottom right standard settings... will be default
+// size as i have right now") starts from a real product's (AQUA) own
+// live-tuned zoom/pan instead of a guessed/rounded one — taken directly
+// from that product's actual saved dimension_diagram_zoom/x/y at the
+// moment of the request. Single source of truth for every place a
+// Dimension Diagram slot gets (re)initialized — CAT_IMG's own initial
+// value, resetCatForm(), and every "choose/upload/import a new photo
+// into this slot" handler (pickCatImage/selectCloudPhoto/removeCatImage/
+// the Import-from-PDF apply step) — so uploading a fresh diagram photo
+// on ANY product starts from this same standard framing, not just a
+// brand-new document.
+function catImgDefaultForSlot(slot,overrides){
+  return catImgDefault(Object.assign(slot==='diagram'?{zoom:0.75,x:100,y:78.24450649508316}:{}, overrides||{}))}
 // Slots whose Mask Size slider is hidden — their mask is permanently 100,
 // only pan (x/y) and zoom are adjustable.
 const CAT_IMG_MASK_LOCKED={lifestyle:true};
@@ -10880,13 +10945,13 @@ function pickCatImage(slot){
       // placeholder checkbox back on, or reset where its mask sits — every
       // one of these is this slot's own setting, independent of whether
       // there's currently a photo in it).
-      CAT_IMG[slot]=Object.assign(catImgDefault(),{src:reader.result,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
+      CAT_IMG[slot]=catImgDefaultForSlot(slot,{src:reader.result,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
       renderCatImages();schedulePreview();
       openPhotoAdjust(slot)};
     reader.readAsDataURL(f);
     uploadPhotoWithDuplicateCheck(f,slot)};
   inp.click()}
-function removeCatImage(slot){CAT_IMG[slot]=Object.assign(catImgDefault(),{label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});renderCatImages();schedulePreview()}
+function removeCatImage(slot){CAT_IMG[slot]=catImgDefaultForSlot(slot,{label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});renderCatImages();schedulePreview()}
 
 // ---------------------------------------------------------------- Cloud upload + duplicate check
 // Per explicit request: every picture attached via pickCatImage() above
@@ -11037,7 +11102,7 @@ function selectCloudPhoto(key){
     const dataUrl=canvas.toDataURL('image/png');
     // Same "preserve everything except the photo itself" merge as
     // pickCatImage()'s own onload — see that function's comment.
-    CAT_IMG[slot]=Object.assign(catImgDefault(),{src:dataUrl,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
+    CAT_IMG[slot]=catImgDefaultForSlot(slot,{src:dataUrl,label:CAT_IMG[slot].label||'',show:CAT_IMG[slot].show||false,merged:CAT_IMG[slot].merged||false,autosize:CAT_IMG[slot].autosize||false,autosizeH:CAT_IMG[slot].autosizeH||0,placeholder:CAT_IMG[slot].placeholder,maskAnchorX:CAT_IMG[slot].maskAnchorX,maskAnchorY:CAT_IMG[slot].maskAnchorY});
     closeCloudPhotoPicker();
     renderCatImages();schedulePreview();openPhotoAdjust(slot)};
   img.onerror=()=>{$('cloudphoto-status').textContent='Could not download that photo — try again.'};
@@ -13886,7 +13951,7 @@ function applyCatImport(){
       if(!url){skipped.push(f.label);return}
       fetch(url).then(r=>r.blob()).then(blob=>{
         const reader=new FileReader();
-        reader.onload=()=>{CAT_IMG[f.target.role]=Object.assign(catImgDefault(),{src:reader.result});renderCatImages();schedulePreview()};
+        reader.onload=()=>{CAT_IMG[f.target.role]=catImgDefaultForSlot(f.target.role,{src:reader.result});renderCatImages();schedulePreview()};
         reader.readAsDataURL(blob)});
     }
   });
@@ -14261,7 +14326,7 @@ function setPreviewImage(src){
   img.onerror=()=>{if(token!==previewImgToken)return;img.classList.add('hide');empty.textContent='Could not render a preview.';empty.classList.remove('hide')};
   img.src=src}
 
-let previewPages=0, previewMode='double', previewModeAuto=true, previewZoom=100, previewCacheBust=0;
+let previewPages=0, previewMode='double', previewModeAuto=true, previewZoom=100, previewCacheBust=0, previewDraftId='';
 // Fit mode — a genuinely different viewing mode from the zoom-based one
 // below, not just a zoom preset. Reported directly: "Fit" only ever fit
 // the page's WIDTH into the pane (computePageWidth's own zoom math has no
@@ -14336,7 +14401,7 @@ function renderPreviewPages(){
     wrap.classList.add('single');
     previewFitIndex=Math.max(1,Math.min(previewPages,previewFitIndex));
     const fw=computeFitPageWidth();
-    wrap.innerHTML='<div class=pvrow><img class=pvpage style="width:'+fw+'px" src="/draft-preview?page='+previewFitIndex+'&t='+previewCacheBust+'"></div>';
+    wrap.innerHTML='<div class=pvrow><img class=pvpage style="width:'+fw+'px" src="/draft-preview?page='+previewFitIndex+'&draft='+previewDraftId+'&t='+previewCacheBust+'"></div>';
     updatePvButtons();
     return}
   wrap.classList.add(effectivePreviewMode());
@@ -14345,7 +14410,7 @@ function renderPreviewPages(){
   let html='';
   for(let i=1;i<=previewPages;i+=perRow){
     html+='<div class=pvrow>';
-    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<img class=pvpage style="width:'+w+'px" src="/draft-preview?page='+p+'&t='+previewCacheBust+'">';
+    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<img class=pvpage style="width:'+w+'px" src="/draft-preview?page='+p+'&draft='+previewDraftId+'&t='+previewCacheBust+'">';
     html+='</div>'}
   wrap.innerHTML=html;
   updatePvButtons()}
@@ -14420,11 +14485,11 @@ function fcTogglePanTool(){if(fcPan)fcPan.toggle()}
     e.preventDefault();
     previewFitStep(e.deltaY<0?-1:1)},{passive:false})
 })();
-function showPreviewPages(n){
+function showPreviewPages(n,draftId){
   const img=$('previewimg'),empty=$('previewempty'),pages=$('previewpages');
   previewImgToken++;  // invalidate any in-flight setPreviewImage() callback
   img.classList.add('hide');img.src='';
-  previewPages=n;previewCacheBust=Date.now();
+  previewPages=n;previewCacheBust=Date.now();previewDraftId=draftId||'';
   if(previewFitIndex>n)previewFitIndex=Math.max(1,n);
   if(previewModeAuto)previewMode=n>1?'double':'single';
   empty.classList.add('hide');
@@ -14453,17 +14518,20 @@ function setFieldVal(el,v){if(el.classList.contains('richbox'))el.innerHTML=v??'
 // skipping the debounce — see this function's own comment further down
 // on why a discrete switch does that) fired that many overlapping
 // /api/preview-draft POSTs at once. previewSeq (below) already stops a
-// slow/stale RESPONSE from ever reaching the screen, but it doesn't stop
-// the REQUESTS themselves from racing on the backend's shared temp files
-// (DRAFT_DIR/draft.pdf, reused for every preview regardless of which tab)
-// — server logs showed a genuine transient 500 from that overlap. Fixed
-// by coalescing: a call that arrives while one's already in flight just
-// flags "run once more after this one finishes" instead of firing a
-// second overlapping request — a normal single switch/keystroke still
-// renders immediately, a rapid burst (many tabs opened back to back, or
-// fast typing) collapses into "the first one, then exactly one trailing
-// one with whatever's current by then," never two requests in flight at
-// once.
+// slow/stale RESPONSE from ever reaching the screen, but it didn't stop
+// the REQUESTS themselves from racing — server logs showed a genuine
+// transient 500 from that overlap. Coalescing here (a call that arrives
+// while one's already in flight just flags "run once more after this one
+// finishes" instead of firing a second overlapping request) cuts the
+// number of concurrent POSTs a lot, but can't fully close the race by
+// itself: each response's own <img src="/draft-preview?...draft=ID..."> is
+// a fire-and-forget GET the browser loads on its own schedule, never
+// awaited client-side, so two renders can still have images in flight at
+// once. The backend closes the rest of the gap — /api/preview-draft now
+// writes every render to its own per-request subfolder (see app.py's
+// api_preview_draft and its draft_id in the response, threaded through as
+// previewDraftId below) instead of one shared draft.pdf/draft_N.png, so
+// even genuinely concurrent renders can never collide over the same file.
 async function runPreview(){
   if(previewInFlight){previewPending=true;return}
   previewInFlight=true;
@@ -14497,7 +14565,7 @@ async function runPreviewNow(){
     return}
   if(mySeq!==previewSeq)return;  // superseded by a newer request — never apply a stale response
   if(pages)pages.classList.remove('pv-loading');
-  if(!r.error){showPreviewPages(r.pages||1);return}
+  if(!r.error){showPreviewPages(r.pages||1,r.draft_id);return}
   // The backend genuinely failed (not a network drop — that's the catch
   // above) — this used to fall through silently here, leaving whatever
   // was already showing (often the "Rendering live preview…" empty

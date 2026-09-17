@@ -189,7 +189,7 @@
        separate, unrelated concern (this row's own position relative to
        whatever precedes it) already tuned elsewhere. -->
   {% if caption %}<div style="font-weight:700;font-size:11.5px;margin-bottom:6px;white-space:normal;word-break:normal;flex-shrink:0;">{{ caption }}</div>
-  {% elif reserve_caption %}<div style="font-weight:700;font-size:11.5px;margin-bottom:6px;flex-shrink:0;visibility:hidden;" aria-hidden="true">&nbsp;</div>{% endif %}
+  {% elif reserve_caption %}<div style="font-weight:700;font-size:11.5px;margin-bottom:6px;flex-shrink:0;visibility:hidden;overflow:hidden;" aria-hidden="true">&nbsp;</div>{% endif %}
   <div style="flex:1;min-height:0;">{{ photo_cell(src, mask, x, y, zoom, empty_label, placeholder, anchor_x, anchor_y) }}</div>
 </div>
 {% endmacro %}
@@ -577,7 +577,7 @@
            both states. CAT_IMG_ASPECT.main in app.py is a plain 1
            (square) to match, so the Adjust Photo modal's own preview
            frame still has the same shape as this real box. -->
-      <div style="width:100%;height:7.7cm;flex-shrink:0;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center;{% if main_photo %}background:#e5e5e5;{% elif main_photo_placeholder %}background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
+      <div style="width:100%;aspect-ratio:1;flex-shrink:0;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center;{% if main_photo %}background:#e5e5e5;{% elif main_photo_placeholder %}background:#fafafa;border:1.5px dashed #c9ccd1;{% endif %}">
         <!-- object-fit:contain + translate/scale, not cover + object-position
              — see photo_cell's own comment above for the full reasoning
              (this slot and Application Photo below now match every other
