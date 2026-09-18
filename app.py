@@ -4943,14 +4943,49 @@ CS_CACHE = os.path.join(engine.DATA_BASE, "_cs_cache")  # temp render cache, nev
 
 CS_PREVIEWABLE = (".pdf", ".xlsx", ".xls", ".doc", ".docx")
 
+@app.get("/api/doc-page-count")
+def api_doc_page_count():
+    """Real page count for /cs-thumb's own multi-page mode below — lets the
+    preview pane show every page of a just-Generated document instead of
+    collapsing to a single first-page thumbnail. Reported directly: Generate
+    swapped the accurate multi-page LIVE preview the user was just looking
+    at (full Ordering Table page and all) for cs_thumb's own single-page
+    thumbnail, making that page look like it had vanished — the saved file
+    itself was never missing anything, confirmed by re-opening it directly."""
+    rel = request.args.get("f", "")
+    _folder, path = resolve_rel(rel)
+    if not path:
+        return jsonify({"pages": 1})
+    ext = os.path.splitext(path)[1].lower()
+    if ext != ".pdf":
+        sibling_pdf = os.path.splitext(path)[0] + ".pdf"
+        path = sibling_pdf if os.path.exists(sibling_pdf) else None
+    if not path:
+        return jsonify({"pages": 1})
+    try:
+        import fitz
+        doc = fitz.open(path)
+        n = doc.page_count
+        doc.close()
+        return jsonify({"pages": n})
+    except Exception:
+        return jsonify({"pages": 1})
+
 @app.get("/cs-thumb")
 def cs_thumb():
-    """Render a first-page PNG thumbnail for in-app ('Company System') viewing
-    — never a new browser page, never an OS app. Works uniformly for Excel,
-    PDF, and Word by rendering through LibreOffice and caching the result.
-    (An embedded native PDF viewer was tried first, but renders as a blank
-    black box in this environment — a flat image sidesteps that entirely.)"""
+    """Render a page PNG for in-app ('Company System') viewing — never a new
+    browser page, never an OS app. Works uniformly for Excel, PDF, and Word
+    by rendering through LibreOffice and caching the result. (An embedded
+    native PDF viewer was tried first, but renders as a blank black box in
+    this environment — a flat image sidesteps that entirely.)
+    `page` (default 1) picks which page — see api_doc_page_count's own
+    comment for why a caller ever asks for more than page 1. Every page of
+    a PDF is rendered and cached together on the first request for ANY of
+    them (one fitz.open() covers the whole document far cheaper than
+    reopening it once per page), so asking for page 2 right after page 1
+    is already warm."""
     rel = request.args.get("f", "")
+    page = request.args.get("page", "1")
     _folder, path = resolve_rel(rel)
     if not path:
         return "Not found", 404
@@ -4962,13 +4997,30 @@ def cs_thumb():
         if os.path.exists(sibling_pdf):
             path, ext = sibling_pdf, ".pdf"  # prefer the already-rendered PDF for fidelity
     os.makedirs(CS_CACHE, exist_ok=True)
-    tag = f"{abs(hash(os.path.abspath(path)))}_{int(os.path.getmtime(path))}.png"
-    cache_path = os.path.join(CS_CACHE, tag)
+    tag_base = f"{abs(hash(os.path.abspath(path)))}_{int(os.path.getmtime(path))}"
+    cache_path = os.path.join(CS_CACHE, f"{tag_base}_{page}.png")
     if not os.path.exists(cache_path):
         try:
-            tmp_png = engine.to_png(path, CS_CACHE)
-            if os.path.abspath(tmp_png) != os.path.abspath(cache_path):
-                shutil.move(tmp_png, cache_path)
+            if ext == ".pdf":
+                import fitz
+                doc = fitz.open(path)
+                try:
+                    mat = fitz.Matrix(170 / 72, 170 / 72)
+                    for i in range(doc.page_count):
+                        p = os.path.join(CS_CACHE, f"{tag_base}_{i + 1}.png")
+                        if not os.path.exists(p):
+                            doc[i].get_pixmap(matrix=mat).save(p)
+                finally:
+                    doc.close()
+                if not os.path.exists(cache_path):
+                    return "Not found", 404
+            else:
+                tmp_png = engine.to_png(path, CS_CACHE)
+                dest = os.path.join(CS_CACHE, f"{tag_base}_1.png")
+                if os.path.abspath(tmp_png) != os.path.abspath(dest):
+                    shutil.move(tmp_png, dest)
+                if not os.path.exists(cache_path):
+                    return "Not found", 404
         except Exception as e:
             return f"Couldn't render a preview for this file: {e}", 500
     return send_file(cache_path, mimetype="image/png")
@@ -14354,7 +14406,18 @@ function setPreviewImage(src){
   img.onerror=()=>{if(token!==previewImgToken)return;img.classList.add('hide');empty.textContent='Could not render a preview.';empty.classList.remove('hide')};
   img.src=src}
 
-let previewPages=0, previewMode='double', previewModeAuto=true, previewZoom=100, previewCacheBust=0, previewDraftId='';
+let previewPages=0, previewMode='double', previewModeAuto=true, previewZoom=100, previewCacheBust=0, previewDraftId='', previewFileRel='';
+// Which backend serves the page images for the pane currently showing —
+// the live in-progress draft (/draft-preview, keyed by previewDraftId) or
+// an already-Generated real file on disk (/cs-thumb, keyed by
+// previewFileRel — see api_doc_page_count's own comment for why Generate's
+// own success handler switched to this instead of a single setPreviewImage
+// thumbnail call). Exactly one of previewDraftId/previewFileRel is ever
+// set at a time; showPreviewPages below is what switches which.
+function previewPageUrl(n){
+  return previewFileRel
+    ?'/cs-thumb?f='+encodeURIComponent(previewFileRel)+'&page='+n+'&t='+previewCacheBust
+    :'/draft-preview?page='+n+'&draft='+previewDraftId+'&t='+previewCacheBust}
 // Fit mode — a genuinely different viewing mode from the zoom-based one
 // below, not just a zoom preset. Reported directly: "Fit" only ever fit
 // the page's WIDTH into the pane (computePageWidth's own zoom math has no
@@ -14429,7 +14492,7 @@ function renderPreviewPages(){
     wrap.classList.add('single');
     previewFitIndex=Math.max(1,Math.min(previewPages,previewFitIndex));
     const fw=computeFitPageWidth();
-    wrap.innerHTML='<div class=pvrow><img class=pvpage style="width:'+fw+'px" src="/draft-preview?page='+previewFitIndex+'&draft='+previewDraftId+'&t='+previewCacheBust+'"></div>';
+    wrap.innerHTML='<div class=pvrow><img class=pvpage style="width:'+fw+'px" src="'+previewPageUrl(previewFitIndex)+'"></div>';
     updatePvButtons();
     return}
   wrap.classList.add(effectivePreviewMode());
@@ -14438,7 +14501,7 @@ function renderPreviewPages(){
   let html='';
   for(let i=1;i<=previewPages;i+=perRow){
     html+='<div class=pvrow>';
-    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<img class=pvpage style="width:'+w+'px" src="/draft-preview?page='+p+'&draft='+previewDraftId+'&t='+previewCacheBust+'">';
+    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<img class=pvpage style="width:'+w+'px" src="'+previewPageUrl(p)+'">';
     html+='</div>'}
   wrap.innerHTML=html;
   updatePvButtons()}
@@ -14513,11 +14576,16 @@ function fcTogglePanTool(){if(fcPan)fcPan.toggle()}
     e.preventDefault();
     previewFitStep(e.deltaY<0?-1:1)},{passive:false})
 })();
-function showPreviewPages(n,draftId){
+// fileRel (optional): show every page of an already-Generated real file
+// instead of a live draft's own render — see previewPageUrl's own comment.
+// Passing it clears previewDraftId and vice versa, so the pane is never
+// pointed at both a draft AND a file at once.
+function showPreviewPages(n,draftId,fileRel){
   const img=$('previewimg'),empty=$('previewempty'),pages=$('previewpages');
   previewImgToken++;  // invalidate any in-flight setPreviewImage() callback
   img.classList.add('hide');img.src='';
-  previewPages=n;previewCacheBust=Date.now();previewDraftId=draftId||'';
+  previewPages=n;previewCacheBust=Date.now();
+  previewFileRel=fileRel||'';previewDraftId=previewFileRel?'':(draftId||'');
   if(previewFitIndex>n)previewFitIndex=Math.max(1,n);
   if(previewModeAuto)previewMode=n>1?'double':'single';
   empty.classList.add('hide');
@@ -14665,7 +14733,14 @@ async function generate(){
   EDITING=r.xlsx||null;
   // a draft's job is done once it becomes a real generated document
   if(EDITING_DRAFT){deleteDraft(EDITING_DRAFT);EDITING_DRAFT=null}
-  setPreviewImage('/cs-thumb?f='+encodeURIComponent(r.pdf||r.xlsx));
+  // Multi-page (not a single setPreviewImage thumbnail) — reported
+  // directly: collapsing to cs_thumb's own first-page-only thumbnail right
+  // after Generate made a real, complete multi-page document look like it
+  // had just lost a page, since the live draft preview a moment earlier
+  // was showing all of them. See api_doc_page_count's own comment.
+  const genRel=r.pdf||r.xlsx;
+  const pc=await fetch('/api/doc-page-count?f='+encodeURIComponent(genRel)).then(r=>r.json()).catch(()=>({pages:1}));
+  showPreviewPages(pc.pages||1,null,genRel);
   toast('Saved '+(r.xlsx?r.xlsx+' + PDF':r.pdf));
   loadClients();
   return {...r,data}}
@@ -15258,7 +15333,11 @@ async function openDoc(rel){
   // something — don't switch to the app's own live-rendered template up
   // front (existing oninput/onchange handlers already call schedulePreview()
   // the moment anything is changed, so this only affects the initial view).
-  setPreviewImage('/cs-thumb?f='+encodeURIComponent(rel));
+  // Multi-page, same reasoning as generate()'s own success handler — a
+  // multi-page original opened for editing shouldn't look like it only
+  // ever had page 1.
+  fetch('/api/doc-page-count?f='+encodeURIComponent(rel)).then(r=>r.json()).catch(()=>({pages:1}))
+    .then(pc=>showPreviewPages(pc.pages||1,null,rel));
   enterDocEditMode(label);
   toast(r.imported
     ? 'Imported line items from '+rel.split('/').pop()+' — fill in the header details and press Generate to save it'
