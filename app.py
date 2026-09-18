@@ -1075,7 +1075,19 @@ def save_drafts(brand, drafts):
     # Write-then-rename so a save that's interrupted partway (crash, killed
     # process) can never leave a half-written, unreadable JSON file behind —
     # same pattern as engine.stamp_catalogue_page_numbers's tmp_path swap.
-    tmp_path = path + ".tmp"
+    # tmp_path MUST be unique per call, not a fixed `path + ".tmp"` — a real
+    # incident traced a corrupted drafts file (readable JSON followed by a
+    # multi-MB run of NUL bytes, then a fragment of a second, unrelated
+    # draft) to exactly that shared name: two callers racing (this app plus
+    # a second process pointed at the same DATA_BASE — a dev sandbox in the
+    # incident, but any two concurrent writers to the same brand would do
+    # it) each opened the SAME tmp_path in 'w' mode, so the second truncated
+    # it out from under the first's still-open handle; the first then kept
+    # writing at its old file offset, which Windows zero-fills as a sparse
+    # gap past the new, shorter EOF. os.replace() is atomic, but that
+    # guarantee is worthless if two writers already stomped the same file
+    # before either renamed it.
+    tmp_path = path + f".{os.getpid()}.{uuid.uuid4().hex}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(drafts, f, indent=2)
     os.replace(tmp_path, path)
@@ -14629,21 +14641,19 @@ async function generate(){
     const existingRel=await catProductNameExists(data.company);
     if(existingRel){
       // A product with this exact name has already been generated before.
-      // From a brand-new/unsaved form this is almost always an accidental
-      // name collision — names must stay unique — so it's still a hard
-      // block, same as always. From a RESUMED DRAFT, though, it's just as
-      // likely the real intent: the user picked this draft back up
-      // specifically to regenerate/update that same product. Instead of a
-      // dead-end "choose a different name" there too, offer to replace the
-      // existing file — but only after an explicit confirm modal, never
-      // silently: this permanently overwrites a real generated PDF (+ its
-      // saved sidecar/markdown), no undo, no Recycle Bin (os.remove — see
-      // /api/file-op's own comment on that same fact). window.confirm()
-      // silently no-ops in this app's embedded webview (see fmDelete's own
-      // comment), hence a real modal (#catreplacemodal) instead.
-      if(!EDITING_DRAFT){
-        alert('A Sololuce Datasheet named "'+data.company+'" already exists. Product names must be unique — choose a different name.');
-        return null}
+      // Used to hard-block here unless EDITING_DRAFT was set, on the theory
+      // that only a resumed draft could genuinely mean "yes, update that
+      // same product" — a brand-new/unsaved form colliding on a name was
+      // treated as an accidental mistake. Multi-document Build tabs broke
+      // that signal: a brand-new tab is just as often someone deliberately
+      // regenerating an existing product (typed the name fresh, imported
+      // from PDF, switched tabs mid-edit...) as it is a real accident, and
+      // EDITING_DRAFT is an internal bookkeeping detail the user has no way
+      // to see or reason about — reported directly, hitting a dead-end
+      // "choose a different name" on a perfectly intentional re-save.
+      // Always offer the real choice instead — this still never replaces
+      // silently (no undo, no Recycle Bin — os.remove, see /api/file-op's
+      // own comment), it just always asks rather than only sometimes.
       const ok=await askCatReplaceConfirm(data.company);
       if(!ok)return null;
       data.replace=existingRel}}
