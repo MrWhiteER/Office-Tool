@@ -22,6 +22,12 @@ submissions/
 # when those were added.
 cloud_documents/
 
+# Recycle Bin — trashed documents' real files + the shared trash.json
+# manifest's local mirror (see app.py's TRASH_DIR/load_trash/save_trash) —
+# same "real runtime data, never belongs in git" category as the folders
+# above.
+trash/
+
 # Login session-signing key (accounts.py/app.py) — a real secret, must
 # never be committed. Accounts now sync via the same private Cloudflare
 # R2 bucket photo_store.py uses (see accounts.py) — accounts.json/

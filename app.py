@@ -1128,6 +1128,66 @@ def _backup_drafts_to_cloud_async(brand, drafts):
             # local-only until the next successful one goes through
     threading.Thread(target=_do, daemon=True).start()
 
+# ---------------------------------------------------------------- Recycle Bin (documents/photos/drafts move here instead of deleting outright)
+# One shared, R2-synced manifest — same "single global JSON, not per-brand"
+# shape clients.json already proves out (load_clients() above ignores its
+# own brand argument entirely), since a Recycle Bin split per-brand would
+# just mean two installs disagree about what's in "the" bin. Every writer
+# below re-reads from disk first (never holds a cached copy across a
+# request) and saves via the SAME unique-tmp-path fix save_drafts() already
+# needed after a real corruption incident (see that function's own comment)
+# — this file will be written from far more call sites (3 delete endpoints,
+# restore, purge, empty, settings, the sweep loop, across every install)
+# than drafts.json ever was, so it's exactly as exposed to that race.
+TRASH_KEY = photo_store.SYSTEM_PREFIX + "trash.json"
+TRASH_DIR = os.path.join(engine.DATA_BASE, "trash")
+TRASH_CACHE_FILE = os.path.join(TRASH_DIR, "trash.json")
+TRASH_RETENTION_MIN_DAYS = 1
+TRASH_RETENTION_MAX_DAYS = 365
+TRASH_RETENTION_DEFAULT_DAYS = 30
+
+def load_trash():
+    try:
+        with open(TRASH_CACHE_FILE, encoding="utf-8") as f:
+            t = json.load(f)
+        t.setdefault("retention_days", TRASH_RETENTION_DEFAULT_DAYS)
+        t.setdefault("items", [])
+        return t
+    except (OSError, ValueError):
+        return {"retention_days": TRASH_RETENTION_DEFAULT_DAYS, "items": []}
+
+def save_trash(trash):
+    os.makedirs(TRASH_DIR, exist_ok=True)
+    payload = json.dumps(trash, indent=2, ensure_ascii=False)
+    # Same unique-tmp-path write-then-rename as save_drafts() — see that
+    # function's own comment for the exact corruption this avoids.
+    tmp_path = TRASH_CACHE_FILE + f".{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(payload)
+    os.replace(tmp_path, TRASH_CACHE_FILE)
+    try:
+        photo_store.put_bytes(TRASH_KEY, payload.encode("utf-8"), "application/json", allow_bundled_write=True)
+    except Exception:
+        pass  # offline / R2 not configured — local cache still has it; the next sync reconciles
+
+def _sync_trash_from_cloud():
+    """Best-effort pull of the shared manifest from R2 into the local cache
+    — same shape as _sync_clients_from_cloud(), called at startup and on a
+    background timer (see the loop near the bottom of this file)."""
+    try:
+        data_bytes, _ct = photo_store.get_bytes(TRASH_KEY)
+        trash = json.loads(data_bytes.decode("utf-8"))
+    except Exception:
+        return
+    trash.setdefault("retention_days", TRASH_RETENTION_DEFAULT_DAYS)
+    trash.setdefault("items", [])
+    os.makedirs(TRASH_DIR, exist_ok=True)
+    with open(TRASH_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(trash, f, indent=2, ensure_ascii=False)
+
+def _new_trash_id():
+    return f"t_{int(datetime.datetime.now().timestamp() * 1000)}_{uuid.uuid4().hex[:8]}"
+
 # ---------------------------------------------------------------- submissions (QTN -> LPO -> DO -> scanned DO -> INV, bundled and tracked together)
 SUBMISSIONS_DIR = os.path.join(engine.DATA_BASE, "submissions")
 
@@ -3330,6 +3390,38 @@ def api_photostore_upload():
                 os.remove(tmp_path)
     return jsonify({"ok": not errors, "uploaded": uploaded, "errors": errors})
 
+# Recycle Bin — /api/photostore-delete moves the photo here instead of
+# calling photo_store.delete_photo() outright. Uploader/zone are captured
+# NOW (not touched again until restore) since the live photo_attribution/
+# photo_zones index files are keyed by filename and are never edited by
+# this move — they just point at a briefly-missing key while the photo
+# sits in the bin, which is harmless because list_photos() already
+# excludes TRASH_PREFIX from the gallery.
+def _trash_photo(name, deleted_by):
+    trash_id = _new_trash_id()
+    dest_key = photo_store.TRASH_PREFIX + f"photos/{trash_id}__{name}"
+    restore_info = {
+        "original_key": name, "trash_key": dest_key,
+        "uploader": photo_store.get_uploader(name), "zone": photo_store.get_zone(name),
+    }
+    photo_store.move_object(name, dest_key, allow_bundled_write=True)
+    item = {
+        "id": trash_id, "kind": "photo", "brand": None,
+        "label": name, "deleted_at": datetime.datetime.now().isoformat(),
+        "deleted_by": deleted_by, "restore_info": restore_info,
+    }
+    trash = load_trash()
+    trash["items"].append(item)
+    save_trash(trash)
+    return item
+
+def _trash_restore_photo(item):
+    ri = item["restore_info"]
+    photo_store.move_object(ri["trash_key"], ri["original_key"], allow_bundled_write=True)
+
+def _trash_purge_photo(item):
+    photo_store.delete_key(item["restore_info"]["trash_key"], allow_bundled_write=True)
+
 @app.post("/api/photostore-delete")
 def api_photostore_delete():
     """Admin: can remove any photo. Normal user (Cloud Manager tool):
@@ -3337,7 +3429,8 @@ def api_photostore_delete():
     (not in the flat _PHOTOSTORE_ADMIN_ONLY wall in before_request) since
     it depends on which specific photo is targeted. Anything with no
     recorded uploader (the admin's original library, or predates
-    attribution tracking) stays admin-only."""
+    attribution tracking) stays admin-only. Moves the photo to the
+    Recycle Bin (see _trash_photo) instead of deleting it outright."""
     data = request.json or {}
     name = data.get("filename", "")
     if not name:
@@ -3350,7 +3443,7 @@ def api_photostore_delete():
         # or "deleting a photo I uploaded myself" — see delete_photo()'s
         # own comment for why this is required, not optional, for a real
         # non-admin user's delete to work at all.
-        photo_store.delete_photo(name, allow_bundled_write=True)
+        _trash_photo(name, session.get("user"))
         _invalidate_photo_cache(name)
         return jsonify({"ok": True})
     except Exception as e:
@@ -3565,20 +3658,66 @@ def api_save_draft():
     save_drafts(brand, drafts)
     return jsonify({"draft": record})
 
+# Recycle Bin — a manually deleted draft is captured here before it's
+# dropped from drafts/<brand>.json. NOT used for the auto-cleanup that
+# fires the instant a draft becomes a real generated document
+# (generate()'s own JS success handler passes skip_trash — see
+# api_delete_draft below) since that draft didn't get lost, it graduated
+# into a document that now has its OWN trash lifecycle; recycling it too
+# would just be noise on every single Generate.
+def _trash_draft(draft, brand, deleted_by):
+    trash_id = _new_trash_id()
+    item = {
+        "id": trash_id, "kind": "draft", "brand": brand,
+        "label": draft.get("label") or draft.get("company") or "(untitled)",
+        "deleted_at": datetime.datetime.now().isoformat(), "deleted_by": deleted_by,
+        "restore_info": {"brand": brand, "payload": draft},
+    }
+    trash = load_trash()
+    trash["items"].append(item)
+    save_trash(trash)
+    return item
+
+def _trash_restore_draft(item):
+    ri = item["restore_info"]
+    brand = ri["brand"]
+    drafts = load_drafts(brand)
+    payload = dict(ri["payload"])
+    # Draft ids are a millisecond timestamp (see api_save_draft) — a
+    # collision on restore is not a realistic risk, but cheap insurance
+    # against ever silently overwriting a draft that reused the freed-up id.
+    if any(d["id"] == payload.get("id") for d in drafts):
+        payload["id"] = f"d_{int(datetime.datetime.now().timestamp() * 1000)}"
+    drafts.append(payload)
+    save_drafts(brand, drafts)
+
+def _trash_purge_draft(item):
+    pass  # nothing to clean up — the payload simply drops with the manifest entry
+
 @app.post("/api/drafts-delete")
 def api_delete_draft():
-    did = (request.json or {}).get("id", "")
+    body = request.json or {}
+    did = body.get("id", "")
+    skip_trash = bool(body.get("skip_trash"))
     brand = current_brand()
-    drafts = [d for d in load_drafts(brand) if d["id"] != did]
+    all_drafts = load_drafts(brand)
+    found = next((d for d in all_drafts if d["id"] == did), None)
+    found_brand = brand
+    drafts = [d for d in all_drafts if d["id"] != did]
     save_drafts(brand, drafts)
     # A CAT draft returned by GET /api/drafts while on a different brand (see
     # above) actually lives in Sololuce's own bucket — delete it there too,
     # or its "Delete" button would silently no-op instead of removing it.
     if brand != "SOLOLUCE":
         sololuce_drafts = load_drafts("SOLOLUCE")
+        if found is None:
+            found = next((d for d in sololuce_drafts if d["id"] == did), None)
+            found_brand = "SOLOLUCE" if found else brand
         filtered = [d for d in sololuce_drafts if d["id"] != did]
         if len(filtered) != len(sololuce_drafts):
             save_drafts("SOLOLUCE", filtered)
+    if found and not skip_trash:
+        _trash_draft(found, found_brand, session.get("user"))
     return jsonify({"drafts": drafts})
 
 _CLIENT_CONTACT_FIELDS = ("attn", "address", "po_box", "city", "country", "phone", "landline", "email", "website", "trn")
@@ -3856,25 +3995,11 @@ def _related_doc_files(path):
     stem = os.path.splitext(path)[0]
     return [f for f in (stem + ".xlsx", stem + ".pdf", stem + ".md", stem + ".json", stem + ".meta.json") if os.path.exists(f)]
 
-# Real bug, reported live ("after deleting the files, they come back"):
-# every LOCAL delete site below only ever called os.remove() — never
-# anything that touched the cloud copy _backup_doc_to_cloud() (see its
-# own comment) uploads on every Generate. Since every install
-# continuously pulls documents/ back down from R2 on its own 30s sync
-# loop (see _documents_sync_loop further down), a document whose cloud
-# copy was never actually deleted just gets re-downloaded again within
-# half a minute — not a caching quirk, the delete genuinely never
-# reached the one place that mattered. Mirrors _backup_doc_to_cloud's own
-# brand/doctype/filename key construction exactly (parse_filename's own
-# "brand" field is None for a pre-multi-brand legacy filename — same
-# current_brand() fallback already used elsewhere, e.g. bulkCloneAllDocs'
-# backend, for that same case) so this deletes precisely the object a
-# prior upload for that same file would have written. Never raises —
-# same "local delete is what the user directly asked for and must always
-# succeed regardless of network state" reasoning photo_store.
-# delete_document() already documents; a cloud delete that can't go
-# through right now just leaves that one object stale until this runs
-# again on a retry/future delete of the same file.
+# Still used by /api/generate's own overwrite-on-rename cleanup and the
+# (currently UI-unreachable) /api/file-op delete branch — NEITHER of those
+# is in the Recycle Bin's scope yet (see the trash functions below, which
+# /api/alldocs-delete now uses instead of this), so this permanent-delete
+# path stays exactly as it was for those two call sites.
 def _delete_doc_from_cloud(path):
     meta = engine.parse_filename(os.path.basename(path))
     if not meta:
@@ -3887,6 +4012,167 @@ def _delete_doc_from_cloud(path):
         except Exception:
             pass
 
+# Recycle Bin — /api/alldocs-delete moves a document here instead of using
+# the permanent _delete_doc_from_cloud()+os.remove() pair above. Mirrors
+# that function's own brand/doctype/filename key construction exactly
+# (parse_filename's own "brand" field is None for a pre-multi-brand
+# legacy filename — same current_brand() fallback used elsewhere, e.g.
+# bulkCloneAllDocs' backend, for that same case).
+def _trash_document(path, brand, meta, deleted_by):
+    doctype = meta["type"].upper()
+    trash_id = _new_trash_id()
+    dest_dir = os.path.join(TRASH_DIR, "documents", trash_id)
+    os.makedirs(dest_dir, exist_ok=True)
+    related = _related_doc_files(path)
+    filenames = [os.path.basename(f) for f in related]
+    # An INV's ledger entry (paid status, totals — see record_invoice_in_ledger)
+    # has no other source of truth than the ledger itself, so it's captured
+    # whole here and put back verbatim on restore rather than reconstructed.
+    ledger_entry = None
+    if doctype == "INV":
+        folder = folder_for(doctype, brand)
+        inv_rel = os.path.relpath(os.path.splitext(path)[0] + ".xlsx", folder).replace(os.sep, "/")
+        ledger_entry = next((e for e in load_ledger(brand) if e["rel"] == inv_rel), None)
+    for f in related:
+        filename = os.path.basename(f)
+        os.replace(f, os.path.join(dest_dir, filename))
+        try:
+            photo_store.move_object(
+                photo_store.DOCUMENTS_PREFIX + f"{brand}/{doctype}/{filename}",
+                photo_store.TRASH_PREFIX + f"documents/{trash_id}/{filename}",
+                allow_bundled_write=True)
+        except Exception:
+            pass  # best-effort cloud side — same "local action must always
+            # succeed regardless of network state" philosophy the old
+            # _delete_doc_from_cloud() already documented; a stale cloud
+            # copy just means the next sweep/retry catches it.
+    if ledger_entry:
+        entries = [e for e in load_ledger(brand) if e.get("rel") != ledger_entry.get("rel")]
+        save_ledger(brand, entries)
+    item = {
+        "id": trash_id, "kind": "document", "brand": brand,
+        "label": os.path.basename(path), "deleted_at": datetime.datetime.now().isoformat(),
+        "deleted_by": deleted_by,
+        "restore_info": {"brand": brand, "doctype": doctype, "filenames": filenames, "ledger_entry": ledger_entry},
+    }
+    trash = load_trash()
+    trash["items"].append(item)
+    save_trash(trash)
+    return item
+
+def _trash_restore_document(item):
+    ri = item["restore_info"]
+    brand, doctype, trash_id = ri["brand"], ri["doctype"], item["id"]
+    src_dir = os.path.join(TRASH_DIR, "documents", trash_id)
+    filenames = ri.get("filenames") or (os.listdir(src_dir) if os.path.isdir(src_dir) else [])
+    if not filenames:
+        raise FileNotFoundError("This document's trashed files are missing — it may already have been purged.")
+    folder = folder_for(doctype, brand)
+    # Refuse rather than overwrite — same defensive pattern /api/alldocs-move
+    # already uses when a same-named file already sits at the destination
+    # (e.g. a new document was generated under the same name while this one
+    # sat in the bin).
+    for filename in filenames:
+        if os.path.exists(os.path.join(folder, filename)):
+            raise FileExistsError(f'A document named "{filename}" already exists — restore refused to overwrite it.')
+    for filename in filenames:
+        os.replace(os.path.join(src_dir, filename), os.path.join(folder, filename))
+        try:
+            photo_store.move_object(
+                photo_store.TRASH_PREFIX + f"documents/{trash_id}/{filename}",
+                photo_store.DOCUMENTS_PREFIX + f"{brand}/{doctype}/{filename}",
+                allow_bundled_write=True)
+        except Exception:
+            pass
+    try:
+        os.rmdir(src_dir)
+    except OSError:
+        pass
+    if ri.get("ledger_entry"):
+        entries = load_ledger(brand)
+        if not any(e.get("rel") == ri["ledger_entry"].get("rel") for e in entries):
+            entries.append(ri["ledger_entry"])
+            save_ledger(brand, entries)
+
+def _trash_purge_document(item):
+    ri = item["restore_info"]
+    trash_id = item["id"]
+    shutil.rmtree(os.path.join(TRASH_DIR, "documents", trash_id), ignore_errors=True)
+    for filename in ri.get("filenames") or []:
+        photo_store.delete_key(photo_store.TRASH_PREFIX + f"documents/{trash_id}/{filename}", allow_bundled_write=True)
+
+# ---------------------------------------------------------------- Recycle Bin API
+_TRASH_RESTORE = {"document": _trash_restore_document, "photo": _trash_restore_photo, "draft": _trash_restore_draft}
+_TRASH_PURGE = {"document": _trash_purge_document, "photo": _trash_purge_photo, "draft": _trash_purge_draft}
+
+@app.get("/api/trash-list")
+def api_trash_list():
+    trash = load_trash()
+    return jsonify(trash)
+
+@app.post("/api/trash-restore")
+def api_trash_restore():
+    tid = (request.json or {}).get("id", "")
+    trash = load_trash()
+    item = next((it for it in trash["items"] if it["id"] == tid), None)
+    if not item:
+        return jsonify({"error": "That item isn't in the Recycle Bin (it may already have been restored or purged)."}), 404
+    restore_fn = _TRASH_RESTORE.get(item["kind"])
+    if not restore_fn:
+        return jsonify({"error": f"Unknown trash item kind \"{item['kind']}\"."}), 400
+    try:
+        restore_fn(item)
+    except (OSError, FileExistsError, FileNotFoundError) as e:
+        return jsonify({"error": str(e)}), 409
+    trash = load_trash()  # re-read — restore_fn may have taken a while (R2 round-trip)
+    trash["items"] = [it for it in trash["items"] if it["id"] != tid]
+    save_trash(trash)
+    return jsonify({"ok": True})
+
+@app.post("/api/trash-purge")
+def api_trash_purge():
+    """Delete Forever — permanently removes one item right now, rather than
+    waiting for it to age past retention."""
+    tid = (request.json or {}).get("id", "")
+    trash = load_trash()
+    item = next((it for it in trash["items"] if it["id"] == tid), None)
+    if not item:
+        return jsonify({"error": "That item isn't in the Recycle Bin."}), 404
+    purge_fn = _TRASH_PURGE.get(item["kind"])
+    if purge_fn:
+        purge_fn(item)
+    trash = load_trash()
+    trash["items"] = [it for it in trash["items"] if it["id"] != tid]
+    save_trash(trash)
+    return jsonify({"ok": True})
+
+@app.post("/api/trash-empty")
+def api_trash_empty():
+    """Empty Recycle Bin — permanently purges every item at once."""
+    trash = load_trash()
+    for item in trash["items"]:
+        purge_fn = _TRASH_PURGE.get(item["kind"])
+        if purge_fn:
+            purge_fn(item)
+    trash["items"] = []
+    save_trash(trash)
+    return jsonify({"ok": True})
+
+@app.post("/api/trash-settings")
+def api_trash_settings():
+    """Retention window — any signed-in user can change it (not admin-only:
+    the bin itself is shared/synced across every install, same as its
+    contents)."""
+    try:
+        days = int((request.json or {}).get("retention_days"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Enter a whole number of days."}), 400
+    days = max(TRASH_RETENTION_MIN_DAYS, min(TRASH_RETENTION_MAX_DAYS, days))
+    trash = load_trash()
+    trash["retention_days"] = days
+    save_trash(trash)
+    return jsonify({"retention_days": days})
+
 def _resolve_alldocs_rel(rel, brand):
     """All Docs rows are already resolved against the current brand
     elsewhere (see resolve_rel) — bulk actions take the same rel strings
@@ -3896,13 +4182,15 @@ def _resolve_alldocs_rel(rel, brand):
 
 @app.post("/api/alldocs-delete")
 def api_alldocs_delete():
-    """Permanently deletes every real file (xlsx/pdf/md/json sidecar) for
-    each selected document. The frontend gates this behind its own
+    """Moves every real file (xlsx/pdf/md/json sidecar) for each selected
+    document into the Recycle Bin instead of deleting them outright — see
+    _trash_document(). The frontend gates this behind its own
     confirm-again-to-proceed control — nothing here double-checks, so
     only call this once the user has actually confirmed."""
     data = request.json or {}
     rels = data.get("rels") or []
     brand = current_brand()
+    deleted_by = session.get("user")
     deleted, errors = [], []
     for rel in rels:
         folder, path = _resolve_alldocs_rel(rel, brand)
@@ -3911,14 +4199,11 @@ def api_alldocs_delete():
             continue
         try:
             meta = engine.parse_filename(os.path.basename(path))
-            _delete_doc_from_cloud(path)
-            for f in _related_doc_files(path):
-                os.remove(f)
+            if not meta:
+                errors.append({"rel": rel, "error": "Not a recognized document filename."})
+                continue
+            _trash_document(path, brand, meta, deleted_by)
             deleted.append(rel)
-            if meta and meta["type"].upper() == "INV":
-                inv_rel = os.path.relpath(os.path.splitext(path)[0] + ".xlsx", folder).replace(os.sep, "/")
-                entries = [e for e in load_ledger(brand) if e["rel"] != inv_rel]
-                save_ledger(brand, entries)
         except OSError as e:
             errors.append({"rel": rel, "error": str(e)})
     return jsonify({"deleted": deleted, "errors": errors})
@@ -6336,6 +6621,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
    <div style="flex:1"></div>
    <button class=nav id=n-clients onclick="view('clients')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=8 r=4 /><path d="M4 21a8 8 0 0 1 16 0"/></svg><span class=navlabel>Clients</span></button>
    <button class=nav id=n-cloudmanager onclick="view('cloudmanager')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.5-2A5 5 0 0 0 6 18h11.5Z"/></svg><span class=navlabel>Cloud Manager</span></button>
+   <button class=nav id=n-trash onclick="view('trash')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1=10 y1=11 x2=10 y2=17 /><line x1=14 y1=11 x2=14 y2=17 /></svg><span class=navlabel>Recycle Bin</span></button>
    <button class=nav id=n-settings onclick="view('settings')"><svg class=navicon viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=3 /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg><span class=navlabel>Settings</span></button>
    <!-- Hidden until checkForAppUpdate() (called on launch, then every few
         hours) finds a newer GitHub release than APP_VERSION — see
@@ -6424,6 +6710,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <button class=launchertile id=t-submissions onclick="launcherGo('submissions')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span>Submissions</span></button>
       <button class=launchertile id=t-statement onclick="launcherGo('statement')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=20 x2=12 y2=10 /><line x1=18 y1=20 x2=18 y2=4 /><line x1=6 y1=20 x2=6 y2=16 /></svg></span><span>Statement</span></button>
       <button class=launchertile id=t-clients onclick="launcherGo('clients')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=8 r=4 /><path d="M4 21a8 8 0 0 1 16 0"/></svg></span><span>Clients</span></button>
+      <button class=launchertile id=t-trash onclick="launcherGo('trash')"><span class=launchertileicon><svg viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1=10 y1=11 x2=10 y2=17 /><line x1=14 y1=11 x2=14 y2=17 /></svg></span><span>Recycle Bin</span></button>
     </div>
     <div class=fmtitle id=t-settings-title>System</div>
     <div class=launchergrid>
@@ -7072,6 +7359,32 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <p class=muted id=cm-photo-status style="font-size:12px;margin:0 0 10px">Loading…</p>
       <div id=cm-photo-grid></div>
     </div></div>
+  </div>
+
+  <!-- RECYCLE BIN -->
+  <div id=v-trash class=hide style="padding:20px;max-width:1000px;margin:0 auto">
+    <div class=card><div class=ch>Recycle Bin Settings</div><div class=cb>
+      <p class=muted style="font-size:12px;margin:0 0 10px">Deleting a document, a cloud photo, or a draft moves it here first — nothing is removed for good until it's restored, deleted forever, or its time here runs out. Shared across every install, not a per-PC setting.</p>
+      <div class=f>
+        <label>Keep items for <span id=trash-retention-val class=muted></span></label>
+        <div style="display:flex;gap:10px;align-items:center">
+          <input type=range id=trash-retention-slider min=1 max=365 step=1 style="flex:1" oninput="onTrashRetentionSliderInput()" onchange="saveTrashRetention()">
+          <input type=number id=trash-retention-number min=1 max=365 step=1 style="width:70px" oninput="onTrashRetentionNumberInput()" onchange="saveTrashRetention()">
+          <span class=muted style="font-size:12px">days (1–365)</span>
+        </div>
+      </div>
+    </div></div>
+    <div class=filterbar>
+      <div class=seg id=trash-kind-seg>
+        <button type=button class=on data-kind="" onclick="setTrashKindFilter('')">All</button>
+        <button type=button data-kind=document onclick="setTrashKindFilter('document')">Documents</button>
+        <button type=button data-kind=photo onclick="setTrashKindFilter('photo')">Photos</button>
+        <button type=button data-kind=draft onclick="setTrashKindFilter('draft')">Drafts</button>
+      </div>
+      <div style="flex:1"></div>
+      <button class=btn onclick="emptyTrashBin(this)">Empty Recycle Bin</button>
+    </div>
+    <div id=trashlist></div>
   </div>
 
   <!-- SUBMISSIONS -->
@@ -8512,8 +8825,8 @@ function view(v){
   if(v!=='statement')stmtSetRevealed(false);
   const isDoc=DOC_VIEW_LIST.includes(v);
   if(isDoc)startDraftAutosaveLoop();else stopDraftAutosaveLoop();
-  $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-cloudmanager').classList.toggle('hide',v!='cloudmanager');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');$('v-scanner').classList.toggle('hide',v!='scanner');
-  $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-cloudmanager').classList.toggle('on',v=='cloudmanager');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
+  $('v-menu').classList.toggle('hide',v!='menu');$('v-build').classList.toggle('hide',!isDoc);$('v-all').classList.toggle('hide',v!='all');$('v-clients').classList.toggle('hide',v!='clients');$('v-cloudmanager').classList.toggle('hide',v!='cloudmanager');$('v-trash').classList.toggle('hide',v!='trash');$('v-settings').classList.toggle('hide',v!='settings');$('v-submissions').classList.toggle('hide',v!='submissions');$('v-statement').classList.toggle('hide',v!='statement');$('v-fullcatalog').classList.toggle('hide',v!='fullcatalog');$('v-scanner').classList.toggle('hide',v!='scanner');
+  $('n-launcher').classList.toggle('on',v=='menu');$('n-all').classList.toggle('on',v=='all');$('n-clients').classList.toggle('on',v=='clients');$('n-cloudmanager').classList.toggle('on',v=='cloudmanager');$('n-trash').classList.toggle('on',v=='trash');$('n-settings').classList.toggle('on',v=='settings');$('n-submissions').classList.toggle('on',v=='submissions');$('n-statement').classList.toggle('on',v=='statement');$('n-fullcatalog').classList.toggle('on',v=='fullcatalog');
   // Update/Admin Tools buttons: only make sense while looking at Settings
   // (Admin Tools opens Settings' own admin sub-page; Update Center is
   // reachable from the same corner) — see bar-admin-update-group.
@@ -8524,7 +8837,7 @@ function view(v){
   // open to print right now (EDITING) vs. an unsaved in-progress draft.
   $('bar-print-btn').style.display=isDoc?'':'none';
   DOC_VIEW_LIST.forEach(dv=>$('n-'+dv).classList.toggle('on',v===dv));
-  if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients'){$('title').textContent='Clients';loadClientsView()}if(v=='cloudmanager'){$('title').textContent='Cloud Manager';loadCloudManagerPhotos()}if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}if(v=='scanner')$('title').textContent='Scanner'}
+  if(v=='menu')$('title').textContent='Menu';if(v=='all')loadIndex();if(v=='clients'){$('title').textContent='Clients';loadClientsView()}if(v=='cloudmanager'){$('title').textContent='Cloud Manager';loadCloudManagerPhotos()}if(v=='trash'){$('title').textContent='Recycle Bin';loadTrash()}if(v=='settings')loadSettings();if(v=='submissions')loadSubmissions();if(v=='statement')loadStatement();if(v=='fullcatalog'){$('title').textContent='Full Catalog Builder';loadFullCatalogView()}if(v=='scanner')$('title').textContent='Scanner'}
 // The one way to open a document screen — every rail button and Menu tile
 // goes through here. Only resets the form when actually switching type, so
 // clicking the nav item you're already on never wipes work in progress
@@ -8913,6 +9226,99 @@ async function actuallyDeleteCloudManagerPhoto(name){
   const r=await fetch('/api/photostore-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name})}).then(r=>r.json());
   if(!r.ok){toast(r.error||'Could not delete');return}
   toast('Removed '+name);loadCloudManagerPhotos()}
+
+// ---------------------------------------------------------------- Recycle Bin
+let TRASH_ITEMS=[], TRASH_RETENTION_DAYS=30, TRASH_KIND_FILTER='';
+const TRASH_KIND_LABEL={document:'Document',photo:'Photo',draft:'Draft'};
+async function loadTrash(){
+  const r=await fetch('/api/trash-list').then(r=>r.json()).catch(e=>({error:e.message}));
+  if(r.error){$('trashlist').innerHTML='<p class=muted style="font-size:13px;padding:20px;text-align:center">Could not load the Recycle Bin: '+escHtml(r.error)+'</p>';return}
+  TRASH_RETENTION_DAYS=r.retention_days||30;
+  TRASH_ITEMS=r.items||[];
+  syncTrashRetentionInputs();
+  renderTrashList()}
+function syncTrashRetentionInputs(){
+  $('trash-retention-slider').value=TRASH_RETENTION_DAYS;
+  $('trash-retention-number').value=TRASH_RETENTION_DAYS;
+  $('trash-retention-val').textContent=TRASH_RETENTION_DAYS+(TRASH_RETENTION_DAYS===1?' day':' days')}
+// Slider and the manual-entry number field stay in sync live (per explicit
+// request: "next to the slider... he should be able... with typing the
+// days") — either one updates the other immediately via oninput, but the
+// actual save is debounced (onchange fires once per drag/edit anyway, but
+// this also protects a fast series of keystrokes in the number field) so
+// dragging the slider doesn't fire a request per pixel.
+function onTrashRetentionSliderInput(){
+  const v=$('trash-retention-slider').value;
+  $('trash-retention-number').value=v;
+  $('trash-retention-val').textContent=v+(v==='1'?' day':' days')}
+function onTrashRetentionNumberInput(){
+  const v=Math.max(1,Math.min(365,Number($('trash-retention-number').value)||1));
+  $('trash-retention-slider').value=v;
+  $('trash-retention-val').textContent=v+(v===1?' day':' days')}
+let trashRetentionSaveTimer=null;
+function saveTrashRetention(){
+  clearTimeout(trashRetentionSaveTimer);
+  const days=Math.max(1,Math.min(365,Number($('trash-retention-number').value)||30));
+  trashRetentionSaveTimer=setTimeout(async()=>{
+    const r=await fetch('/api/trash-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({retention_days:days})}).then(r=>r.json());
+    if(r.retention_days){TRASH_RETENTION_DAYS=r.retention_days;syncTrashRetentionInputs();renderTrashList();toast('Recycle Bin now keeps items for '+r.retention_days+(r.retention_days===1?' day':' days'))}
+  },400)}
+function setTrashKindFilter(kind){
+  TRASH_KIND_FILTER=kind;
+  document.querySelectorAll('#trash-kind-seg button').forEach(b=>b.classList.toggle('on',b.dataset.kind===kind));
+  renderTrashList()}
+function trashDaysLeft(item){
+  const deadline=new Date(item.deleted_at).getTime()+TRASH_RETENTION_DAYS*86400000;
+  return Math.max(0,Math.ceil((deadline-Date.now())/86400000))}
+function renderTrashList(){
+  const wrap=$('trashlist');if(!wrap)return;
+  const items=TRASH_ITEMS.filter(it=>!TRASH_KIND_FILTER||it.kind===TRASH_KIND_FILTER)
+    .sort((a,b)=>(b.deleted_at||'').localeCompare(a.deleted_at||''));
+  if(!items.length){wrap.innerHTML='<p class=muted style="font-size:13px;padding:20px;text-align:center">Recycle Bin is empty.</p>';return}
+  wrap.innerHTML=items.map(it=>{
+    const left=trashDaysLeft(it);
+    return '<div class=card style="margin-bottom:8px"><div class=cb style="display:flex;align-items:center;gap:12px;padding:12px 16px">'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(it.label||'(untitled)')+'</div>'+
+        '<div class=muted style="font-size:11.5px;margin-top:2px">'+(TRASH_KIND_LABEL[it.kind]||it.kind)+' · deleted by '+escHtml(it.deleted_by||'—')+' · '+left+(left===1?' day left':' days left')+'</div>'+
+      '</div>'+
+      '<button type=button class=btn onclick="restoreTrashItem(\''+it.id+'\',this)">Restore</button>'+
+      '<button type=button class=btn style="color:var(--danger)" onclick="purgeTrashItem(\''+it.id+'\',this)">Delete Forever</button>'+
+    '</div></div>'
+  }).join('')}
+async function restoreTrashItem(id,btn){
+  btn.disabled=true;
+  const r=await fetch('/api/trash-restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
+  btn.disabled=false;
+  if(r.error){alert(r.error);return}
+  toast('Restored');loadTrash()}
+// Same double-click-to-confirm pattern used throughout this app (e.g.
+// installUpdate, ordColDelete) — window.confirm() silently no-ops in this
+// runtime, so a real in-place confirm is the only option for a
+// destructive, irreversible action like this one.
+function purgeTrashItem(id,btn){
+  if(btn.dataset.confirm!=='1'){
+    btn.dataset.confirm='1';btn.textContent='Click again to delete forever';
+    btn._confirmTimer=setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='Delete Forever'}},4000);
+    return}
+  clearTimeout(btn._confirmTimer);btn.dataset.confirm='';
+  actuallyPurgeTrashItem(id)}
+async function actuallyPurgeTrashItem(id){
+  await fetch('/api/trash-purge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
+  toast('Deleted forever');loadTrash()}
+function emptyTrashBin(btn){
+  if(!TRASH_ITEMS.length)return;
+  if(btn.dataset.confirm!=='1'){
+    btn.dataset.confirm='1';btn.textContent='Click again to empty forever';
+    btn._confirmTimer=setTimeout(()=>{if(btn.dataset.confirm==='1'){btn.dataset.confirm='';btn.textContent='Empty Recycle Bin'}},4000);
+    return}
+  clearTimeout(btn._confirmTimer);btn.dataset.confirm='';
+  actuallyEmptyTrashBin(btn)}
+async function actuallyEmptyTrashBin(btn){
+  btn.textContent='Emptying…';btn.disabled=true;
+  await fetch('/api/trash-empty',{method:'POST'}).then(r=>r.json());
+  btn.disabled=false;btn.textContent='Empty Recycle Bin';
+  toast('Recycle Bin emptied');loadTrash()}
 
 // ---------------------------------------------------------------- Full Catalog Builder
 // Assembles every generated Sololuce Datasheet into one bound book — see
@@ -14731,8 +15137,9 @@ async function generate(){
   restoreGenBtn();
   if(r.error){alert(r.error);return r}
   EDITING=r.xlsx||null;
-  // a draft's job is done once it becomes a real generated document
-  if(EDITING_DRAFT){deleteDraft(EDITING_DRAFT);EDITING_DRAFT=null}
+  // a draft's job is done once it becomes a real generated document — skip
+  // the Recycle Bin here, see deleteDraft's own comment
+  if(EDITING_DRAFT){deleteDraft(EDITING_DRAFT,true);EDITING_DRAFT=null}
   // Multi-page (not a single setPreviewImage thumbnail) — reported
   // directly: collapsing to cs_thumb's own first-page-only thumbnail right
   // after Generate made a real, complete multi-page document look like it
@@ -14804,8 +15211,14 @@ function renderDraftsPicker(){
       '<button class=rm onclick="event.stopPropagation();deleteDraft(\''+d.id+'\')" title="Delete draft">✕</button>'+
     '</div>'
   }).join(''):'<p class="muted" style="font-size:12px;padding:6px 4px;margin:0">No drafts saved yet.</p>'}
-async function deleteDraft(id){
-  const r=await fetch('/api/drafts-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
+// skipTrash: true only for generate()'s own "a draft's job is done once it
+// becomes a real document" auto-cleanup — that draft didn't get lost, it
+// graduated into a document with its own Recycle Bin lifecycle now, so
+// recycling it too would just be noise on every single Generate. The
+// manual "✕" here (and deleteDraftFromResume's own "✕") both omit it, so
+// they land in the bin normally.
+async function deleteDraft(id,skipTrash){
+  const r=await fetch('/api/drafts-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,skip_trash:!!skipTrash})}).then(r=>r.json());
   DRAFTS=r.drafts||[];
   renderDraftsPicker();
   if(EDITING_DRAFT===id)EDITING_DRAFT=null}
@@ -17430,6 +17843,53 @@ def _clients_sync_loop():
         except Exception:
             pass
 threading.Thread(target=_clients_sync_loop, daemon=True).start()
+
+# Recycle Bin — same pull-then-poll shape as clients above, so every
+# install's bin view converges on the same shared manifest.
+_sync_trash_from_cloud()
+
+def _trash_sync_loop():
+    while True:
+        time.sleep(30)
+        try:
+            _sync_trash_from_cloud()
+        except Exception:
+            pass
+threading.Thread(target=_trash_sync_loop, daemon=True).start()
+
+# Permanently purges anything past its retention window. Hourly (not on
+# the fast 30s tick above) since this is genuine cleanup work, not a
+# freshness check — an item sitting a few minutes past its deadline before
+# the next sweep costs nothing. Runs an initial pass immediately (not
+# sleep-first) so a long-closed install catches up on overdue purges as
+# soon as it's back, the same reasoning _documents_sync_loop's own
+# immediate-then-30s shape already uses.
+def _trash_sweep_loop():
+    while True:
+        try:
+            trash = load_trash()
+            cutoff = time.time() - trash.get("retention_days", TRASH_RETENTION_DEFAULT_DAYS) * 86400
+            keep, purge = [], []
+            for it in trash["items"]:
+                try:
+                    overdue = datetime.datetime.fromisoformat(it["deleted_at"]).timestamp() < cutoff
+                except (KeyError, ValueError):
+                    overdue = False
+                (purge if overdue else keep).append(it)
+            for it in purge:
+                purge_fn = _TRASH_PURGE.get(it["kind"])
+                if purge_fn:
+                    try:
+                        purge_fn(it)
+                    except Exception:
+                        pass
+            if purge:
+                trash["items"] = keep
+                save_trash(trash)
+        except Exception:
+            pass
+        time.sleep(3600)
+threading.Thread(target=_trash_sweep_loop, daemon=True).start()
 
 # Set once _run_tray() below actually creates the tray icon — lets code
 # OUTSIDE that closure (update_checker.py's in-app update, a different

@@ -71,6 +71,14 @@ HARD_LIMIT_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB — see module docstring
 # excludes this prefix so app bookkeeping never shows up as a "photo".
 SYSTEM_PREFIX = "system/"
 
+# Recycle Bin — a trashed photo/document is moved here (copy+delete, R2 has
+# no native rename) instead of being deleted outright. Excluded from the
+# photo library the same way SYSTEM_PREFIX/DOCUMENTS_PREFIX already are
+# (get_usage/list_photos/sync_down below) so a trashed item never reappears
+# in the gallery or gets re-synced into the local photo cache while it's
+# sitting in the bin.
+TRASH_PREFIX = "trash/"
+
 # Home for a single loose photo upload (no folder chosen by the browser —
 # only a webkitRelativePath FOLDER upload produces a "/" in f.filename,
 # see api_photostore_upload()'s own comment) — per explicit request
@@ -243,7 +251,7 @@ def get_usage():
             kwargs["ContinuationToken"] = token
         resp = client.list_objects_v2(**kwargs)
         for obj in resp.get("Contents", []):
-            if obj["Key"].startswith(SYSTEM_PREFIX) or obj["Key"].startswith(DOCUMENTS_PREFIX):
+            if obj["Key"].startswith(SYSTEM_PREFIX) or obj["Key"].startswith(DOCUMENTS_PREFIX) or obj["Key"].startswith(TRASH_PREFIX):
                 continue
             total += obj["Size"]
             count += 1
@@ -284,6 +292,41 @@ def put_bytes(key, data, content_type="application/octet-stream", allow_bundled_
     case upload_document() already opened this up for)."""
     client = _client(require_write=True, allow_bundled_write=allow_bundled_write)
     client.put_object(Bucket=_bucket(require_write=True, allow_bundled_write=allow_bundled_write), Key=key, Body=data, ContentType=content_type)
+
+
+def delete_key(key, allow_bundled_write=False):
+    """Generic raw delete by full key — the Recycle Bin's purge-forever
+    step needs this for a trashed object (already living under
+    TRASH_PREFIX, not DOCUMENTS_PREFIX or a bare photo filename), unlike
+    delete_photo()/delete_document() which both assume/prepend their own
+    specific prefix. Best-effort, same philosophy as those two: a purge
+    that can't reach R2 right now shouldn't block removing the local
+    trash copy the user asked for; it just leaves that one object
+    orphaned under trash/ until a future purge attempt catches it."""
+    try:
+        client = _client(require_write=True, allow_bundled_write=allow_bundled_write)
+        bucket = _bucket(require_write=True, allow_bundled_write=allow_bundled_write)
+        client.delete_object(Bucket=bucket, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def move_object(src_key, dest_key, allow_bundled_write=False):
+    """Recycle Bin primitive — R2/S3 has no native rename, so a "move" is a
+    server-side CopyObject (cheap, no data round-trips through this
+    process — unlike a get_bytes()+put_bytes() pair, which would download
+    and re-upload the full file, expensive for a multi-MB PDF) followed by
+    deleting the original key. Raises on failure (caller decides how to
+    handle a trash/restore that can't reach R2 right now — unlike the
+    best-effort delete_photo()/delete_document() below, a Recycle Bin move
+    that silently no-ops would leave an item looking trashed in the
+    manifest while its real object still sits at the original key, or vice
+    versa on restore)."""
+    client = _client(require_write=True, allow_bundled_write=allow_bundled_write)
+    bucket = _bucket(require_write=True, allow_bundled_write=allow_bundled_write)
+    client.copy_object(Bucket=bucket, Key=dest_key, CopySource={"Bucket": bucket, "Key": src_key})
+    client.delete_object(Bucket=bucket, Key=src_key)
 
 
 # Who uploaded each photo — per explicit request: "I want every user to
@@ -427,7 +470,7 @@ def list_photos():
         resp = client.list_objects_v2(**kwargs)
         for obj in resp.get("Contents", []):
             key = obj["Key"]
-            if key.startswith(SYSTEM_PREFIX) or key.startswith(DOCUMENTS_PREFIX):
+            if key.startswith(SYSTEM_PREFIX) or key.startswith(DOCUMENTS_PREFIX) or key.startswith(TRASH_PREFIX):
                 continue
             if not key.lower().endswith(IMAGE_EXTENSIONS):
                 continue
@@ -666,8 +709,8 @@ def sync_down(local_folder, on_progress=None):
             resp = client.list_objects_v2(**kwargs)
             for obj in resp.get("Contents", []):
                 key = obj["Key"]
-                if key.startswith(SYSTEM_PREFIX):
-                    continue  # app data (accounts.json etc.), not a photo — never syncs into the local photo folder
+                if key.startswith(SYSTEM_PREFIX) or key.startswith(DOCUMENTS_PREFIX) or key.startswith(TRASH_PREFIX):
+                    continue  # app data / documents / trashed items — never sync into the local photo folder
                 dest = os.path.join(local_folder, *key.split("/"))  # R2 keys are always "/"-separated regardless of OS
                 if os.path.isfile(dest) and os.path.getsize(dest) == obj["Size"]:
                     continue  # already have this exact file
