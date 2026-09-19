@@ -15557,8 +15557,19 @@ function renderDocTabs(){
 function loadDraft(id){
   const d=DRAFTS.find(x=>x.id===id);if(!d)return;
   closeDraftsPicker();
-  const data=d.data||{};
   const t=d.doc_type;
+  // Already open in some tab (this type or another) — switch to it
+  // instead of opening a second tab for the exact same draft. Reuses the
+  // same cross-tab lookup the Drafts picker's own "Active tab"/"Open"
+  // badges are built from (findOpenTabsForDraft), so this and the badges
+  // can never disagree about what's open where.
+  const hits=findOpenTabsForDraft(id);
+  if(hits.length){
+    view(DOC_VIEWS[t]||DOC_VIEWS.QTN2);
+    switchDocTab(hits[0].t,hits[0].i);
+    toast(hits[0].active?'Already open in this tab':'Already open — switched to that tab');
+    return}
+  const data=d.data||{};
   view(DOC_VIEWS[t]||DOC_VIEWS.QTN2);
   const tabs=DOC_TABS[t];
   if(tabs.length>=MAX_DOC_TABS){toast(MAX_DOC_TABS+' tabs open for '+LABEL[t]+' — close one first');return}
