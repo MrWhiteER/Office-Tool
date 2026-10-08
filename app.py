@@ -5933,7 +5933,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .richbox:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 3px var(--tint)}
 .richbox:empty:before{content:attr(data-placeholder);color:var(--muted)}
 .richbox.small{min-height:78px}
-.richtoolbar{position:fixed;display:none;align-items:center;gap:2px;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:var(--shadow-md);padding:4px;z-index:190;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
+.richtoolbar{position:fixed;display:none;align-items:center;gap:2px;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:var(--shadow-md);padding:4px;z-index:240;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
 .rtbtn{border:none;background:transparent;color:var(--ink);width:26px;height:26px;border-radius:6px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
 .rtbtn:hover{background:var(--tint)}
 .rtbtn.on{background:var(--amber);color:var(--brand-dark)}
@@ -5950,10 +5950,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .dtstepper button{border:none;background:transparent;color:var(--ink);width:22px;height:26px;border-radius:6px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
 .dtstepper button:hover{background:var(--tint)}
 .dtstepval{min-width:22px;text-align:center;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
-.autocomplete{position:fixed;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:var(--shadow-md);z-index:190;max-height:220px;overflow:auto;display:none;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
+.autocomplete{position:fixed;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:var(--shadow-md);z-index:240;max-height:220px;overflow:auto;display:none;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
 .acitem{padding:7px 12px;font-size:13px;cursor:pointer;white-space:nowrap}
 .acitem:hover,.acitem.hi{background:var(--tint)}
-.clientpicker{position:fixed;display:none;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);padding:10px;z-index:190;width:280px;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
+.clientpicker{position:fixed;display:none;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);padding:10px;z-index:240;width:280px;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
 .clientpicker input{margin-bottom:8px}
 .cplist{max-height:220px;overflow:auto;margin-bottom:8px}
 .cpitem{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;cursor:pointer}
@@ -5966,7 +5966,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .countrybtn:hover{border-color:var(--amber)}
 .countrybtn .flag{font-size:16px}
 .countrybtn .ph{color:var(--muted)}
-.countrypicker{position:fixed;display:none;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);padding:10px;z-index:230;width:260px;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
+.countrypicker{position:fixed;display:none;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);padding:10px;z-index:240;width:260px;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
 .countrypicker input{margin-bottom:8px}
 .cflag{font-size:15px;width:20px;text-align:center;flex-shrink:0}
 .maplocation{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:6px}
@@ -6307,7 +6307,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .hoverprev{position:fixed;width:40vw;height:56vh;min-width:280px;min-height:220px;background:var(--card-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);overflow:hidden;pointer-events:none;z-index:80;display:none}
 .hoverprev img{width:100%;height:100%;object-fit:contain;background:var(--surface-2)}
 .hoverprev .empty,.hoverprev .loading{display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:12px;padding:14px;text-align:center}
-.csmodal{position:fixed;inset:0;background:rgba(20,18,14,.6);z-index:200;display:flex;flex-direction:column;padding:26px}
+.csmodal{position:fixed;inset:0;background:rgba(20,18,14,.6);z-index:228;display:flex;flex-direction:column;padding:26px}
 .csmodal.hide{display:none}
 .csmodalbar{background:var(--card-bg);border-radius:10px 10px 0 0;padding:12px 18px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 -1px 0 var(--line) inset}
 .csmodalbar b{font-size:13px}
@@ -6393,7 +6393,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .clientlogopicker{width:76px;height:76px;border-radius:50%;background:var(--tint);border:1.5px dashed #e0c48f;display:flex;align-items:center;justify-content:center;cursor:pointer;margin:0 auto 16px;position:relative;overflow:hidden}
 .clientlogopicker img{width:100%;height:100%;object-fit:cover}
 .clientlogopicker .lprm{position:absolute;top:1px;right:1px;background:var(--brand-dark);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;line-height:1;padding:0}
-.filemenu{position:fixed;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);padding:6px;z-index:180;min-width:190px;display:none;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
+.filemenu{position:fixed;background:var(--glass-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);padding:6px;z-index:240;min-width:190px;display:none;animation:brandOpen .16s cubic-bezier(.24,.9,.32,1.2)}
 /* Progressive enhancement only — every surface above already has a solid
    translucent background as its real fallback, so browsers without
    backdrop-filter support just keep today's tinted-glass-without-blur look
@@ -6419,7 +6419,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .launchertileicon svg{width:28px;height:28px}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .muted{color:var(--muted)}.hide{display:none}
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--brand-dark);color:#fff;padding:10px 18px;border-radius:9px;font-size:13px;opacity:0;transition:.2s;pointer-events:none}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--brand-dark);color:#fff;padding:10px 18px;border-radius:9px;font-size:13px;opacity:0;transition:.2s;pointer-events:none;z-index:700}
 .toast.show{opacity:1}
 .updatedot{position:absolute;top:-2px;right:-3px;width:8px;height:8px;border-radius:50%;background:#e0464f;box-shadow:0 0 0 2px var(--brand-dark);animation:updatePulse 1.8s ease-in-out infinite}
 @keyframes updatePulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:.7}}

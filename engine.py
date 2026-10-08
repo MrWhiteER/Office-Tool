@@ -1163,7 +1163,56 @@ def read_full_record(path, doc_type):
                 item["photo"] = "data:image/png;base64," + base64.b64encode(photo_bytes).decode("ascii")
             items.append(item)
     out["items"] = items
+    if doc_type in SUMMARY_VALUE_COL:
+        out.update(read_summary_block(path, doc_type))
     return out
+
+_SUMMARY_PCT_RE = re.compile(r"^=[A-Z]+\d+\*\(([-\d.]+)/100\)$")
+_SUMMARY_TARGET_RE = re.compile(r"^=MAX\([A-Z]+\d+-([-\d.]+),0\)$")
+_SUMMARY_FIXED_RE = re.compile(r"^=([-\d.]+)$")
+
+def read_summary_block(path, doc_type):
+    """Reverse of _write_summary_block: recover the discount/vat settings
+    from the formulas it wrote, so opening a generated Tax Invoice for
+    editing keeps its VAT/discount instead of the form falling back to
+    "VAT off" and silently dropping it on the next save. Returns {} when
+    the block can't be found (e.g. a hand-edited file) so the caller keeps
+    its old behavior."""
+    doc_type = doc_type.upper()
+    value_col = SUMMARY_VALUE_COL.get(doc_type)
+    if not value_col:
+        return {}
+    ws = load_workbook(path).active   # formulas, not cached values
+    discount = {"enabled": False}
+    vat = {"enabled": False}
+    found_total = False
+    for r in range(ITEM_START.get(doc_type, 1), ws.max_row + 1):
+        label = str(ws.cell(r, 3).value or "").strip()
+        formula = str(ws.cell(r, value_col).value or "").replace(" ", "")
+        low = label.lower()
+        if low == "discount":
+            m = _SUMMARY_PCT_RE.match(formula)
+            t = _SUMMARY_TARGET_RE.match(formula)
+            f = _SUMMARY_FIXED_RE.match(formula)
+            if m:
+                discount = {"enabled": True, "mode": "percent", "value": float(m.group(1))}
+            elif t:
+                discount = {"enabled": True, "mode": "target", "value": float(t.group(1))}
+            elif f:
+                discount = {"enabled": True, "mode": "fixed", "value": float(f.group(1))}
+        elif low.startswith("vat"):
+            m = _SUMMARY_PCT_RE.match(formula)
+            f = _SUMMARY_FIXED_RE.match(formula)
+            if m:
+                vat = {"enabled": True, "mode": "percent", "value": float(m.group(1))}
+            elif f:
+                vat = {"enabled": True, "mode": "fixed", "value": float(f.group(1))}
+        elif low == "total amount":
+            found_total = True
+            break
+    if not found_total:
+        return {}
+    return {"discount": discount, "vat": vat}
 
 _ITEM_COL_LABELS = {
     "unit": "unit", "units": "unit", "uom": "unit",
