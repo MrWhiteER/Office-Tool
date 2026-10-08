@@ -6842,6 +6842,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
             <p class="muted hide cat-basics-info" style="font-size:10px;margin:4px 0 0">Drives the Class 1/2/3 badge automatically — Outdoor→Class 1, Indoor→Class 2, Striplight/Neon Flex→Class 3.</p>
           </div>
         </div>
+        <div class=f>
+          <label class=dvcheck style="text-transform:none;font-size:13px"><input type=checkbox id=cat-fit-one-page onchange="schedulePreview()"> Fit to one page</label>
+          <p class="muted hide cat-basics-info" style="font-size:10px;margin:4px 0 0">If this datasheet would spill onto a second page, the body (photos, specs and Ordering Table) is shrunk just enough to fit on one page. The header and footer stay the same size. Datasheets that already fit on one page are unchanged.</p>
+        </div>
         <!-- Main Product Photo/Application Photo — moved here from the
              Photos section per explicit request ("put it under Product
              Type"). #cat-img-main/#cat-img-lifestyle and their gear-icon
@@ -10108,6 +10112,7 @@ function resetCatForm(){
   loadCatNextPage();
   $('cat-producttype').value='';
   renderCatSeriesField('');
+  $('cat-fit-one-page').checked=false;
   $('cat-family-enabled').checked=false;
   $('cat-family-details').classList.add('hide');
   renderCatFamilyField('');
@@ -14119,6 +14124,7 @@ function collectCatData(){
     finish_colors:CAT_FINISH,
     ordering_columns:CAT_ORD_COLS.map(c=>({label:c.label,values:c.values,width:c.width||undefined})),
     ordering_align_rows:!!CAT_ORD_ALIGN_ROWS,
+    fit_one_page:!!($('cat-fit-one-page')&&$('cat-fit-one-page').checked),
   }}
 
 // ---------------------------------------------------------------- Import from PDF (Sololuce Datasheets only)
@@ -15339,6 +15345,7 @@ function populateCatForm(data){
   renderCatFamilyField(data.family||'');
   $('cat-producttype').value=data.product_type||'';
   if(data.page_number)$('cat-pagenum').value=data.page_number;else loadCatNextPage();
+  $('cat-fit-one-page').checked=!!data.fit_one_page;
   $('cat-description').value=data.description||'';
   CAT_DESC_STYLE=data.description_style?{...CAT_DESC_STYLE_DEFAULT,...data.description_style}:{...CAT_DESC_STYLE_DEFAULT};
   applyCatDescStyle();

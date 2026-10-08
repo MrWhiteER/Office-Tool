@@ -542,7 +542,7 @@
        RIGHT is flex:1, so it also gets correspondingly narrower (its own
        content already reflows/shrinks to fit — see the badges/spec-list
        comments further down), nothing else needed for that. -->
-  <div style="display:flex;gap:2cm;margin-top:-23.7pt;">
+  <div style="display:flex;gap:2cm;margin-top:-23.7pt;{% if fit_zoom %}zoom:{{ fit_zoom }};{% endif %}">
 
     <!-- LEFT: photo, description, lifestyle photo. Fixed 7.7cm wide (was
          7.5cm — per a later explicit request, bumped again together with
@@ -1076,7 +1076,7 @@
        the remaining space on the current page moves to the next page whole
        — together with its Ordering Code Example line above it — instead of
        splitting mid-table with the header row stranded on the prior page. -->
-  <div style="break-inside:avoid;page-break-inside:avoid;">
+  <div style="break-inside:avoid;page-break-inside:avoid;{% if fit_zoom %}zoom:{{ fit_zoom }};{% endif %}">
   {% if ordering_code_example %}
   <!-- margin-top 6px->3px: one of a small set of coordinated trims (see
        the two-column body's own comment above) aimed at fitting a normal-
