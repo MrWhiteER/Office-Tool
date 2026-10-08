@@ -194,7 +194,14 @@
 </div>
 {% endmacro %}
 
-<doc-page size="a4" margin="0.5in">
+<!-- footer-gap: how much room the page reserves above the footer for body
+     content (doc-page.js adds it on top of the footer's measured height,
+     which already includes its 0.5in bottom padding). The default (the full
+     0.5in page margin) plus the footer's own -13.62pt shift left a ~1.75cm
+     empty band between the last content and the footer's orange line. Per
+     explicit request that band is now ~0.5cm: 0.55pt here + the 13.62pt
+     footer shift = 14.17pt = 0.5cm, measured against the real PDF. -->
+<doc-page size="a4" margin="0.5in" footer-gap="0.55pt">
 
   <!-- Logo/product-name/category sized 20% up from the original
        51px/26px/14px, then the logo alone brought back down 5% from that

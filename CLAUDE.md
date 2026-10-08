@@ -1859,3 +1859,11 @@ Two bugs that made "Edit" from All Docs look broken:
   render; one that can't fit even at 0.70 keeps its normal multi-page output.
 - Pagination is decided only by Chromium's print pass, so the search counts
   real PDF pages (PyMuPDF) rather than predicting from the DOM.
+- **Footer gap (separate from Fit to one page):** `sololuce_datasheet.html`
+  sets `<doc-page footer-gap="0.55pt">`. That's a new opt-in `doc-page.js`
+  attribute for the space reserved above the footer's measured height (it
+  defaults to the page margin, so every other doc type is unchanged). Before
+  this, datasheets left a ~1.75cm empty band above the footer's orange line.
+  Now it's ~0.5cm (0.55pt + the footer's own -13.62pt shift = 14.17pt),
+  measured against the real PDF. About two more Ordering Table rows now fit
+  on page 1 without zooming.

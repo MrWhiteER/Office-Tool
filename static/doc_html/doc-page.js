@@ -123,7 +123,7 @@
        * never overlaps the fixed header/footer regardless of how tall a
        * given document's header/footer content is. */
       .hdr-space { height: max(var(--doc-page-margin), calc(var(--doc-hdr-h) + var(--doc-page-margin))); }
-      .ftr-space { height: max(var(--doc-page-margin), calc(var(--doc-ftr-h) + var(--doc-page-margin))); }
+      .ftr-space { height: max(var(--doc-page-margin), calc(var(--doc-ftr-h) + var(--doc-ftr-gap, var(--doc-page-margin)))); }
       ::slotted([slot="header"]) {
         position: fixed; top: 0; left: 0; right: 0; margin: 0;
         padding: var(--doc-page-margin) var(--doc-page-margin) 0;
@@ -136,7 +136,7 @@
   `;
 
   class DocPage extends HTMLElement {
-    static get observedAttributes() { return ['size', 'width', 'height', 'margin']; }
+    static get observedAttributes() { return ['size', 'width', 'height', 'margin', 'footer-gap']; }
 
     constructor() {
       super();
@@ -155,6 +155,11 @@
       return safeLen(this.getAttribute('height'), named ? named[1] : PAPER.letter[1]);
     }
     get pageMargin() { return safeLen(this.getAttribute('margin'), '0.75in'); }
+    /** Optional footer-gap: how much space the print spacer reserves on top
+     *  of the footer's own measured height (which already includes its
+     *  page-margin bottom padding). Defaults to the page margin, which is
+     *  what every document got before this attribute existed. */
+    get footerGap() { return safeLen(this.getAttribute('footer-gap'), this.pageMargin); }
 
     connectedCallback() {
       if (!this._sheet) this._render();
@@ -212,6 +217,7 @@
         '--doc-page-w:' + this.pageWidth + ';' +
         '--doc-page-h:' + this.pageHeight + ';' +
         '--doc-page-margin:' + this.pageMargin + ';' +
+        '--doc-ftr-gap:' + this.footerGap + ';' +
         '--doc-hdr-h:' + (hdrH || 0) + 'px;' +
         '--doc-ftr-h:' + (ftrH || 0) + 'px}';
     }
