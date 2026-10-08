@@ -1867,3 +1867,14 @@ Two bugs that made "Edit" from All Docs look broken:
   Now it's ~0.5cm (0.55pt + the footer's own -13.62pt shift = 14.17pt),
   measured against the real PDF. About two more Ordering Table rows now fit
   on page 1 without zooming.
+
+## All Docs hover preview: page-hugging box
+
+- `.hoverprev` used to be a fixed 40vw × 56vh box with the page PNG
+  `object-fit:contain`ed inside, so a portrait page left wide empty bars on
+  both sides. Now the box keeps its 56vh height but its width follows the
+  image (`img{height:100%;width:auto}`), with only a 0.2cm side padding.
+  `max-width:90vw` + `object-fit:contain` keep a landscape page whole.
+- Because the box widens once the image loads, `showPrev`'s `img.onload`
+  re-runs `movePrev` with the last pointer event (`hoverLastEv`) so the box
+  still flips left of the cursor near the window's right edge.

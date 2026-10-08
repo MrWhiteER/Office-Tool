@@ -6304,9 +6304,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .rbtn:hover{border-color:var(--ink)}
 .rbtn.cs{background:var(--brand-dark);color:#fff;border-color:var(--brand-dark)}
 .rbtn.cs:hover{background:var(--amber2);border-color:var(--amber2)}
-.hoverprev{position:fixed;width:40vw;height:56vh;min-width:280px;min-height:220px;background:var(--card-bg);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);overflow:hidden;pointer-events:none;z-index:80;display:none}
-.hoverprev img{width:100%;height:100%;object-fit:contain;background:var(--surface-2)}
-.hoverprev .empty,.hoverprev .loading{display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:12px;padding:14px;text-align:center}
+/* Box hugs the page: fixed height, width follows the image's own aspect
+   (width:auto on the img) so only a 0.2cm side gutter remains instead of
+   the wide empty bars a fixed 40vw box left around a portrait page.
+   max-width + object-fit:contain keep a landscape page whole and in
+   proportion on a narrow window. */
+.hoverprev{position:fixed;height:56vh;min-height:220px;max-width:90vw;padding:0 .2cm;box-sizing:border-box;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-xl);overflow:hidden;pointer-events:none;z-index:80;display:none}
+.hoverprev img{display:block;height:100%;width:auto;max-width:calc(90vw - .4cm - 2px);object-fit:contain}
+.hoverprev .empty,.hoverprev .loading{display:flex;align-items:center;justify-content:center;width:280px;height:100%;box-sizing:border-box;color:var(--muted);font-size:12px;padding:14px;text-align:center}
 .csmodal{position:fixed;inset:0;background:rgba(20,18,14,.6);z-index:228;display:flex;flex-direction:column;padding:26px}
 .csmodal.hide{display:none}
 .csmodalbar{background:var(--card-bg);border-radius:10px 10px 0 0;padding:12px 18px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 -1px 0 var(--line) inset}
@@ -15966,14 +15971,18 @@ function showPrev(ev,rel,canPreview){
     if(canPreview){
       box.innerHTML='<div class=loading>Loading preview…</div>';
       const img=new Image();
-      img.onload=()=>{if(myToken!==hoverToken)return;box.innerHTML='';box.appendChild(img)};
+      img.onload=()=>{if(myToken!==hoverToken)return;box.innerHTML='';box.appendChild(img);movePrev(hoverLastEv||ev)};
       img.onerror=()=>{if(myToken!==hoverToken)return;box.innerHTML='<div class=empty>Couldn\'t render a preview for this file.</div>'};
       img.src='/cs-thumb?f='+encodeURIComponent(rel);
     }else{
       box.innerHTML='<div class=empty>No preview available yet for this file.</div>';
     }
     box.style.display='block';movePrev(ev)},150)}
+// the box changes width once the page image lands (it sizes to the page),
+// so onload re-places it from the latest pointer position
+let hoverLastEv=null;
 function movePrev(ev){
+  hoverLastEv=ev;
   const box=$('hoverprev');if(box.style.display!=='block')return;
   const pad=18,w=box.offsetWidth,h=box.offsetHeight;
   let x=ev.clientX+pad,y=ev.clientY+pad;
