@@ -1844,3 +1844,18 @@ Two bugs that made "Edit" from All Docs look broken:
   `engine.read_summary_block()`, which parses the formulas
   `_write_summary_block()` writes (`=J19*(5/100)`, `=MAX(J19-x,0)`,
   `=x`) back into `{discount, vat}`.
+
+## Datasheets: "Fit to one page" (per-datasheet checkbox)
+
+- Basics section of the Sololuce Datasheet form has a **Fit to one page**
+  checkbox (`#cat-fit-one-page`, saved as `fit_one_page`). Off by default,
+  so every existing datasheet renders byte-for-byte as before.
+- When on and the PDF would run to 2+ pages,
+  `html_engine._fit_datasheet_to_one_page` re-renders with CSS `zoom`
+  (`fit_zoom` in `sololuce_datasheet.html`) on the two body blocks only
+  (two-column section + Ordering Table) and binary-searches the largest
+  zoom (0.70–1.00, 0.01 steps) that still prints as one page. Header and
+  footer are never scaled. A datasheet that already fits costs no extra
+  render; one that can't fit even at 0.70 keeps its normal multi-page output.
+- Pagination is decided only by Chromium's print pass, so the search counts
+  real PDF pages (PyMuPDF) rather than predicting from the DOM.

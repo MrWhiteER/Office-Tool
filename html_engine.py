@@ -1609,7 +1609,47 @@ def render_datasheet_pdf(data, out_path, brand=None):
     # what's INSIDE the row, never whether it renders at all.
     context["extra_bottom_merged"] = bool(data.get("extra_photo_3_merged"))
     context.setdefault("logo_src", _brand_logo_data_uri(brand))
-    return render_pdf("sololuce_datasheet.html", context, out_path)
+    out = render_pdf("sololuce_datasheet.html", context, out_path)
+    if data.get("fit_one_page"):
+        out = _fit_datasheet_to_one_page(context, out_path)
+    return out
+
+# "Fit to one page" (per-datasheet checkbox, off by default): when a datasheet
+# would spill onto a second page, shrink ONLY the body (the two-column section
+# and the Ordering Table block — header/footer stay exactly as they are) with
+# CSS zoom, using the largest zoom that still prints as one page. Pagination is
+# Chromium's print-only decision, so there's no reliable way to predict it from
+# the DOM — this just re-renders and counts the real PDF's pages. A datasheet
+# that already fits is never touched (zero extra renders), and one that can't
+# fit even at FIT_MIN_ZOOM is left as its normal multi-page output rather than
+# printing unreadably small text.
+FIT_MIN_ZOOM = 0.70
+
+def _pdf_page_count(path):
+    import fitz
+    with fitz.open(path) as doc:
+        return doc.page_count
+
+def _fit_datasheet_to_one_page(context, out_path):
+    if _pdf_page_count(out_path) <= 1:
+        return out_path
+    def fits(z):
+        render_pdf("sololuce_datasheet.html", dict(context, fit_zoom=z), out_path)
+        return _pdf_page_count(out_path) <= 1
+    if not fits(FIT_MIN_ZOOM):
+        return render_pdf("sololuce_datasheet.html", context, out_path)
+    # Binary search for the largest zoom (to 0.01) that still fits.
+    lo, hi, last = int(FIT_MIN_ZOOM * 100), 100, int(FIT_MIN_ZOOM * 100)
+    while hi - lo > 1:
+        last = (lo + hi) // 2
+        if fits(last / 100):
+            lo = last
+        else:
+            hi = last
+    # The last probe may have been a miss; re-render the best fit if so.
+    if last != lo:
+        fits(lo / 100)
+    return out_path
 
 # ----------------------------------------------------------------------------
 # Full Catalog Builder (see catalog_builder.py) — Index and Pre-index, the
