@@ -1821,3 +1821,26 @@ wrong, since most old invoices were presumably already settled).
   Collected/Outstanding updated live, the chart grew a green bar, and the
   company table re-sorted by remaining balance — then cleared the test
   ledger entries and restored the original settings.
+
+## Fixed: edit-mode popups opened behind the editor; Tax Invoice VAT lost on edit
+
+Two bugs that made "Edit" from All Docs look broken:
+
+- **Popups opened behind `#editmodal`.** The full-window editor sits at
+  `z-index:220`, but the shared floating popovers it uses were all below
+  it: the rich-text toolbar (Bold/Italic/Underline/Strike/Color), the
+  Company/Attn/Project autocomplete, the Client picker, Product Finder,
+  Drafts picker and the other `.clientpicker` popovers (190), the file
+  menu (180), the read-only `#csmodal` datasheet preview (200), and the
+  toast (no z-index at all). Every one of them "opened" but was hidden,
+  so in the editor those tools did nothing visible. They now sit at 240
+  (`#csmodal` at 228, toast at 700). Rule of thumb: any new floating
+  popover must stack above `.editmodal` (220) and the `.clientmodal`
+  dialogs (225), or it will silently vanish in edit mode.
+- **Tax Invoice VAT/discount dropped on edit.** `engine.read_full_record()`
+  never read the summary block back, so `/api/doc` returned no
+  `vat`/`discount` and `restoreDiscVat()` defaulted VAT to off. Any edit
+  re-rendered and saved the invoice without VAT. Added
+  `engine.read_summary_block()`, which parses the formulas
+  `_write_summary_block()` writes (`=J19*(5/100)`, `=MAX(J19-x,0)`,
+  `=x`) back into `{discount, vat}`.
