@@ -1878,3 +1878,24 @@ Two bugs that made "Edit" from All Docs look broken:
 - Because the box widens once the image loads, `showPrev`'s `img.onload`
   re-runs `movePrev` with the last pointer event (`hoverLastEv`) so the box
   still flips left of the cursor near the window's right edge.
+
+## Expense Report: items re-sort by date only after you leave them
+
+- Expense items used to re-sort and re-render the instant a date was
+  complete, even while the user was still in that card. The card jumped
+  to a new slot with no visible motion, and the next keystrokes landed in
+  whichever card now sat in the old spot, which was often a finished
+  expense. Now `onExpDateChange()` only marks the sort pending
+  (`EXP_SORT_PENDING`/`EXP_SORT_ITEM`). A document `focusout` listener
+  runs `expFlushSort()` once focus leaves that card.
+- `expFlushSort(dest)` re-renders, then FLIP-animates every card from
+  its old position. It also scrolls the moved card into view and gives
+  it a short amber `.expmoved` glow. Focus is restored by item object plus
+  the field's `data-f` (not by index), so a click into another card stays
+  in that item after the re-render. During `focusout`, `activeElement` is
+  not updated yet, which is why the destination is passed in as `dest`.
+- Clicking another card's × button skips the flush, because a re-render
+  between mousedown and mouseup would swallow the click.
+  `removeExpRow()` flushes after removing the row instead.
+- `collectExpData()` sends a date-sorted copy, so the PDF/preview is in
+  date order even while the on-screen sort is still pending.

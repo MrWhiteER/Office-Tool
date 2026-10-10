@@ -5988,6 +5988,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .itcarddesc{width:100%;min-height:60px;resize:vertical;font-family:inherit;line-height:1.4;margin-bottom:9px;display:block}
 .itemcard .richbox{min-height:60px;margin-bottom:9px}
 .itemcardmeta{display:flex;gap:8px;flex-wrap:wrap}
+/* Expense item that just re-sorted to a new date position (expFlushSort) —
+   a short amber glow so the eye can find where it landed. */
+.itemcard.expmoved{animation:expMoved 1.6s ease-out}
+@keyframes expMoved{0%,35%{border-color:var(--amber);box-shadow:0 0 0 3px var(--tint)}100%{box-shadow:0 0 0 0 transparent}}
 .itcardfield{flex:1;min-width:88px}
 .itcardfield label{display:block;font-size:9px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px}
 .itemcard input,.itemcard select{background:var(--surface-2);border-color:var(--border)}
@@ -14602,7 +14606,7 @@ function expPaymentMethodFieldHtml(i,it){
     EXP_PAYMENT_METHODS.map(m=>'<option'+(m===v?' selected':'')+'>'+escHtml(m)+'</option>').join('')
     +(v&&!EXP_PAYMENT_METHODS.includes(v)?'<option selected>'+escHtml(v)+'</option>':'')
     +'<option value="__custom__">Custom…</option>';
-  return '<div class=itcardfield><label>Payment Method</label><select data-i='+i+' onchange="onExpPaymentChange('+i+',this)">'+opts+'</select></div>'}
+  return '<div class=itcardfield><label>Payment Method</label><select data-i='+i+' data-f=payment onchange="onExpPaymentChange('+i+',this)">'+opts+'</select></div>'}
 // Same "swap the cell for a text input, save on blur" pattern as
 // onUnitChange() — no native prompt()/confirm() (they silently no-op here).
 function onExpPaymentChange(i,sel){
@@ -14629,7 +14633,7 @@ function expProductFieldHtml(i,it){
     EXP_PRODUCTS.map(m=>'<option'+(m===v?' selected':'')+'>'+escHtml(m)+'</option>').join('')
     +(v&&!EXP_PRODUCTS.includes(v)?'<option selected>'+escHtml(v)+'</option>':'')
     +'<option value="__custom__">Custom…</option>';
-  return '<div class=itcardfield><label>Product</label><select data-i='+i+' onchange="onExpProductChange('+i+',this)">'+opts+'</select></div>'}
+  return '<div class=itcardfield><label>Product</label><select data-i='+i+' data-f=product onchange="onExpProductChange('+i+',this)">'+opts+'</select></div>'}
 function onExpProductChange(i,sel){
   if(sel.value!=='__custom__'){updExp(i,'product',sel.value);return}
   const cell=sel.parentElement;
@@ -14654,7 +14658,7 @@ function expDescriptionFieldHtml(i,it){
     EXP_DESCRIPTIONS.map(m=>'<option'+(m===v?' selected':'')+'>'+escHtml(m)+'</option>').join('')
     +(v&&!EXP_DESCRIPTIONS.includes(v)?'<option selected>'+escHtml(v)+'</option>':'')
     +'<option value="__custom__">Custom…</option>';
-  return '<div class="itcardfield" style="flex:2;min-width:160px"><label>Description</label><select data-i='+i+' onchange="onExpDescriptionChange('+i+',this)">'+opts+'</select></div>'}
+  return '<div class="itcardfield" style="flex:2;min-width:160px"><label>Description</label><select data-i='+i+' data-f=description onchange="onExpDescriptionChange('+i+',this)">'+opts+'</select></div>'}
 function onExpDescriptionChange(i,sel){
   if(sel.value!=='__custom__'){updExp(i,'description',sel.value);return}
   const cell=sel.parentElement;
@@ -14685,13 +14689,15 @@ function expDateFieldHtml(i,it){
     return '<option value="'+mv+'"'+(mv===month?' selected':'')+'>'+m+'</option>'}).join('');
   return '<div class=itcardfield style="min-width:120px"><label>Date ('+EXP_CURRENT_YEAR+')</label>'+
     '<div class=expdatewrap data-i='+i+' style="display:flex;gap:4px">'+
-      '<select class=expmonth onchange="onExpDateChange(this)" style="flex:1">'+opts+'</select>'+
-      '<input class=expday type=number min=1 max=31 placeholder=DD value="'+escHtml(day)+'" onchange="onExpDateChange(this)" style="width:50px">'+
+      '<select class=expmonth data-f=month onchange="onExpDateChange(this)" style="flex:1">'+opts+'</select>'+
+      '<input class=expday data-f=day type=number min=1 max=31 placeholder=DD value="'+escHtml(day)+'" onchange="onExpDateChange(this)" style="width:50px">'+
     '</div></div>'}
 // Composes month+day into a full ISO date using the fixed current year, but
-// only commits (and triggers the sort-by-date re-render) once BOTH parts are
-// actually set — otherwise picking just the month would immediately sort an
-// still-incomplete row to the bottom before the day's even been touched.
+// only commits once BOTH parts are actually set — otherwise picking just the
+// month would sort a still-incomplete row to the bottom before the day's even
+// been touched. The re-sort itself never happens here: it waits until focus
+// leaves this item (see expFlushSort), so the card can't jump out from under
+// the user while they're still filling in its Amount/Product/etc.
 function onExpDateChange(el){
   const wrap=el.closest('.expdatewrap'),i=parseInt(wrap.dataset.i,10);
   const month=wrap.querySelector('.expmonth').value;
@@ -14699,7 +14705,7 @@ function onExpDateChange(el){
   const day=dayRaw?String(parseInt(dayRaw,10)).padStart(2,'0'):'';
   const bothSet=month&&day, bothBlank=!month&&!day;
   EXP_ITEMS[i].date=bothSet?(EXP_CURRENT_YEAR+'-'+month+'-'+day):'';
-  if(bothSet||bothBlank){sortExpItemsByDate();renderExpItems();recomputeExpPeriod()}
+  if(bothSet||bothBlank){EXP_SORT_PENDING=true;EXP_SORT_ITEM=EXP_ITEMS[i];recomputeExpPeriod()}
   schedulePreview()}
 function expRowHtml(it,i){
   return '<div class=itemcard>'+
@@ -14712,10 +14718,70 @@ function expRowHtml(it,i){
       expProductFieldHtml(i,it)+
       expDescriptionFieldHtml(i,it)+
       expPaymentMethodFieldHtml(i,it)+
-      '<div class=itcardfield><label>Amount</label><input type=number step=0.01 data-i='+i+' value="'+escHtml(it.amount??'')+'" placeholder="0.00" oninput="updExp('+i+',\'amount\',this.value)"></div>'+
+      '<div class=itcardfield><label>Amount</label><input type=number step=0.01 data-i='+i+' data-f=amount value="'+escHtml(it.amount??'')+'" placeholder="0.00" oninput="updExp('+i+',\'amount\',this.value)"></div>'+
     '</div>'+
   '</div>'}
 function renderExpItems(){$('explist').innerHTML=EXP_ITEMS.map((it,i)=>expRowHtml(it,i)).join('')}
+// Deferred date sort. Sorting the moment a date was entered used to re-render
+// the whole list mid-entry: the card silently jumped to a new slot, and the
+// next keystrokes landed in whatever card now sat where it used to be — an
+// already-finished expense. Now a date change only marks the sort pending;
+// it runs once focus leaves that item (Tab/click to another card or anywhere
+// else), and the move is animated (FLIP: every card slides from its old
+// position), scrolled into view and briefly highlighted. Focus is restored by
+// item *object* + field, never by index, so typing always stays in the item
+// the user actually clicked into.
+let EXP_SORT_PENDING=false, EXP_SORT_ITEM=null;
+function expFlushSort(dest){
+  if(!EXP_SORT_PENDING)return;
+  EXP_SORT_PENDING=false;
+  const moved=EXP_SORT_ITEM; EXP_SORT_ITEM=null;
+  const before=EXP_ITEMS.slice();
+  sortExpItemsByDate();
+  if(EXP_ITEMS.every((it,i)=>it===before[i]))return;
+  const list=$('explist'), cards=[...list.children];
+  const oldTop=new Map(before.map((it,i)=>[it,cards[i]?cards[i].getBoundingClientRect().top:0]));
+  // Remember where focus is (another card's field) so it survives the re-render.
+  // During focusout, activeElement isn't updated yet; the caller passes where
+  // focus is heading instead.
+  const ae=dest||document.activeElement, aeCard=ae&&list.contains(ae)?ae.closest('.itemcard'):null;
+  const focusItem=aeCard?before[cards.indexOf(aeCard)]:null, focusField=aeCard?ae.dataset.f:null;
+  renderExpItems();
+  const newCards=[...list.children];
+  if(focusItem&&focusField){
+    const el=newCards[EXP_ITEMS.indexOf(focusItem)]?.querySelector('[data-f="'+focusField+'"]');
+    if(el)el.focus({preventScroll:true})}
+  if(window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+    const c=newCards[EXP_ITEMS.indexOf(moved)];
+    if(c)c.scrollIntoView({block:'nearest'});
+    return}
+  EXP_ITEMS.forEach((it,i)=>{
+    const c=newCards[i], dy=oldTop.get(it)-c.getBoundingClientRect().top;
+    if(!dy)return;
+    c.style.transition='none';c.style.transform='translateY('+dy+'px)';c.style.position='relative';c.style.zIndex=it===moved?'2':'';
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      c.style.transition='transform .45s cubic-bezier(.2,.8,.2,1)';c.style.transform='';
+      c.addEventListener('transitionend',()=>{c.style.transition='';c.style.zIndex='';c.style.position=''},{once:true})}))});
+  const mc=newCards[EXP_ITEMS.indexOf(moved)];
+  if(mc){
+    mc.classList.add('expmoved');
+    mc.addEventListener('animationend',()=>mc.classList.remove('expmoved'),{once:true});
+    // Scroll after the slide so the target position is where the card ends up.
+    setTimeout(()=>mc.scrollIntoView({behavior:'smooth',block:'nearest'}),460)}}
+// focusout bubbles; relatedTarget is where focus is going (null when clicking
+// something non-focusable). Only flush once focus is genuinely outside the
+// card whose date changed.
+document.addEventListener('focusout',e=>{
+  if(!EXP_SORT_PENDING)return;
+  const list=$('explist');
+  if(!list||!list.contains(e.target))return;
+  const card=e.target.closest('.itemcard');
+  if(e.relatedTarget&&card&&card.contains(e.relatedTarget))return;
+  // Pressing another card's × button: re-rendering now would swap the button
+  // out between mousedown and mouseup and swallow the click. removeExpRow()
+  // flushes right after it removes the row instead.
+  if(e.relatedTarget&&e.relatedTarget.tagName==='BUTTON'&&list.contains(e.relatedTarget))return;
+  expFlushSort(e.relatedTarget)});
 // Period From/To are read-only (see HEAD.EXP's 'readonly' flag) — the report's
 // period is just whatever range its own line items actually span, not an
 // independently-typed value, so it's always derived rather than asked for.
@@ -14743,8 +14809,8 @@ function recomputeExpCategory(){
   if(document.getElementById('exp-category')?.tagName==='INPUT')return;
   const products=[...new Set(EXP_ITEMS.map(r=>r.product).filter(Boolean))];
   renderExpCategoryField(products.map(p=>p.toUpperCase()).join(', '))}
-function addExpRow(){EXP_ITEMS.push({});renderExpItems();schedulePreview()}
-function removeExpRow(i){EXP_ITEMS.splice(i,1);if(!EXP_ITEMS.length)EXP_ITEMS.push({});renderExpItems();recomputeExpPeriod();recomputeExpCategory();schedulePreview()}
+function addExpRow(){expFlushSort();EXP_ITEMS.push({});renderExpItems();schedulePreview()}
+function removeExpRow(i){EXP_ITEMS.splice(i,1);if(!EXP_ITEMS.length)EXP_ITEMS.push({});renderExpItems();expFlushSort();recomputeExpPeriod();recomputeExpCategory();schedulePreview()}
 function updExp(i,k,v){
   // Date changes go through onExpDateChange() instead (see expDateFieldHtml) —
   // it needs to know when BOTH month and day are set before recomputing
@@ -14753,7 +14819,7 @@ function updExp(i,k,v){
   if(k==='product')recomputeExpCategory();
   schedulePreview()}
 function resetExpForm(){
-  EXP_ITEMS=[{}];
+  EXP_ITEMS=[{}];EXP_SORT_PENDING=false;EXP_SORT_ITEM=null;
   renderExpEmployeeField('');
   renderExpCategoryField('');
   $('exp-currency-custom').value='';
@@ -14767,7 +14833,10 @@ function collectExpData(){
     project:(from||to)?(from+(from&&to?'_to_':'')+to):'',
     category:$('exp-category').value.trim(),
     currency:$('exp-currency').value.trim()||'AED',
-    rows:EXP_ITEMS.filter(r=>r.product||r.description||r.amount)
+    // Sorted copy: the PDF is always in date order even while the on-screen
+    // re-sort is still waiting for focus to leave the edited item.
+    rows:EXP_ITEMS.filter(r=>r.product||r.description||r.amount).map((r,i)=>[r,i])
+      .sort((a,b)=>(!a[0].date-!b[0].date)||(a[0].date||'').localeCompare(b[0].date||'')||a[1]-b[1]).map(x=>x[0])
   }}
 
 async function loadCfg(){await fetch('/api/config').then(r=>r.json());
@@ -15390,7 +15459,7 @@ function populateExpForm(data){
   // unrelated to any one row's Product, unlike Period below.
   renderExpCategoryField(data.category||'');
   restoreExpCurrency(data.currency);
-  EXP_ITEMS=(data.rows&&data.rows.length)?data.rows:[{}];
+  EXP_ITEMS=(data.rows&&data.rows.length)?data.rows:[{}];EXP_SORT_PENDING=false;EXP_SORT_ITEM=null;
   // Both self-heal data saved before either became automatic, same reasoning
   // throughout: items are the source of truth, not whatever was separately
   // saved alongside them.
