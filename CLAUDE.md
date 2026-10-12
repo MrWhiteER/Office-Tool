@@ -1899,3 +1899,30 @@ Two bugs that made "Edit" from All Docs look broken:
   `removeExpRow()` flushes after removing the row instead.
 - `collectExpData()` sends a date-sorted copy, so the PDF/preview is in
   date order even while the on-screen sort is still pending.
+
+## Fixed: new users / password changes didn't work on other PCs
+
+Report: adding a user (or changing a user's password) said it worked, but
+logging in with it on another PC said wrong details. Cause: Settings >
+Users > "+ Add / Save User" only wrote this PC's local `accounts_cache.json`
+and set `accounts_dirty.flag`; other PCs only saw it after a separate
+"Publish Changes to Cloud" click, which was easy to miss and also needed
+the admin's own write key on that PC. While the dirty flag was set, this
+PC also stopped pulling account changes made elsewhere.
+
+- `accounts._apply_change(mutate)`: pull fresh `system/accounts.json` from
+  R2, apply the change, push, read back to confirm, then update the local
+  cache. `upsert_user`, `delete_user` and `change_own_password` use it.
+  Any cloud failure raises `CloudSyncError` and nothing is changed, so
+  `/api/accounts-save`/`-delete` return 502 with the real reason and the
+  Users screen shows it in red instead of "Saved".
+- Writes use `allow_bundled_write=True` (same key every install already
+  carries). Safe because each change is applied to a fresh R2 copy, never
+  a blind push of the local cache.
+- The Publish button is now hidden unless this PC still holds edits left
+  unpublished by an older version (`has_pending_changes()`). Publishing
+  merges them over R2 (`_merge_pending`), keeping each user's own
+  theme/profile/Google-link fields from R2.
+- Login: if this PC's last R2 refresh failed (`LAST_REFRESH_ERROR`), the
+  "wrong username or password" message also says it couldn't reach the
+  cloud to check for new accounts.

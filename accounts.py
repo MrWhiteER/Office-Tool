@@ -21,9 +21,13 @@ private, since R2 buckets aren't world-readable the way the GitHub repo is).
   synced at least once). Refreshing on every login (not just launch)
   means a brand-new user the admin just added can log in within seconds,
   no restart needed anywhere.
-- Any install with WRITE-capable R2 credentials (the admin's own token,
-  see photo_store.py) can publish — not just a git checkout. Everyone
-  else (read-only R2 token) can only read.
+- Every account change (admin Add/Save/Delete User, a user changing
+  their own password) is applied to a FRESH copy pulled from R2, pushed
+  straight back and read back to confirm, and only then cached locally
+  (_apply_change()). If the cloud step fails the change is not made
+  anywhere and the caller gets a real error. There used to be a separate
+  "Publish" step, and saves that were never published silently stayed on
+  the admin's PC only (fixed 2026-10-12).
 
 ---- Security note (be upfront about this with the admin) ----
 Passwords are salted + hashed (werkzeug's PBKDF2-SHA256, same as Flask's
@@ -121,6 +125,131 @@ def _write_json(path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+class CloudSyncError(Exception):
+    """An account change could not be saved to R2, so no other PC would
+    see it. Raised instead of reporting success: before 2026-10-12, Add /
+    Save User only wrote this PC's local cache and waited for a separate
+    "Publish" click, so the admin saw "Saved" while every other install
+    kept rejecting the new user/password (real report from Edy)."""
+
+
+# Last error from refresh_from_cloud(), or "" after a good refresh. Lets
+# /api/login say "couldn't check the cloud" instead of a bare "wrong
+# password" when this PC simply never received the newest accounts.json.
+LAST_REFRESH_ERROR = ""
+
+
+def _is_missing_key_error(e):
+    code = ""
+    try:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code", "")
+    except Exception:
+        pass
+    return code in ("NoSuchKey", "404", "NotFound")
+
+
+def _fetch_remote():
+    """The current accounts.json in R2. Returns None when it has never been
+    published (first-ever save); raises CloudSyncError on any other failure
+    (offline, bad key, ...) so callers never write over R2 from a stale base."""
+    try:
+        data_bytes, _ct = photo_store.get_bytes(ACCOUNTS_KEY)
+    except Exception as e:
+        if _is_missing_key_error(e):
+            return None
+        raise CloudSyncError("Couldn't read the user list from the cloud: %s" % e)
+    try:
+        data = json.loads(data_bytes.decode("utf-8"))
+    except Exception as e:
+        raise CloudSyncError("The user list in the cloud is unreadable: %s" % e)
+    if not isinstance(data, dict) or not isinstance(data.get("users"), list):
+        raise CloudSyncError("The user list in the cloud has an unexpected shape.")
+    return data
+
+
+def _push_remote(data):
+    """Writes accounts.json to R2 and reads it back to confirm it landed.
+    allow_bundled_write=True: every caller is either admin-gated at the
+    route level (/api/accounts-*) or touches only the caller's own record,
+    and each one applies its change to a FRESH copy pulled from R2 — never
+    a blind push of this PC's local cache, which is what the old admin-only
+    restriction on publish_to_cloud() was guarding against."""
+    body = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    try:
+        photo_store.put_bytes(ACCOUNTS_KEY, body, "application/json", allow_bundled_write=True)
+    except Exception as e:
+        raise CloudSyncError("Couldn't save the user list to the cloud: %s" % e)
+    try:
+        check = _fetch_remote()
+    except CloudSyncError as e:
+        raise CloudSyncError("Saved to the cloud but couldn't confirm it: %s" % e)
+    if check != data:
+        raise CloudSyncError("The cloud copy didn't match after saving — another PC may have changed users at the same moment. Try again.")
+
+
+_SELF_SERVICE_FIELDS = ("settings", "google_email")
+
+
+def _merge_pending(local, remote):
+    """Local accounts.json with unpublished admin edits (DIRTY_FLAG set by
+    an older version of this app) layered over the current R2 copy: the
+    local user list and admin-managed fields win (that was the admin's
+    intent), but each user's own self-service fields (theme/profile,
+    linked Google account) are taken from R2, since those were saved
+    directly to R2 from other PCs after this PC stopped syncing."""
+    if not remote:
+        return local
+    remote_by_name = {(u.get("username") or "").strip().lower(): u for u in remote.get("users", [])}
+    merged = json.loads(json.dumps(local))
+    for u in merged.get("users", []):
+        r = remote_by_name.get((u.get("username") or "").strip().lower())
+        if not r:
+            continue
+        for f in _SELF_SERVICE_FIELDS:
+            if f in r:
+                u[f] = r[f]
+    return merged
+
+
+def _clear_dirty():
+    try:
+        if os.path.exists(DIRTY_FLAG):
+            os.remove(DIRTY_FLAG)
+    except Exception:
+        pass
+
+
+def has_pending_changes():
+    return os.path.exists(DIRTY_FLAG)
+
+
+def _apply_change(mutate):
+    """Pull the freshest accounts.json from R2, apply `mutate(data)` to it,
+    push it back and confirm, THEN update this PC's cache. Nothing is
+    changed anywhere if the cloud step fails, so the caller can honestly
+    report an error. Returns whatever `mutate` returns.
+
+    No R2 connection configured at all (a standalone install that never
+    synced) just edits the local cache — there's no other PC to reach."""
+    if not photo_store.is_configured():
+        data = load_accounts()
+        result = mutate(data)
+        _write_json(LOCAL_CACHE, data)
+        return result
+    remote = _fetch_remote()
+    if has_pending_changes():
+        data = _merge_pending(load_accounts(), remote)
+    elif remote is not None:
+        data = remote
+    else:
+        data = load_accounts()
+    result = mutate(data)
+    _push_remote(data)
+    _write_json(LOCAL_CACHE, data)
+    _clear_dirty()
+    return result
+
+
 def refresh_from_cloud():
     """
     Best-effort pull of the latest accounts.json from R2. Never raises —
@@ -133,19 +262,29 @@ def refresh_from_cloud():
     silently clobbered by the older remote copy the very next time anyone
     (including that same admin) logs in, since this runs on every login.
     """
+    global LAST_REFRESH_ERROR
     if os.path.exists(DIRTY_FLAG):
+        LAST_REFRESH_ERROR = ""
         return False
     if not photo_store.is_configured():
+        LAST_REFRESH_ERROR = ""
         return False
     try:
-        data_bytes, _ct = photo_store.get_bytes(ACCOUNTS_KEY)
-        data = json.loads(data_bytes.decode("utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("users"), list):
-            _write_json(LOCAL_CACHE, data)
-            return True
+        data = _fetch_remote()
+    except CloudSyncError as e:
+        LAST_REFRESH_ERROR = str(e)
+        return False
+    except Exception as e:
+        LAST_REFRESH_ERROR = str(e)
+        return False
+    LAST_REFRESH_ERROR = ""
+    if data is None:
+        return False
+    try:
+        _write_json(LOCAL_CACHE, data)
     except Exception:
-        pass
-    return False
+        return False
+    return True
 
 
 def load_accounts():
@@ -241,17 +380,17 @@ def upsert_user(username, role, brand_lock, blocked_tools, password=None, blocke
     brand_lock = [b for b in _normalize_brand_lock(brand_lock) if b in BRAND_CODES]
     blocked_tools = [t for t in (blocked_tools or []) if t in BLOCKABLE_TOOLS]
     blocked_doc_types = [t for t in (blocked_doc_types or []) if t in BLOCKABLE_DOC_TYPES]
-    data = load_accounts()
-    users = data.setdefault("users", [])
-    existing = next((u for u in users if u.get("username", "").lower() == username.lower()), None)
-    if existing:
-        existing["role"] = role
-        existing["brand_lock"] = brand_lock
-        existing["blocked_tools"] = blocked_tools
-        existing["blocked_doc_types"] = blocked_doc_types
-        if password:
-            existing["password_hash"] = generate_password_hash(password)
-    else:
+    def mutate(data):
+        users = data.setdefault("users", [])
+        existing = next((u for u in users if u.get("username", "").lower() == username.lower()), None)
+        if existing:
+            existing["role"] = role
+            existing["brand_lock"] = brand_lock
+            existing["blocked_tools"] = blocked_tools
+            existing["blocked_doc_types"] = blocked_doc_types
+            if password:
+                existing["password_hash"] = generate_password_hash(password)
+            return _public(existing)
         if not password:
             raise ValueError("Password required for a new user.")
         users.append({
@@ -262,45 +401,40 @@ def upsert_user(username, role, brand_lock, blocked_tools, password=None, blocke
             "blocked_tools": blocked_tools,
             "blocked_doc_types": blocked_doc_types,
         })
-    save_accounts(data)
-    return _public(existing or users[-1])
+        return _public(users[-1])
+    # Saved straight to R2 (see _apply_change()) — raises CloudSyncError
+    # rather than pretending success if other PCs wouldn't see it.
+    return _apply_change(mutate)
 
 
 def delete_user(username):
-    data = load_accounts()
-    users = data.get("users", [])
-    remaining = [u for u in users if u.get("username", "").lower() != (username or "").strip().lower()]
-    if len(remaining) == len(users):
-        raise ValueError("No such user.")
-    if not any(u.get("role") == "admin" for u in remaining):
-        raise ValueError("Can't remove the last admin account.")
-    data["users"] = remaining
-    save_accounts(data)
+    def mutate(data):
+        users = data.get("users", [])
+        remaining = [u for u in users if u.get("username", "").lower() != (username or "").strip().lower()]
+        if len(remaining) == len(users):
+            raise ValueError("No such user.")
+        if not any(u.get("role") == "admin" for u in remaining):
+            raise ValueError("Can't remove the last admin account.")
+        data["users"] = remaining
+    _apply_change(mutate)
 
 
 def publish_to_cloud():
     """
-    Pushes the local accounts.json up to R2 so every other install picks
-    up the change (they refresh on every login attempt — see
-    verify_login()). Needs a WRITE-capable R2 token (the admin's own —
-    see photo_store.py); a read-only token gets a clear permission error
-    back from R2 rather than silently doing nothing. Deliberately admin-
-    only (allow_bundled_write left False) — this blindly pushes WHATEVER
-    is sitting in this machine's local cache, which only ever legitimately
-    holds real admin edits (upsert_user/delete_user are admin-gated at
-    the app.py route level); letting every install use this would mean
-    any user could push arbitrary tampering just by hand-editing their
-    own local accounts_cache.json first. See save_user_setting() below
-    for the narrow, genuinely-safe-for-everyone alternative.
+    Pushes unpublished local edits up to R2. Adding, editing and deleting
+    users now save to R2 directly (see _apply_change()), so this is only
+    needed for edits an older version of the app left behind on this PC
+    (DIRTY_FLAG still set). Merges them over the current R2 copy via
+    _merge_pending() rather than blindly overwriting it, so users' own
+    theme/profile/Google-link saves from other PCs survive.
     """
-    if not photo_store.is_configured(require_write=True):
-        return {"ok": False, "error": "Set up your Admin key (Admin Tools > Cloud Storage) first — accounts sync uses the same connection."}
+    if not photo_store.is_configured():
+        return {"ok": False, "error": "No cloud connection is set up on this PC (Admin Tools > Cloud Storage)."}
     try:
-        data = load_accounts()
-        photo_store.put_bytes(ACCOUNTS_KEY, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"), "application/json")
-        if os.path.exists(DIRTY_FLAG):
-            os.remove(DIRTY_FLAG)
+        _apply_change(lambda data: None)
         return {"ok": True}
+    except CloudSyncError as e:
+        return {"ok": False, "error": str(e)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -388,27 +522,21 @@ def change_own_password(username, current_password, new_password):
         return {"ok": False, "error": "Not logged in."}
     if not new_password or len(new_password) < 4:
         return {"ok": False, "error": "New password must be at least 4 characters."}
+    def mutate(data):
+        users = data.setdefault("users", [])
+        user = next((u for u in users if u.get("username", "").strip().lower() == username_norm), None)
+        if not user:
+            raise ValueError("User not found.")
+        if not check_password_hash(user.get("password_hash", ""), current_password or ""):
+            raise ValueError("Current password is incorrect.")
+        user["password_hash"] = generate_password_hash(new_password)
     try:
-        data_bytes, _ct = photo_store.get_bytes(ACCOUNTS_KEY)
-        data = json.loads(data_bytes.decode("utf-8"))
-        if not isinstance(data, dict) or not isinstance(data.get("users"), list):
-            raise ValueError("unexpected shape")
-    except Exception:
-        data = load_accounts()
-    users = data.setdefault("users", [])
-    user = next((u for u in users if u.get("username", "").strip().lower() == username_norm), None)
-    if not user:
-        return {"ok": False, "error": "User not found."}
-    if not check_password_hash(user.get("password_hash", ""), current_password or ""):
-        return {"ok": False, "error": "Current password is incorrect."}
-    user["password_hash"] = generate_password_hash(new_password)
-    _write_json(LOCAL_CACHE, data)  # apply locally right away regardless of whether the publish below succeeds
-    try:
-        photo_store.put_bytes(
-            ACCOUNTS_KEY, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
-            "application/json", allow_bundled_write=True,
-        )
+        _apply_change(mutate)
         return {"ok": True}
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    except CloudSyncError as e:
+        return {"ok": False, "error": str(e).rstrip(".") + ". Your password was NOT changed."}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

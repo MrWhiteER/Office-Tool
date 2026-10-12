@@ -156,6 +156,11 @@ def api_login():
     data = request.json or {}
     u = accounts.verify_login(data.get("username", ""), data.get("password", ""))
     if not u:
+        # A user added (or a password changed) on another PC only exists
+        # here once this PC has pulled the newest accounts.json — say so
+        # when that pull failed, instead of a misleading bare "wrong".
+        if accounts.LAST_REFRESH_ERROR:
+            return jsonify({"ok": False, "error": "Wrong username or password — or this PC couldn't reach the cloud to check for new or changed accounts. Check the internet connection and try again."}), 401
         return jsonify({"ok": False, "error": "Wrong username or password."}), 401
     _establish_session(u, remember=data.get("remember", True))
     return jsonify({"ok": True, **u})
@@ -376,7 +381,9 @@ def api_profile_picture():
 # ---- Admin-only user management (Settings > Users) — see accounts.py ----
 @app.get("/api/accounts")
 def api_accounts_list():
+    accounts.refresh_from_cloud()
     return jsonify({"users": accounts.list_users(), "brands": list(engine.BRANDS.keys()),
+                     "pending_publish": accounts.has_pending_changes(),
                      "blockable_tools": list(accounts.BLOCKABLE_TOOLS),
                      "blockable_doc_types": list(accounts.BLOCKABLE_DOC_TYPES)})
 
@@ -391,6 +398,8 @@ def api_accounts_save():
         return jsonify({"ok": True, "user": u})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+    except accounts.CloudSyncError as e:
+        return jsonify({"ok": False, "error": str(e).rstrip(".") + ". The user was NOT saved."}), 502
 
 @app.post("/api/accounts-delete")
 def api_accounts_delete():
@@ -402,6 +411,8 @@ def api_accounts_delete():
         return jsonify({"ok": True})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+    except accounts.CloudSyncError as e:
+        return jsonify({"ok": False, "error": str(e).rstrip(".") + ". The user was NOT removed."}), 502
 
 @app.post("/api/accounts-publish")
 def api_accounts_publish():
@@ -7764,8 +7775,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
         <button class="btn dark" style="flex:1" onclick=saveUserForm()>+ Add / Save User</button>
         <button class=btn onclick=resetUserForm()>Clear</button>
       </div>
-      <button class=btn style="width:100%;margin-top:10px" onclick="publishAccounts(this)">Publish Changes to Cloud</button>
-      <p class=muted id=users-publish-note style="font-size:11px;margin:6px 0 0"></p>
+      <p class=muted id=users-publish-note style="font-size:11px;margin:8px 0 0">Changes save to the cloud right away, so every PC can log in with them.</p>
+      <!-- Only shown when this PC still holds user edits an older version
+           left unpublished (accounts.has_pending_changes()). -->
+      <button class="btn hide" id=users-publish-btn style="width:100%;margin-top:8px" onclick="publishAccounts(this)">Publish Older Unsaved Changes to Cloud</button>
     </div></div>
     <div class=card><div class=ch>Manage Cloud Photo Library</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0 0 8px">Add to or remove from the shared photo library everyone syncs from (any logged-in user can add photos too now — see Settings > Shared Product Photos for the everyday upload control; this is the admin view, and the only place photos can be removed).</p>
@@ -17689,7 +17702,9 @@ function permApplyToggle(group,value,toOn){
 async function loadUsersAdmin(){
   const r=await fetch('/api/accounts').then(r=>r.json()).catch(()=>null);
   if(!r)return;
-  USERS_LIST=r.users;USERS_BLOCKABLE=r.blockable_tools;USERS_BRANDS=r.brands;USERS_BLOCKABLE_DOCTYPES=r.blockable_doc_types||[];
+  USERS_LIST=r.users;USERS_BLOCKABLE=r.blockable_tools;
+  $('users-publish-btn').classList.toggle('hide',!r.pending_publish);
+  if(r.pending_publish){const n=$('users-publish-note');n.style.color='var(--danger)';n.textContent='This PC has older user changes that never reached the cloud, so other PCs can\'t see them yet.'}USERS_BRANDS=r.brands;USERS_BLOCKABLE_DOCTYPES=r.blockable_doc_types||[];
   permSetup('brand',USERS_BRANDS,engineBrandLabel,'user-brand-lock','Available (unrestricted)','Locked to');
   permSetup('tools',USERS_BLOCKABLE,t=>TOOL_LABEL[t]||t,'user-blocked-tools','Allowed','Blocked');
   permSetup('doctypes',USERS_BLOCKABLE_DOCTYPES,t=>DOCTYPE_LABEL[t]||t,'user-blocked-doctypes','Allowed','Blocked');
@@ -17732,9 +17747,11 @@ async function saveUserForm(){
   const blockedDocTypes=[...(PERM_GROUPS.doctypes?PERM_GROUPS.doctypes.selected:[])];
   const body={username,password:$('user-password').value||undefined,role:$('user-role').value,
     brand_lock:brandLock,blocked_tools:blocked,blocked_doc_types:blockedDocTypes};
-  const r=await fetch('/api/accounts-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
-  if(!r.ok){toast(r.error||'Could not save user');return}
-  toast('Saved '+username+' — remember to Publish so other installs see it');
+  const r=await fetch('/api/accounts-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  const note=$('users-publish-note');
+  if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not save user';toast('Could not save '+username+' — see the note below');return}
+  note.style.color='var(--success)';note.textContent='Saved '+username+' to the cloud — it works on every PC now.';
+  toast('Saved '+username+' to the cloud');
   resetUserForm();loadUsersAdmin()}
 function deleteUserConfirm(username,btn){
   if(btn.dataset.confirm!=='1'){
@@ -17743,15 +17760,19 @@ function deleteUserConfirm(username,btn){
     return}
   actuallyDeleteUser(username)}
 async function actuallyDeleteUser(username){
-  const r=await fetch('/api/accounts-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})}).then(r=>r.json());
-  if(!r.ok){toast(r.error||'Could not delete user');return}
-  toast('Removed '+username+' — remember to Publish');loadUsersAdmin()}
+  const r=await fetch('/api/accounts-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  const note=$('users-publish-note');
+  if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not delete user';toast('Could not remove '+username+' — see the note below');return}
+  note.style.color='var(--success)';note.textContent='Removed '+username+' from the cloud.';
+  toast('Removed '+username);loadUsersAdmin()}
 async function publishAccounts(btn){
   const restore=startBtnLoading(btn,'Publishing…');
-  const r=await fetch('/api/accounts-publish',{method:'POST'}).then(r=>r.json());
+  const r=await fetch('/api/accounts-publish',{method:'POST'}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
   restore();
-  $('users-publish-note').textContent=r.ok?'Published — other installs pick this up automatically the next time anyone logs in.':('Could not publish: '+(r.error||'unknown error'));
-  toast(r.ok?'Published to GitHub':'Publish failed — see note below the button')}
+  const note=$('users-publish-note');note.style.color=r.ok?'var(--success)':'var(--danger)';
+  note.textContent=r.ok?'Published — every PC can use these changes now.':('Could not publish: '+(r.error||'unknown error'));
+  toast(r.ok?'Published to the cloud':'Publish failed — see the note below');
+  if(r.ok)loadUsersAdmin()}
 
 // Draggable left/right divider — shared by every .wrap/.fcwrap screen in
 // the app (Document Builder's #resizer, Full Catalog Builder's own
