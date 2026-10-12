@@ -1926,3 +1926,28 @@ PC also stopped pulling account changes made elsewhere.
 - Login: if this PC's last R2 refresh failed (`LAST_REFRESH_ERROR`), the
   "wrong username or password" message also says it couldn't reach the
   cloud to check for new accounts.
+
+## User Activity (Admin Tools): logins, logouts, who's active now
+
+Admin Tools has a **User Activity** card under Users & Access: a live
+"N active now" count with each active user and PC, and a 14-day
+login/logout history filterable by user. Data comes from `activity.py`.
+
+- One R2 object per app session: `system/activity/<UTC start day>/<id>.json`
+  (`username`, `pc` = `COMPUTERNAME`, `windows_user`, `app_version`, `how` =
+  password / google / resumed, `started_at`, `last_seen`, `ended_at`,
+  `end_reason`). Each PC writes only its own objects, so there's no
+  cross-PC write conflict like a shared log file would have.
+- `_establish_session()` starts a session (ending any previous one as
+  "switched account"); `/api/logout` ends it. A remembered login after an
+  app restart has no live record in the new process, so
+  `activity.ensure(session)` (in `_require_login()` and `/api/current-user`)
+  starts a "resumed" one.
+- A background loop rewrites every live session's object every 60s.
+  "Active" = the object's R2 `LastModified` is under 180s old (R2's clock,
+  not the PC's). A crash, power cut or lost connection shows up as
+  "App closed or PC went offline" at the last heartbeat. Tray Exit/Restart
+  and the in-app update call `activity.end_all()` so those end cleanly.
+  Closing the window only hides it to the tray, so the user stays active.
+- `/api/accounts-activity` is admin-only through the `/api/accounts` prefix
+  gate. Opening the view deletes session objects older than 90 days.

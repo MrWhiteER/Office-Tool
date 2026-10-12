@@ -14,6 +14,7 @@ import catalog_builder
 import update_checker
 import runtime_manager
 import accounts
+import activity
 import photo_store
 import google_oauth
 import scanner
@@ -95,6 +96,10 @@ def _require_login():
     user = session.get("user")
     if not user:
         return jsonify({"error": "Not logged in."}), 401
+    # Admin Tools > User Activity: a remembered login that survived an app
+    # restart counts as a new session on this PC (see activity.py).
+    if path != "/api/logout":
+        activity.ensure(session)
     if path.startswith("/api/accounts") and session.get("role") != "admin":
         return jsonify({"error": "Admin access required."}), 403
     # Cloudflare/R2 settings are admin-only to even SEE, not just change
@@ -124,12 +129,16 @@ def _require_login():
         if tool in (session.get("blocked_tools") or []) and any(path.startswith(p) for p in prefixes):
             return jsonify({"error": "You don't have access to this."}), 403
 
-def _establish_session(u, remember=True):
+def _establish_session(u, remember=True, how="password"):
     """Shared by /api/login and the Google Sign-In finish step
     (api_oauth_google_finish()) — same session fields, same brand-lock
     pin, same "remember me" cookie-lifetime choice either way."""
+    previous = session.get("activity_id")
+    if previous:
+        activity.end(previous, "switched account")
     session.clear()
     session["user"] = u["username"]
+    session["activity_id"] = activity.start(u["username"], how)
     session["role"] = u["role"]
     session["brand_lock"] = u["brand_lock"]
     session["blocked_tools"] = u["blocked_tools"]
@@ -167,6 +176,8 @@ def api_login():
 
 @app.post("/api/logout")
 def api_logout():
+    if session.get("activity_id"):
+        activity.end(session["activity_id"], "logout")
     session.clear()
     return jsonify({"ok": True})
 
@@ -242,7 +253,7 @@ def api_oauth_google_finish():
         u = accounts.find_user_by_google_email(email)
         if not u:
             return jsonify({"ok": False, "error": "No Office Tool account is linked to " + email + " yet. Sign in with your username and password, then connect Google from your account (the avatar icon)."}), 404
-        _establish_session(u, remember=True)
+        _establish_session(u, remember=True, how="google")
         return jsonify({"ok": True, **u})
     else:  # intent == "link" — username was pinned at start_flow() time, not re-derived here
         result = accounts.link_google_account(entry["username"], email)
@@ -275,6 +286,7 @@ def api_current_user():
     # accounts.find_user() reads the local accounts cache, which the
     # background sync loop (see bottom of this file) already refreshes
     # every 8 seconds on its own, so this just rides that for free.
+    activity.ensure(session)  # public path, so _require_login() didn't run it
     u = accounts.find_user(session["user"])
     return jsonify({"logged_in": True, "username": session["user"], "role": session["role"],
                      "brand_lock": session.get("brand_lock"), "blocked_tools": session.get("blocked_tools") or [],
@@ -417,6 +429,21 @@ def api_accounts_delete():
 @app.post("/api/accounts-publish")
 def api_accounts_publish():
     return jsonify(accounts.publish_to_cloud())
+
+# Admin Tools > User Activity (admin-only via the /api/accounts prefix gate).
+@app.get("/api/accounts-activity")
+def api_accounts_activity():
+    try:
+        days = max(1, min(int(request.args.get("days", 14)), activity.KEEP_DAYS))
+    except ValueError:
+        days = 14
+    try:
+        sessions = activity.list_sessions(days)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "sessions": sessions, "this_pc": activity.pc_name(),
+                     "this_session": session.get("activity_id"),
+                     "active_window_seconds": activity.ACTIVE_WINDOW_SECONDS})
 
 SETTINGS_FIELDS = ("product_photos_folder", "datasheets_folder", "templates_folder",
                     "full_catalog_folder")
@@ -6547,6 +6574,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .usercard b{font-size:13px;flex:1}
 .userbadge{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--tint);color:var(--muted)}
 .userbadge.admin{background:var(--brand-dark);color:#fff}
+.actsummary{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.actcount{font-size:26px;font-weight:800;line-height:1}
+.actdot{width:8px;height:8px;border-radius:50%;background:var(--success);flex:none}
+.actrow{display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--line);font-size:12px}
+.actrow .acttime{width:136px;flex:none;white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums}
+.actrow .actuser{font-weight:700;min-width:70px}
+.actrow .actpc{color:var(--muted);margin-left:auto;text-align:right}
+.actev{font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:6px;background:var(--tint);color:var(--muted);white-space:nowrap}
+.actev.in{color:var(--success)}
+.actev.out{color:var(--danger)}
+.acthistory{max-height:320px;overflow:auto}
 .cloudphototile{position:relative;cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:6px;text-align:center;transition:border-color .15s,transform .15s;background:var(--card-bg)}
 .cloudphototile:hover{border-color:var(--brand-dark);transform:translateY(-2px)}
 .cloudphototile img{width:100%;aspect-ratio:1;object-fit:contain;background:#fff;border-radius:6px;display:block;margin-bottom:5px}
@@ -7779,6 +7817,18 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
       <!-- Only shown when this PC still holds user edits an older version
            left unpublished (accounts.has_pending_changes()). -->
       <button class="btn hide" id=users-publish-btn style="width:100%;margin-top:8px" onclick="publishAccounts(this)">Publish Older Unsaved Changes to Cloud</button>
+    </div></div>
+    <!-- Login/logout history + who's using the app right now, across every
+         PC on this cloud connection — see activity.py. -->
+    <div class=card id=act-card><div class=ch>User Activity</div><div class=cb>
+      <p class=muted style="font-size:11.5px;margin:0 0 8px">Who logged in or out, when, and on which PC. "Active now" means the app is open and logged in on that PC right now.</p>
+      <div class=actsummary><span class=actcount id=act-count>–</span><span class=muted>active now</span>
+        <button type=button class=btn style="margin-left:auto;padding:4px 10px;font-size:11px" onclick="loadUserActivity(this)">Refresh</button></div>
+      <div id=act-active></div>
+      <div class=f style="margin-top:10px"><label>History (last 14 days)</label>
+        <select id=act-user onchange="renderUserActivity()"><option value="">All users</option></select></div>
+      <div id=act-history class=acthistory></div>
+      <p class=muted id=act-note style="font-size:11px;margin:6px 0 0"></p>
     </div></div>
     <div class=card><div class=ch>Manage Cloud Photo Library</div><div class=cb>
       <p class=muted style="font-size:11.5px;margin:0 0 8px">Add to or remove from the shared photo library everyone syncs from (any logged-in user can add photos too now — see Settings > Shared Product Photos for the everyday upload control; this is the admin view, and the only place photos can be removed).</p>
@@ -9015,7 +9065,7 @@ function openAdminTools(){view('settings');showSettingsAdminPanel()}
 function showSettingsAdminPanel(){
   $('settings-main-panel').classList.add('hide');
   $('settings-admin-panel').classList.remove('hide');
-  loadUsersAdmin();loadPhotoStoreList();loadPhotoStoreAdminSettings();loadGoogleOAuthAdminSettings()}
+  loadUsersAdmin();loadUserActivity();loadPhotoStoreList();loadPhotoStoreAdminSettings();loadGoogleOAuthAdminSettings()}
 function showSettingsMainPanel(){
   $('settings-admin-panel').classList.add('hide');
   $('settings-main-panel').classList.remove('hide')}
@@ -17765,6 +17815,57 @@ async function actuallyDeleteUser(username){
   if(!r.ok){note.style.color='var(--danger)';note.textContent=r.error||'Could not delete user';toast('Could not remove '+username+' — see the note below');return}
   note.style.color='var(--success)';note.textContent='Removed '+username+' from the cloud.';
   toast('Removed '+username);loadUsersAdmin()}
+// ---- Admin Tools > User Activity (activity.py / /api/accounts-activity) ----
+let ACT_DATA=null,ACT_TIMER=null;
+const ACT_START={password:'Logged in',google:'Logged in with Google',resumed:'Opened the app (still logged in)'};
+const ACT_END={'logout':'Logged out','switched account':'Logged out (switched account)','app exit':'Exited the app',
+  'app restart':'Restarted the app','app update':'App closed to update'};
+function actFmt(iso){
+  if(!iso)return '';const d=new Date(iso);if(isNaN(d))return iso;
+  const t=d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const today=new Date();const y=new Date(today);y.setDate(today.getDate()-1);
+  if(d.toDateString()===today.toDateString())return 'Today '+t;
+  if(d.toDateString()===y.toDateString())return 'Yesterday '+t;
+  return d.toLocaleDateString([],{day:'2-digit',month:'short'})+' '+t}
+function actDuration(fromIso){
+  const m=Math.max(0,Math.round((Date.now()-new Date(fromIso))/60000));
+  return m<60?m+'m':Math.floor(m/60)+'h '+(m%60)+'m'}
+async function loadUserActivity(btn){
+  const restore=btn?startBtnLoading(btn,'Refreshing…'):null;
+  const r=await fetch('/api/accounts-activity').then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  if(restore)restore();
+  const note=$('act-note');
+  if(!r.ok){note.style.color='var(--danger)';note.textContent='Could not load activity: '+(r.error||'unknown error');return}
+  ACT_DATA=r;note.style.color='';note.textContent='Updated '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})+'. Refreshes every 30 seconds while this screen is open.';
+  const sel=$('act-user'),cur=sel.value;
+  const names=[...new Set(r.sessions.map(s=>s.username))].sort((a,b)=>a.localeCompare(b));
+  sel.innerHTML='<option value="">All users</option>'+names.map(n=>'<option value="'+escHtml(n)+'">'+escHtml(n)+'</option>').join('');
+  if(names.includes(cur))sel.value=cur;
+  renderUserActivity();
+  clearTimeout(ACT_TIMER);
+  ACT_TIMER=setTimeout(()=>{if($('act-card').offsetParent)loadUserActivity()},30000)}
+function renderUserActivity(){
+  if(!ACT_DATA)return;
+  const ss=ACT_DATA.sessions,thisPc=ACT_DATA.this_pc;
+  const active=ss.filter(s=>s.status==='active');
+  $('act-count').textContent=active.length;
+  $('act-active').innerHTML=active.map(s=>
+    '<div class=usercard><span class=actdot></span><b>'+escHtml(s.username)+'</b>'+
+      '<span class=muted style="font-size:11.5px">on '+escHtml(s.pc)+(s.pc===thisPc?' (this PC)':'')+'</span>'+
+      '<span class=userbadge title="'+escHtml(actFmt(s.started_at))+'">'+escHtml(actDuration(s.started_at))+'</span></div>').join('')
+    || '<p class=muted style="font-size:12px;margin:0 0 4px">Nobody is using the app right now.</p>';
+  const who=$('act-user').value;
+  const ev=[];
+  ss.filter(s=>!who||s.username===who).forEach(s=>{
+    ev.push({t:s.started_at,u:s.username,pc:s.pc,cls:'in',label:ACT_START[s.how]||'Logged in'});
+    if(s.status==='logged_out')ev.push({t:s.ended_at,u:s.username,pc:s.pc,cls:'out',label:ACT_END[s.end_reason]||'Logged out'});
+    else if(s.status==='closed')ev.push({t:s.last_seen,u:s.username,pc:s.pc,cls:'out',label:'App closed or PC went offline',approx:true})});
+  ev.sort((a,b)=>(b.t||'').localeCompare(a.t||''));
+  $('act-history').innerHTML=ev.slice(0,300).map(e=>
+    '<div class=actrow><span class=acttime>'+(e.approx?'≈ ':'')+escHtml(actFmt(e.t))+'</span>'+
+      '<span class=actuser>'+escHtml(e.u)+'</span><span class="actev '+e.cls+'">'+escHtml(e.label)+'</span>'+
+      '<span class=actpc>'+escHtml(e.pc||'')+'</span></div>').join('')
+    || '<p class=muted style="font-size:12px">No logins recorded yet.</p>'}
 async function publishAccounts(btn){
   const restore=startBtnLoading(btn,'Publishing…');
   const r=await fetch('/api/accounts-publish',{method:'POST'}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
@@ -18031,6 +18132,7 @@ def _stop_tray_icon():
     orphaned icon per update, exactly matching "sometimes even more."
     Best-effort: never let a teardown failure block the actual exit.
     """
+    activity.end_all("app update")
     if _TRAY_ICON is not None:
         try:
             _TRAY_ICON.stop()
@@ -18447,6 +18549,7 @@ if __name__ == "__main__":
                     pass
 
             def _restart(icon=None, item=None):
+                activity.end_all("app restart")
                 icon.stop()
                 try:
                     window.destroy()
@@ -18463,6 +18566,7 @@ if __name__ == "__main__":
                 os._exit(0)
 
             def _exit_app(icon=None, item=None):
+                activity.end_all("app exit")
                 icon.stop()
                 try:
                     window.destroy()
