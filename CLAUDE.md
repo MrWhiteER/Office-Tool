@@ -1960,18 +1960,27 @@ login/logout history filterable by user. Data comes from `activity.py`.
 - `/api/accounts-activity` is admin-only through the `/api/accounts` prefix
   gate. Opening the view deletes session objects older than 90 days.
 
-## Expense Report: mark a file as paid (and who it was paid to)
+## Expense Report: payment status per file (Paid, Rejected, ...)
 
-- Every EXP row in All Docs has a **Mark Paid** button. It opens a small
-  popover (`#paidmenu`, `openPaidMenu`) with a "Paid to" field, prefilled
-  with the report's employee and suggesting known employees / previous
-  payees. Once paid the button reads "✓ Paid" and the popover also offers
-  **Mark as Unpaid**.
-- `POST /api/doc-paid {rel, paid, paid_to}` (EXP only) stores
-  `paid: {paid_to, by, at}` in the document's `.meta.json` and re-uploads
-  that meta to R2, the same way `/api/doc-download` does, so every PC sees it.
-  `/api/index` returns it as `r.paid`.
-- A paid row shows a green **PAID** pill in place of EXP, "Paid to X"
-  beside the label, and a green corner box on its top-left (`.row.paid`).
+- Every EXP row in All Docs has a **Set Status ▾** button. It opens a
+  popover (`#paidmenu`, `openPaidMenu`/`saveExpStatus`) with the standard
+  expense-report statuses, in workflow order: **Pending Approval**,
+  **Approved** (approved, not paid yet), **Partially Paid**, **Paid**,
+  **On Hold**, **Rejected**. "Unpaid" is not its own status:
+  **Clear Status (Unpaid)** removes the status and the row goes back to
+  the plain EXP pill.
+- Paid / Partially Paid require "Paid to" (prefilled with the report's
+  employee, suggests employees and previous payees). Every status takes an
+  optional note (e.g. a partial amount or a rejection reason).
+- `POST /api/doc-exp-status {rel, status, paid_to, note}` (EXP only; keys in
+  `EXP_STATUSES`, mirrored by the JS `EXP_STATUSES`) stores
+  `exp_status: {status, label, paid_to?, note?, by, at}` in the document's
+  `.meta.json` and re-uploads that meta to R2, the same way
+  `/api/doc-download` does, so every PC sees it. `/api/index` returns it as
+  `r.exp_status`.
+- A row with a status shows the status name in place of the EXP pill, a
+  corner box + left edge in that status's color (`.row.expst.xs-<key>`,
+  colors via `--xs`/`--xs-bg`/`--xs-line`), and "Paid to X" or the note
+  beside the label.
 - Note: editing an EXP into a different filename drops the old
-  `.meta.json`, so the paid mark (like `generated_by`) does not follow a rename.
+  `.meta.json`, so the status (like `generated_by`) does not follow a rename.

@@ -3951,9 +3951,9 @@ def api_index():
                 r["generated_at"] = meta.get("generated_at")
             if meta.get("downloads"):
                 r["downloads"] = meta["downloads"]
-            # Expense Report "paid" mark (see /api/doc-paid).
-            if meta.get("paid"):
-                r["paid"] = meta["paid"]
+            # Expense Report status (see /api/doc-exp-status).
+            if meta.get("exp_status"):
+                r["exp_status"] = meta["exp_status"]
             r.pop("path", None)
             recs.append(r)
     # A DO/INV counts as "in progress" (highlighted red in All Docs) for as
@@ -5040,12 +5040,25 @@ def api_doc_download():
         _upload_doc_meta(path, f"{brand_part}/{dtype_part}/{os.path.basename(path)}")
     return jsonify({"ok": True, "downloads": downloads})
 
-@app.post("/api/doc-paid")
-def api_doc_paid():
-    """Mark an Expense Report as paid (and who it was paid to), or clear
-    that mark. Stored in the document's .meta.json next to generated_by and
-    the download history, and re-uploaded to R2 the same way
-    /api/doc-download does, so every PC sees the Paid badge in All Docs."""
+# Expense Report payment statuses, in workflow order. "Unpaid" is not a
+# status of its own: clearing the status puts the report back to plain EXP.
+# Paid / Partially Paid also record who the money went to.
+EXP_STATUSES = {
+    "pending": "Pending Approval",
+    "approved": "Approved",
+    "partial": "Partially Paid",
+    "paid": "Paid",
+    "onhold": "On Hold",
+    "rejected": "Rejected",
+}
+EXP_STATUSES_NEED_PAYEE = ("partial", "paid")
+
+@app.post("/api/doc-exp-status")
+def api_doc_exp_status():
+    """Set (or clear) an Expense Report's payment status. Stored in the
+    document's .meta.json next to generated_by and the download history,
+    and re-uploaded to R2 the same way /api/doc-download does, so every PC
+    sees the status badge in All Docs."""
     data = request.json or {}
     rel = data.get("rel", "")
     folder, path = resolve_rel(rel)
@@ -5053,23 +5066,33 @@ def api_doc_paid():
         return jsonify({"ok": False, "error": "File not found."}), 404
     rec = engine.parse_filename(os.path.basename(path)) or {}
     if (rec.get("type") or "").upper() != "EXP":
-        return jsonify({"ok": False, "error": "Only Expense Reports can be marked as paid."}), 400
+        return jsonify({"ok": False, "error": "Only Expense Reports have a payment status."}), 400
+    status = (data.get("status") or "").strip().lower()
     meta = _read_doc_meta(path)
-    if data.get("paid"):
+    meta.pop("paid", None)  # short-lived first version's key
+    if status:
+        if status not in EXP_STATUSES:
+            return jsonify({"ok": False, "error": "Unknown status."}), 400
         paid_to = (data.get("paid_to") or "").strip()
-        if not paid_to:
+        if status in EXP_STATUSES_NEED_PAYEE and not paid_to:
             return jsonify({"ok": False, "error": "Enter who it was paid to."}), 400
-        meta["paid"] = {"paid_to": paid_to, "by": session.get("user", ""),
-                        "at": datetime.datetime.now().isoformat()}
+        entry = {"status": status, "label": EXP_STATUSES[status],
+                 "by": session.get("user", ""), "at": datetime.datetime.now().isoformat()}
+        if status in EXP_STATUSES_NEED_PAYEE:
+            entry["paid_to"] = paid_to
+        note = (data.get("note") or "").strip()
+        if note:
+            entry["note"] = note
+        meta["exp_status"] = entry
     else:
-        meta.pop("paid", None)
+        meta.pop("exp_status", None)
     _write_doc_meta(path, meta)
     _folder_parts = os.path.normpath(folder).split(os.sep)
     brand_part, dtype_part = (_folder_parts[-2], _folder_parts[-1]) if len(_folder_parts) >= 2 else ("", "")
     uploaded = True
     if brand_part and dtype_part:
         uploaded = _upload_doc_meta(path, f"{brand_part}/{dtype_part}/{os.path.basename(path)}")
-    return jsonify({"ok": True, "paid": meta.get("paid"), "uploaded": bool(uploaded)})
+    return jsonify({"ok": True, "exp_status": meta.get("exp_status"), "uploaded": bool(uploaded)})
 
 # ---------------------------------------------------------------- Printing
 # Per explicit request: a Print button on every All Docs row (every
@@ -6315,14 +6338,27 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .adsel{width:16px;height:16px;flex-shrink:0;cursor:pointer;accent-color:var(--amber)}
 .list:not(.selectmode) .adsel{display:none}
 .inprogresspill{background:var(--danger-bg);color:var(--danger)}
-/* Expense Report marked paid (see /api/doc-paid): green PAID pill in place
-   of EXP, plus a green corner box on the row's top-left. */
-.list .row.paid{position:relative}
-.list .row.paid::before{content:"";position:absolute;top:0;left:0;width:0;height:0;border-top:22px solid var(--success);border-right:22px solid transparent;pointer-events:none}
-.list .row.paid:not(.selected){box-shadow:inset 3px 0 0 var(--success)}
-.pill.paidpill{background:var(--success-bg);color:var(--success);box-shadow:0 0 0 1px var(--success-line)}
-.paidto{font-size:10.5px;font-weight:600;color:var(--success);white-space:nowrap}
-.rbtn.paidbtn.on{background:var(--success-bg);color:var(--success);border-color:var(--success-line)}
+/* Expense Report status (see /api/doc-exp-status): the EXP pill turns
+   into the status name, and the row gets a corner box + left edge in that
+   status's color. --xs / --xs-bg / --xs-line are set per status below. */
+.xs-pending{--xs:var(--warning);--xs-bg:var(--warning-bg);--xs-line:var(--warning-line)}
+.xs-approved{--xs:var(--info);--xs-bg:var(--info-bg);--xs-line:var(--info)}
+.xs-partial{--xs:var(--success);--xs-bg:transparent;--xs-line:var(--success)}
+.xs-paid{--xs:var(--success);--xs-bg:var(--success-bg);--xs-line:var(--success-line)}
+.xs-onhold{--xs:var(--muted);--xs-bg:var(--seg-bg);--xs-line:var(--line)}
+.xs-rejected{--xs:var(--danger);--xs-bg:var(--danger-bg);--xs-line:var(--danger-line)}
+.list .row.expst{position:relative}
+.list .row.expst::before{content:"";position:absolute;top:0;left:0;width:0;height:0;border-top:22px solid var(--xs);border-right:22px solid transparent;pointer-events:none}
+.list .row.expst:not(.selected){box-shadow:inset 3px 0 0 var(--xs)}
+.pill.xspill{background:var(--xs-bg);color:var(--xs);box-shadow:0 0 0 1px var(--xs-line);white-space:nowrap}
+.xsnote{font-size:10.5px;font-weight:600;color:var(--xs);white-space:nowrap}
+.rbtn.xsbtn.on{background:var(--xs-bg);color:var(--xs);border-color:var(--xs-line)}
+.xsopts{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.xsopt{display:flex;align-items:center;gap:8px;text-align:left;border:1px solid var(--line);background:transparent;border-radius:8px;padding:6px 8px;cursor:pointer;color:var(--ink);font:inherit;font-size:12px}
+.xsopt:hover{background:var(--tint)}
+.xsopt .xsdot{width:10px;height:10px;border-radius:3px;background:var(--xs);flex-shrink:0}
+.xsopt small{color:var(--muted);font-size:10.5px;margin-left:auto}
+.xsopt.on{border-color:var(--xs);background:var(--xs-bg);font-weight:700}
 .searchwrap{position:relative;display:flex;align-items:center}
 .searchwrap .searchicon{position:absolute;left:12px;width:16px;height:16px;color:var(--muted);pointer-events:none}
 .filterbar .searchwrap input{padding-left:34px;border-radius:var(--r-xl);background:var(--surface-2)}
@@ -8155,14 +8191,20 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
   <div class=cplist id=pf-list></div>
 </div>
 <div class=clientpicker id=impnewfieldpopover style="width:240px"></div>
-<div class=clientpicker id=paidmenu style="width:260px">
-  <div style="padding:4px 2px">
-    <label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:6px">Paid to</label>
-    <input id=paid-to type=text list=paid-to-list style="width:100%;box-sizing:border-box;margin-bottom:8px" placeholder="Who was it paid to?" onkeydown="if(event.key==='Enter'){event.preventDefault();saveExpPaid(true)}else if(event.key==='Escape')closePaidMenu()">
-    <datalist id=paid-to-list></datalist>
+<div class=clientpicker id=paidmenu style="width:280px">
+  <div style="padding:2px">
+    <label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:6px">Payment status</label>
+    <div class=xsopts id=xs-opts></div>
+    <div id=xs-payee-wrap>
+      <label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:6px">Paid to</label>
+      <input id=paid-to type=text list=paid-to-list style="width:100%;box-sizing:border-box;margin-bottom:8px" placeholder="Who was it paid to?" onkeydown="if(event.key==='Enter'){event.preventDefault();saveExpStatus()}else if(event.key==='Escape')closePaidMenu()">
+      <datalist id=paid-to-list></datalist>
+    </div>
+    <label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:6px">Note (optional)</label>
+    <input id=xs-note type=text style="width:100%;box-sizing:border-box;margin-bottom:8px" placeholder="e.g. 500 AED paid, rest next week" onkeydown="if(event.key==='Enter'){event.preventDefault();saveExpStatus()}else if(event.key==='Escape')closePaidMenu()">
     <div id=paid-info class=muted style="font-size:11px;margin-bottom:8px"></div>
-    <button class="btn dark" style="width:100%" onclick="saveExpPaid(true)">Mark as Paid</button>
-    <button id=paid-clear class=btn style="width:100%;margin-top:6px" onclick="saveExpPaid(false)">Mark as Unpaid</button>
+    <button class="btn dark" style="width:100%" onclick="saveExpStatus()">Save Status</button>
+    <button id=paid-clear class=btn style="width:100%;margin-top:6px" onclick="saveExpStatus('')">Clear Status (Unpaid)</button>
   </div>
 </div>
 <div class=clientpicker id=qtngenmenu style="width:250px">
@@ -16889,39 +16931,54 @@ function openRowGenMenu(rel,docType,ev){
   $('qtngen-list').innerHTML=(ROW_GEN_OPTIONS[docType]||[]).map(([kind,label])=>
     '<div class=cpitem style="cursor:pointer" onclick="selectRowGenKind(\''+kind+'\')"><span class=cpname>'+label+'</span></div>').join('')}
 function closeQtnGenMenu(){$('qtngenmenu').style.display='none'}
-// ---------------------------------------------------------------- Expense Report paid mark
-let PAID_REL='';
+// ---------------------------------------------------------------- Expense Report payment status
+// Mirrors EXP_STATUSES in Python (same keys, same order).
+const EXP_STATUSES=[['pending','Pending Approval','waiting for approval'],['approved','Approved','approved, not paid yet'],
+  ['partial','Partially Paid','part of it paid'],['paid','Paid','fully paid'],['onhold','On Hold','paused'],['rejected','Rejected','will not be paid']];
+const EXP_STATUS_LABEL=Object.fromEntries(EXP_STATUSES.map(([k,l])=>[k,l]));
+const EXP_STATUS_NEEDS_PAYEE=['partial','paid'];
+let PAID_REL='',XS_PICK='';
+function renderXsOpts(){
+  $('xs-opts').innerHTML=EXP_STATUSES.map(([k,l,d])=>'<button type=button class="xsopt xs-'+k+(XS_PICK===k?' on':'')+'" onclick="pickXs(\''+k+'\')"><span class=xsdot></span>'+l+'<small>'+d+'</small></button>').join('');
+  $('xs-payee-wrap').classList.toggle('hide',!EXP_STATUS_NEEDS_PAYEE.includes(XS_PICK))}
+function pickXs(k){XS_PICK=k;renderXsOpts();if(EXP_STATUS_NEEDS_PAYEE.includes(k)){$('paid-to').focus();$('paid-to').select()}}
 function openPaidMenu(rel,ev){
   ev.stopPropagation();
   PAID_REL=rel;
-  const rec=INDEX.find(x=>x.rel===rel)||{},paid=rec.paid;
+  const rec=INDEX.find(x=>x.rel===rel)||{},cur=rec.exp_status;
   const box=$('paidmenu');
   const r=ev.currentTarget.getBoundingClientRect();
-  box.style.left=Math.max(8,Math.min(Math.round(r.left),window.innerWidth-276))+'px';
-  box.style.top=Math.min(Math.round(r.bottom)+6,window.innerHeight-200)+'px';
+  box.style.left=Math.max(8,Math.min(Math.round(r.left),window.innerWidth-296))+'px';
+  box.style.top=Math.max(8,Math.min(Math.round(r.bottom)+6,window.innerHeight-470))+'px';
   box.style.display='block';
   const names=[...new Set([...(typeof EXP_EMPLOYEES!=='undefined'?EXP_EMPLOYEES:[]),
-    ...INDEX.filter(x=>x.paid&&x.paid.paid_to).map(x=>x.paid.paid_to)])];
+    ...INDEX.filter(x=>x.exp_status&&x.exp_status.paid_to).map(x=>x.exp_status.paid_to)])];
   $('paid-to-list').innerHTML=names.map(n=>'<option value="'+escHtml(n)+'">').join('');
-  // Default to the report's own employee (an EXP's "company" is the employee name).
-  $('paid-to').value=paid?(paid.paid_to||''):(rec.company_label||'');
-  $('paid-info').textContent=paid?('Marked paid by '+(paid.by||'?')+' on '+(paid.at||'').slice(0,10)):'';
-  $('paid-clear').classList.toggle('hide',!paid);
-  setTimeout(()=>{$('paid-to').focus();$('paid-to').select()},0)}
+  // Default payee is the report's own employee (an EXP's "company" is the employee name).
+  $('paid-to').value=(cur&&cur.paid_to)||rec.company_label||'';
+  $('xs-note').value=(cur&&cur.note)||'';
+  $('paid-info').textContent=cur?('Set to '+cur.label+' by '+(cur.by||'?')+' on '+(cur.at||'').slice(0,10)):'';
+  $('paid-clear').classList.toggle('hide',!cur);
+  XS_PICK=cur?cur.status:'';
+  renderXsOpts()}
 function closePaidMenu(){$('paidmenu').style.display='none'}
 document.addEventListener('click',e=>{
-  if($('paidmenu').style.display==='block'&&!e.target.closest('#paidmenu')&&!e.target.closest('.paidbtn'))closePaidMenu()});
-async function saveExpPaid(paid){
-  const paid_to=$('paid-to').value.trim();
-  if(paid&&!paid_to){toast('Enter who it was paid to.');$('paid-to').focus();return}
-  const r=await fetch('/api/doc-paid',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({rel:PAID_REL,paid,paid_to})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  // isConnected: picking a status re-renders the option list, so the
+  // clicked button is already detached by the time this runs.
+  if($('paidmenu').style.display==='block'&&e.target.isConnected&&!e.target.closest('#paidmenu')&&!e.target.closest('.xsbtn'))closePaidMenu()});
+async function saveExpStatus(status){
+  if(status===undefined)status=XS_PICK;
+  if(status===''&&arguments.length===0){toast('Pick a status first.');return}
+  const paid_to=$('paid-to').value.trim(),note=$('xs-note').value.trim();
+  if(EXP_STATUS_NEEDS_PAYEE.includes(status)&&!paid_to){toast('Enter who it was paid to.');$('paid-to').focus();return}
+  const r=await fetch('/api/doc-exp-status',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rel:PAID_REL,status,paid_to,note})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
   if(!r.ok){toast(r.error||'Could not save.');return}
   closePaidMenu();
   const rec=INDEX.find(x=>x.rel===PAID_REL);
-  if(rec){if(r.paid)rec.paid=r.paid;else delete rec.paid}
+  if(rec){if(r.exp_status)rec.exp_status=r.exp_status;else delete rec.exp_status}
   renderList();
-  toast(paid?('Marked paid to '+paid_to):'Marked as unpaid')}
+  toast(status?('Status set to '+EXP_STATUS_LABEL[status]+(EXP_STATUS_NEEDS_PAYEE.includes(status)?' ('+paid_to+')':'')):'Status cleared (Unpaid)')}
 document.addEventListener('click',e=>{
   if($('qtngenmenu').style.display==='block'&&!e.target.closest('#qtngenmenu')&&!e.target.closest('.qtngenbtn'))closeQtnGenMenu()});
 function selectRowGenKind(kind){
@@ -17475,9 +17532,10 @@ function renderList(){
     // is part of this sales-document chain, so they have no entry in
     // ROW_GEN_OPTIONS and this stays empty/hidden for them.
     const rowGenType=(r.type||'').toUpperCase();
-    // Expense Report: mark paid / who it was paid to (see openPaidMenu).
+    // Expense Report: payment status / who it was paid to (see openPaidMenu).
+    const xs=(r.type==='EXP'&&r.exp_status&&EXP_STATUS_LABEL[r.exp_status.status])?r.exp_status:null;
     if(rowGenType==='EXP')
-      actions+='<button class="rbtn paidbtn'+(r.paid?' on':'')+'" onclick="openPaidMenu(\''+rel+'\',event)" title="'+(r.paid?'Paid to '+escHtml(r.paid.paid_to||''):'Mark this expense report as paid')+'">'+(r.paid?'✓ Paid':'Mark Paid')+'</button>';
+      actions+='<button class="rbtn xsbtn'+(xs?' on xs-'+xs.status:'')+'" onclick="openPaidMenu(\''+rel+'\',event)" title="Set the payment status">'+(xs?escHtml(xs.label)+' ▾':'Set Status ▾')+'</button>';
     if(ROW_GEN_OPTIONS[rowGenType])
       actions+='<button class="rbtn qtngenbtn" onclick="openRowGenMenu(\''+rel+'\',\''+rowGenType+'\',event)" title="Generate the next document in this chain">Generate ▾</button>';
     // Download — per explicit request: cloud is the default home for
@@ -17489,8 +17547,7 @@ function renderList(){
     // QTN2 shows the same short "QTN" badge as legacy QTN — they're one
     // merged "Quotation" filter now, so the badge shouldn't visibly split
     // back into two different-looking codes within it.
-    const isPaid=r.type==='EXP'&&!!r.paid;
-    const pillText=isPaid?'PAID':(r.type==='QTN2'?'QTN':(r.type||'DOC'));
+    const pillText=xs?EXP_STATUS_LABEL[xs.status].toUpperCase():(r.type==='QTN2'?'QTN':(r.type||'DOC'));
     // "Generated by X" / download history — per explicit request: "it
     // will be mentioned that its created or imported or generated by
     // which user" and "if the files was downloaded that will show...
@@ -17507,11 +17564,11 @@ function renderList(){
       attrib='<span class=muted style="font-size:10.5px;white-space:nowrap" title="Generated by '+escHtml(r.generated_by)+(dlTitle?' — '+escHtml(dlTitle):'')+'">by '+escHtml(r.generated_by)+
         (downloads.length?' · ⬇'+downloads.length:'')+'</span>';
     }
-    html+='<div class="row'+(r.in_progress?' inprogress':'')+(isPaid?' paid':'')+(ALLDOCS_SELECTED.has(rel)?' selected':'')+'" data-rel="'+rel+'" data-type="'+(r.type||'')+'" oncontextmenu="openAllDocsCtxMenu(\''+rel+'\',\''+folderCompany+'\',\''+label+'\',event)" onmouseenter="showPrev(event,\''+rel+'\','+canPreview+')" onmousemove=movePrev(event) onmouseleave=hidePrev()>'+
+    html+='<div class="row'+(r.in_progress?' inprogress':'')+(xs?' expst xs-'+xs.status:'')+(ALLDOCS_SELECTED.has(rel)?' selected':'')+'" data-rel="'+rel+'" data-type="'+(r.type||'')+'" oncontextmenu="openAllDocsCtxMenu(\''+rel+'\',\''+folderCompany+'\',\''+label+'\',event)" onmouseenter="showPrev(event,\''+rel+'\','+canPreview+')" onmousemove=movePrev(event) onmouseleave=hidePrev()>'+
       '<input type=checkbox class=adsel onclick="event.stopPropagation()" onchange="toggleAllDocsSelect(\''+rel+'\',this.checked)"'+(ALLDOCS_SELECTED.has(rel)?' checked':'')+'>'+
-      '<span class="pill'+(isPaid?' paidpill':'')+'"'+(isPaid?' title="Expense Report — paid"':'')+'>'+pillText+'</span><span class=mono style=width:70px>'+(r.number||'—')+'</span>'+
+      '<span class="pill'+(xs?' xspill':'')+'"'+(xs?' title="Expense Report — '+escHtml(xs.label)+'"':'')+'>'+pillText+'</span><span class=mono style=width:70px>'+(r.number||'—')+'</span>'+
       '<span style=flex:1>'+allDocsRowLabel(r)+'</span>'+
-      (isPaid?'<span class=paidto title="Marked paid by '+escHtml(r.paid.by||'?')+' on '+escHtml((r.paid.at||'').slice(0,10))+'">Paid to '+escHtml(r.paid.paid_to||'')+'</span>':'')+
+      (xs&&(xs.paid_to||xs.note)?'<span class=xsnote title="'+escHtml(xs.label+' — set by '+(xs.by||'?')+' on '+(xs.at||'').slice(0,10)+(xs.note?' — '+xs.note:''))+'">'+escHtml(xs.paid_to?'Paid to '+xs.paid_to:xs.note)+'</span>':'')+
       (r.status&&r.status!=='None'?'<span class="statuspill '+r.status+'">'+r.status+'</span>':'')+
       (r.in_progress?'<span class="pill inprogresspill">In Progress</span>':'')+
       attrib+
