@@ -3951,6 +3951,9 @@ def api_index():
                 r["generated_at"] = meta.get("generated_at")
             if meta.get("downloads"):
                 r["downloads"] = meta["downloads"]
+            # Expense Report "paid" mark (see /api/doc-paid).
+            if meta.get("paid"):
+                r["paid"] = meta["paid"]
             r.pop("path", None)
             recs.append(r)
     # A DO/INV counts as "in progress" (highlighted red in All Docs) for as
@@ -5036,6 +5039,37 @@ def api_doc_download():
     if brand_part and dtype_part:
         _upload_doc_meta(path, f"{brand_part}/{dtype_part}/{os.path.basename(path)}")
     return jsonify({"ok": True, "downloads": downloads})
+
+@app.post("/api/doc-paid")
+def api_doc_paid():
+    """Mark an Expense Report as paid (and who it was paid to), or clear
+    that mark. Stored in the document's .meta.json next to generated_by and
+    the download history, and re-uploaded to R2 the same way
+    /api/doc-download does, so every PC sees the Paid badge in All Docs."""
+    data = request.json or {}
+    rel = data.get("rel", "")
+    folder, path = resolve_rel(rel)
+    if not path:
+        return jsonify({"ok": False, "error": "File not found."}), 404
+    rec = engine.parse_filename(os.path.basename(path)) or {}
+    if (rec.get("type") or "").upper() != "EXP":
+        return jsonify({"ok": False, "error": "Only Expense Reports can be marked as paid."}), 400
+    meta = _read_doc_meta(path)
+    if data.get("paid"):
+        paid_to = (data.get("paid_to") or "").strip()
+        if not paid_to:
+            return jsonify({"ok": False, "error": "Enter who it was paid to."}), 400
+        meta["paid"] = {"paid_to": paid_to, "by": session.get("user", ""),
+                        "at": datetime.datetime.now().isoformat()}
+    else:
+        meta.pop("paid", None)
+    _write_doc_meta(path, meta)
+    _folder_parts = os.path.normpath(folder).split(os.sep)
+    brand_part, dtype_part = (_folder_parts[-2], _folder_parts[-1]) if len(_folder_parts) >= 2 else ("", "")
+    uploaded = True
+    if brand_part and dtype_part:
+        uploaded = _upload_doc_meta(path, f"{brand_part}/{dtype_part}/{os.path.basename(path)}")
+    return jsonify({"ok": True, "paid": meta.get("paid"), "uploaded": bool(uploaded)})
 
 # ---------------------------------------------------------------- Printing
 # Per explicit request: a Print button on every All Docs row (every
@@ -6281,6 +6315,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .adsel{width:16px;height:16px;flex-shrink:0;cursor:pointer;accent-color:var(--amber)}
 .list:not(.selectmode) .adsel{display:none}
 .inprogresspill{background:var(--danger-bg);color:var(--danger)}
+/* Expense Report marked paid (see /api/doc-paid): green PAID pill in place
+   of EXP, plus a green corner box on the row's top-left. */
+.list .row.paid{position:relative}
+.list .row.paid::before{content:"";position:absolute;top:0;left:0;width:0;height:0;border-top:22px solid var(--success);border-right:22px solid transparent;pointer-events:none}
+.list .row.paid:not(.selected){box-shadow:inset 3px 0 0 var(--success)}
+.pill.paidpill{background:var(--success-bg);color:var(--success);box-shadow:0 0 0 1px var(--success-line)}
+.paidto{font-size:10.5px;font-weight:600;color:var(--success);white-space:nowrap}
+.rbtn.paidbtn.on{background:var(--success-bg);color:var(--success);border-color:var(--success-line)}
 .searchwrap{position:relative;display:flex;align-items:center}
 .searchwrap .searchicon{position:absolute;left:12px;width:16px;height:16px;color:var(--muted);pointer-events:none}
 .filterbar .searchwrap input{padding-left:34px;border-radius:var(--r-xl);background:var(--surface-2)}
@@ -8113,6 +8155,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
   <div class=cplist id=pf-list></div>
 </div>
 <div class=clientpicker id=impnewfieldpopover style="width:240px"></div>
+<div class=clientpicker id=paidmenu style="width:260px">
+  <div style="padding:4px 2px">
+    <label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:6px">Paid to</label>
+    <input id=paid-to type=text list=paid-to-list style="width:100%;box-sizing:border-box;margin-bottom:8px" placeholder="Who was it paid to?" onkeydown="if(event.key==='Enter'){event.preventDefault();saveExpPaid(true)}else if(event.key==='Escape')closePaidMenu()">
+    <datalist id=paid-to-list></datalist>
+    <div id=paid-info class=muted style="font-size:11px;margin-bottom:8px"></div>
+    <button class="btn dark" style="width:100%" onclick="saveExpPaid(true)">Mark as Paid</button>
+    <button id=paid-clear class=btn style="width:100%;margin-top:6px" onclick="saveExpPaid(false)">Mark as Unpaid</button>
+  </div>
+</div>
 <div class=clientpicker id=qtngenmenu style="width:250px">
   <div class=cplist id=qtngen-list></div>
 </div>
@@ -16837,6 +16889,39 @@ function openRowGenMenu(rel,docType,ev){
   $('qtngen-list').innerHTML=(ROW_GEN_OPTIONS[docType]||[]).map(([kind,label])=>
     '<div class=cpitem style="cursor:pointer" onclick="selectRowGenKind(\''+kind+'\')"><span class=cpname>'+label+'</span></div>').join('')}
 function closeQtnGenMenu(){$('qtngenmenu').style.display='none'}
+// ---------------------------------------------------------------- Expense Report paid mark
+let PAID_REL='';
+function openPaidMenu(rel,ev){
+  ev.stopPropagation();
+  PAID_REL=rel;
+  const rec=INDEX.find(x=>x.rel===rel)||{},paid=rec.paid;
+  const box=$('paidmenu');
+  const r=ev.currentTarget.getBoundingClientRect();
+  box.style.left=Math.max(8,Math.min(Math.round(r.left),window.innerWidth-276))+'px';
+  box.style.top=Math.min(Math.round(r.bottom)+6,window.innerHeight-200)+'px';
+  box.style.display='block';
+  const names=[...new Set([...(typeof EXP_EMPLOYEES!=='undefined'?EXP_EMPLOYEES:[]),
+    ...INDEX.filter(x=>x.paid&&x.paid.paid_to).map(x=>x.paid.paid_to)])];
+  $('paid-to-list').innerHTML=names.map(n=>'<option value="'+escHtml(n)+'">').join('');
+  // Default to the report's own employee (an EXP's "company" is the employee name).
+  $('paid-to').value=paid?(paid.paid_to||''):(rec.company_label||'');
+  $('paid-info').textContent=paid?('Marked paid by '+(paid.by||'?')+' on '+(paid.at||'').slice(0,10)):'';
+  $('paid-clear').classList.toggle('hide',!paid);
+  setTimeout(()=>{$('paid-to').focus();$('paid-to').select()},0)}
+function closePaidMenu(){$('paidmenu').style.display='none'}
+document.addEventListener('click',e=>{
+  if($('paidmenu').style.display==='block'&&!e.target.closest('#paidmenu')&&!e.target.closest('.paidbtn'))closePaidMenu()});
+async function saveExpPaid(paid){
+  const paid_to=$('paid-to').value.trim();
+  if(paid&&!paid_to){toast('Enter who it was paid to.');$('paid-to').focus();return}
+  const r=await fetch('/api/doc-paid',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rel:PAID_REL,paid,paid_to})}).then(r=>r.json()).catch(e=>({ok:false,error:e.message}));
+  if(!r.ok){toast(r.error||'Could not save.');return}
+  closePaidMenu();
+  const rec=INDEX.find(x=>x.rel===PAID_REL);
+  if(rec){if(r.paid)rec.paid=r.paid;else delete rec.paid}
+  renderList();
+  toast(paid?('Marked paid to '+paid_to):'Marked as unpaid')}
 document.addEventListener('click',e=>{
   if($('qtngenmenu').style.display==='block'&&!e.target.closest('#qtngenmenu')&&!e.target.closest('.qtngenbtn'))closeQtnGenMenu()});
 function selectRowGenKind(kind){
@@ -17390,6 +17475,9 @@ function renderList(){
     // is part of this sales-document chain, so they have no entry in
     // ROW_GEN_OPTIONS and this stays empty/hidden for them.
     const rowGenType=(r.type||'').toUpperCase();
+    // Expense Report: mark paid / who it was paid to (see openPaidMenu).
+    if(rowGenType==='EXP')
+      actions+='<button class="rbtn paidbtn'+(r.paid?' on':'')+'" onclick="openPaidMenu(\''+rel+'\',event)" title="'+(r.paid?'Paid to '+escHtml(r.paid.paid_to||''):'Mark this expense report as paid')+'">'+(r.paid?'✓ Paid':'Mark Paid')+'</button>';
     if(ROW_GEN_OPTIONS[rowGenType])
       actions+='<button class="rbtn qtngenbtn" onclick="openRowGenMenu(\''+rel+'\',\''+rowGenType+'\',event)" title="Generate the next document in this chain">Generate ▾</button>';
     // Download — per explicit request: cloud is the default home for
@@ -17401,7 +17489,8 @@ function renderList(){
     // QTN2 shows the same short "QTN" badge as legacy QTN — they're one
     // merged "Quotation" filter now, so the badge shouldn't visibly split
     // back into two different-looking codes within it.
-    const pillText=r.type==='QTN2'?'QTN':(r.type||'DOC');
+    const isPaid=r.type==='EXP'&&!!r.paid;
+    const pillText=isPaid?'PAID':(r.type==='QTN2'?'QTN':(r.type||'DOC'));
     // "Generated by X" / download history — per explicit request: "it
     // will be mentioned that its created or imported or generated by
     // which user" and "if the files was downloaded that will show...
@@ -17418,10 +17507,11 @@ function renderList(){
       attrib='<span class=muted style="font-size:10.5px;white-space:nowrap" title="Generated by '+escHtml(r.generated_by)+(dlTitle?' — '+escHtml(dlTitle):'')+'">by '+escHtml(r.generated_by)+
         (downloads.length?' · ⬇'+downloads.length:'')+'</span>';
     }
-    html+='<div class="row'+(r.in_progress?' inprogress':'')+(ALLDOCS_SELECTED.has(rel)?' selected':'')+'" data-rel="'+rel+'" data-type="'+(r.type||'')+'" oncontextmenu="openAllDocsCtxMenu(\''+rel+'\',\''+folderCompany+'\',\''+label+'\',event)" onmouseenter="showPrev(event,\''+rel+'\','+canPreview+')" onmousemove=movePrev(event) onmouseleave=hidePrev()>'+
+    html+='<div class="row'+(r.in_progress?' inprogress':'')+(isPaid?' paid':'')+(ALLDOCS_SELECTED.has(rel)?' selected':'')+'" data-rel="'+rel+'" data-type="'+(r.type||'')+'" oncontextmenu="openAllDocsCtxMenu(\''+rel+'\',\''+folderCompany+'\',\''+label+'\',event)" onmouseenter="showPrev(event,\''+rel+'\','+canPreview+')" onmousemove=movePrev(event) onmouseleave=hidePrev()>'+
       '<input type=checkbox class=adsel onclick="event.stopPropagation()" onchange="toggleAllDocsSelect(\''+rel+'\',this.checked)"'+(ALLDOCS_SELECTED.has(rel)?' checked':'')+'>'+
-      '<span class=pill>'+pillText+'</span><span class=mono style=width:70px>'+(r.number||'—')+'</span>'+
+      '<span class="pill'+(isPaid?' paidpill':'')+'"'+(isPaid?' title="Expense Report — paid"':'')+'>'+pillText+'</span><span class=mono style=width:70px>'+(r.number||'—')+'</span>'+
       '<span style=flex:1>'+allDocsRowLabel(r)+'</span>'+
+      (isPaid?'<span class=paidto title="Marked paid by '+escHtml(r.paid.by||'?')+' on '+escHtml((r.paid.at||'').slice(0,10))+'">Paid to '+escHtml(r.paid.paid_to||'')+'</span>':'')+
       (r.status&&r.status!=='None'?'<span class="statuspill '+r.status+'">'+r.status+'</span>':'')+
       (r.in_progress?'<span class="pill inprogresspill">In Progress</span>':'')+
       attrib+

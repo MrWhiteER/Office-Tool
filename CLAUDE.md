@@ -1959,3 +1959,19 @@ login/logout history filterable by user. Data comes from `activity.py`.
   Closing the window only hides it to the tray, so the user stays active.
 - `/api/accounts-activity` is admin-only through the `/api/accounts` prefix
   gate. Opening the view deletes session objects older than 90 days.
+
+## Expense Report: mark a file as paid (and who it was paid to)
+
+- Every EXP row in All Docs has a **Mark Paid** button. It opens a small
+  popover (`#paidmenu`, `openPaidMenu`) with a "Paid to" field, prefilled
+  with the report's employee and suggesting known employees / previous
+  payees. Once paid the button reads "✓ Paid" and the popover also offers
+  **Mark as Unpaid**.
+- `POST /api/doc-paid {rel, paid, paid_to}` (EXP only) stores
+  `paid: {paid_to, by, at}` in the document's `.meta.json` and re-uploads
+  that meta to R2, the same way `/api/doc-download` does, so every PC sees it.
+  `/api/index` returns it as `r.paid`.
+- A paid row shows a green **PAID** pill in place of EXP, "Paid to X"
+  beside the label, and a green corner box on its top-left (`.row.paid`).
+- Note: editing an EXP into a different filename drops the old
+  `.meta.json`, so the paid mark (like `generated_by`) does not follow a rename.
