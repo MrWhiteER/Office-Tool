@@ -603,6 +603,14 @@ inside the app.
   need to open in Excel, so the "keep it outside the system" treatment
   didn't apply here) via `load_drafts`/`save_drafts` and
   `GET/POST /api/drafts`, `POST /api/drafts-delete`.
+  - **Per-user drafts** (2026-11-02): every draft record has an `owner`
+    (the logged-in username, set on each save). `GET /api/drafts`, the
+    delete endpoint and its response only see the current user's own
+    drafts (`_visible_drafts()` / `_draft_visible()`), case-insensitive.
+    Drafts saved before this change have no owner: they stay visible to
+    everyone and the next user who saves one (autosave included) claims
+    it. A save that hits someone else's draft id never overwrites it; it
+    gets a fresh id for the current user instead.
   - `collectDocData()` (`app.py`) is the single source of "what a
     document's form state is" — extracted out of `generate()` so both it
     and `saveDraftFromForm()` build the exact same payload shape

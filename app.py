@@ -3646,6 +3646,25 @@ def api_delete_client():
     save_clients(brand, clients)
     return jsonify({"clients": clients})
 
+# Drafts belong to the user who saved them (Edy, 2026-11-02: "if another
+# user is keeping draft it will not mix with others"). Each record carries
+# an "owner" (the logged-in username); every list/delete only sees the
+# current user's own drafts. Drafts saved before this change have no owner
+# — they stay visible to everyone (so nothing silently disappears) and the
+# first user who saves one again (autosave included) claims it.
+def _draft_owner():
+    return (session.get("user") or "").strip()
+
+def _draft_visible(d, user=None):
+    owner = (d.get("owner") or "").strip().lower()
+    return not owner or owner == (user if user is not None else _draft_owner()).lower()
+
+def _visible_drafts(brand):
+    drafts = load_drafts(brand)
+    if brand != "SOLOLUCE":
+        drafts = drafts + [d for d in load_drafts("SOLOLUCE") if d.get("doc_type") == "CAT"]
+    return [d for d in drafts if _draft_visible(d)]
+
 @app.get("/api/drafts")
 def api_drafts():
     # A Sololuce Datasheet (CAT) draft is always Sololuce's, full stop — same
@@ -3655,11 +3674,7 @@ def api_drafts():
     # Without this, switching brands mid-edit (or an autosave firing after a
     # brand switch) could silently strand a real draft where the user would
     # never see it again.
-    brand = current_brand()
-    drafts = load_drafts(brand)
-    if brand != "SOLOLUCE":
-        drafts = drafts + [d for d in load_drafts("SOLOLUCE") if d.get("doc_type") == "CAT"]
-    return jsonify({"drafts": drafts})
+    return jsonify({"drafts": _visible_drafts(current_brand())})
 
 @app.post("/api/drafts")
 def api_save_draft():
@@ -3686,9 +3701,15 @@ def api_save_draft():
         "label": label,
         "company": company,
         "data": data,
+        "owner": _draft_owner(),
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     existing = next((d for d in drafts if d["id"] == record["id"]), None)
+    if existing and not _draft_visible(existing):
+        # Someone else's draft under the same id — never overwrite it; this
+        # save becomes a new draft of the current user's own instead.
+        record["id"] = f"d_{int(datetime.datetime.now().timestamp() * 1000)}"
+        existing = None
     if existing:
         drafts[drafts.index(existing)] = record
     else:
@@ -3739,24 +3760,23 @@ def api_delete_draft():
     skip_trash = bool(body.get("skip_trash"))
     brand = current_brand()
     all_drafts = load_drafts(brand)
-    found = next((d for d in all_drafts if d["id"] == did), None)
+    found = next((d for d in all_drafts if d["id"] == did and _draft_visible(d)), None)
     found_brand = brand
-    drafts = [d for d in all_drafts if d["id"] != did]
-    save_drafts(brand, drafts)
+    if found:
+        save_drafts(brand, [d for d in all_drafts if d is not found])
     # A CAT draft returned by GET /api/drafts while on a different brand (see
     # above) actually lives in Sololuce's own bucket — delete it there too,
     # or its "Delete" button would silently no-op instead of removing it.
     if brand != "SOLOLUCE":
         sololuce_drafts = load_drafts("SOLOLUCE")
         if found is None:
-            found = next((d for d in sololuce_drafts if d["id"] == did), None)
-            found_brand = "SOLOLUCE" if found else brand
-        filtered = [d for d in sololuce_drafts if d["id"] != did]
-        if len(filtered) != len(sololuce_drafts):
-            save_drafts("SOLOLUCE", filtered)
+            sfound = next((d for d in sololuce_drafts if d["id"] == did and _draft_visible(d)), None)
+            if sfound:
+                found, found_brand = sfound, "SOLOLUCE"
+                save_drafts("SOLOLUCE", [d for d in sololuce_drafts if d is not sfound])
     if found and not skip_trash:
         _trash_draft(found, found_brand, session.get("user"))
-    return jsonify({"drafts": drafts})
+    return jsonify({"drafts": _visible_drafts(brand)})
 
 _CLIENT_CONTACT_FIELDS = ("attn", "address", "po_box", "city", "country", "phone", "landline", "email", "website", "trn")
 
