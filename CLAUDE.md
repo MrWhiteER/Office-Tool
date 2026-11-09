@@ -2003,3 +2003,23 @@ photos: ~8s (4.6 MB JPEGs), ~30-95s (PNG product shots), ~0.9s after the fix.
   fit (`_fit_hint`), so a preview usually settles in 2-3 renders instead of
   ~7. Same final zoom as the cold binary search (verified).
 - Preview debounce 700ms → 450ms.
+
+## Clickable live preview (click text or a photo → jump to its box)
+
+Clicking text on the live preview scrolls to, focuses and flashes the box on
+the left that holds it (caret on the clicked word); hovering outlines the
+line first so you can see what's clickable. Clicking a Datasheet photo opens
+that photo's Adjust panel; clicking a quotation item photo jumps to its item.
+
+- Server: `/api/preview-draft` now also returns `click_map` from
+  `_preview_click_map` — per page, every word's box (0..1 of the page) with
+  its block.line id, and every embedded photo's box + payload key (matched by
+  pixel size, then an 8x8 colour signature when sizes collide).
+- Client (`previewClick` section near `showPreviewError`): matches by
+  content, not by template tags — the whole clicked line inside a field
+  wins, otherwise most words in common; numbers are normalised (1,234.00 ==
+  1234). Calculated text (totals, amount in words) has no box and does
+  nothing. Only on the live draft render; a Generated file's preview isn't
+  clickable. Pan tool / Space-drag still pans instead of clicking.
+- If a blur handler re-renders the list right after the jump (item
+  descriptions do), the replacement box is refocused.

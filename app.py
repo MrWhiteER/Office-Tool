@@ -5526,6 +5526,81 @@ def _shrink_photos_for_preview(value):
         return [_shrink_photos_for_preview(v) for v in value]
     return value
 
+# Clickable live preview: the preview is a PNG of the real PDF, so the PDF
+# itself is the source of truth for WHERE things landed. Words come straight
+# from PyMuPDF (with block/line ids so the client can rebuild the whole line
+# around the clicked word and match it to the form field that holds that
+# text — see previewClick() in the page script). Photos are matched back to
+# the payload key they came from (e.g. "main_photo", "items.3.photo") by
+# pixel size + an 8x8 colour signature, since Chromium embeds the image at
+# its own pixel size but not with its own bytes. Coordinates are 0..1
+# fractions of the page so they work at any preview zoom.
+def _img_signature(pil_img):
+    from PIL import Image
+    im = pil_img.convert("RGB").resize((8, 8), Image.BILINEAR)
+    return list(im.getdata())
+
+def _sig_distance(a, b):
+    return sum(abs(x[0] - y[0]) + abs(x[1] - y[1]) + abs(x[2] - y[2]) for x, y in zip(a, b))
+
+def _payload_photos(value, path=""):
+    if isinstance(value, str):
+        if value.startswith("data:image/") and "," in value:
+            yield path, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _payload_photos(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from _payload_photos(v, f"{path}.{i}" if path else str(i))
+
+def _preview_click_map(pdf_path, draft):
+    import fitz
+    from PIL import Image
+    photos = {}  # (w, h) -> [(path, signature)]
+    for path, uri in _payload_photos(draft):
+        try:
+            im = Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1])))
+            photos.setdefault(im.size, []).append((path, None, im))
+        except Exception:
+            continue
+    out = []
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            pw, ph = page.rect.width, page.rect.height
+            words = [[round(w[0] / pw, 4), round(w[1] / ph, 4), round(w[2] / pw, 4), round(w[3] / ph, 4),
+                      w[4], f"{w[5]}.{w[6]}"] for w in page.get_text("words")]
+            imgs = []
+            for info in page.get_image_info(xrefs=True):
+                cands = photos.get((info.get("width"), info.get("height")))
+                if not cands:
+                    continue
+                path = cands[0][0]
+                if len(cands) > 1 and info.get("xref"):
+                    try:
+                        pix = fitz.Pixmap(doc, info["xref"])
+                        if pix.n - pix.alpha != 3:
+                            pix = fitz.Pixmap(fitz.csRGB, pix)
+                        sig = _img_signature(Image.frombytes("RGBA" if pix.alpha else "RGB", (pix.width, pix.height), pix.samples))
+                        best = None
+                        for i, (p, s, im) in enumerate(cands):
+                            if s is None:
+                                s = _img_signature(im)
+                                cands[i] = (p, s, im)
+                            d = _sig_distance(sig, s)
+                            if best is None or d < best[0]:
+                                best = (d, p)
+                        path = best[1]
+                    except Exception:
+                        pass
+                b = info["bbox"]
+                x0, y0 = max(0.0, b[0] / pw), max(0.0, b[1] / ph)
+                x1, y1 = min(1.0, b[2] / pw), min(1.0, b[3] / ph)
+                if x1 > x0 and y1 > y0:
+                    imgs.append([round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4), path])
+            out.append({"words": words, "imgs": imgs})
+    return out
+
 @app.post("/api/preview-draft")
 def api_preview_draft():
     """Render the Build form's current (unsaved) state as a live preview —
@@ -5567,7 +5642,11 @@ def api_preview_draft():
             engine.FILLERS[dtype](draft, draft_xlsx, brand=current_brand())
             pdf = engine.to_pdf(draft_xlsx, req_dir)
         pages = engine.to_png_pages(pdf, req_dir, "draft")
-        return jsonify({"ok": True, "pages": pages, "draft_id": req_id})
+        try:
+            click_map = _preview_click_map(pdf, draft)
+        except Exception:
+            click_map = None  # the clickable preview is a nice-to-have; never fail the render over it
+        return jsonify({"ok": True, "pages": pages, "draft_id": req_id, "click_map": click_map})
     except Exception as e:
         shutil.rmtree(req_dir, ignore_errors=True)
         return jsonify({"error": str(e)}), 500
@@ -6354,6 +6433,9 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .pvpages{display:flex;flex-direction:column;gap:14px;align-items:center;transition:opacity .15s ease}
 .pvpages.hide{display:none}
 .pvpages.pv-loading{opacity:.45}
+#pvhover{position:fixed;display:none;pointer-events:none;z-index:400;border:1.5px solid var(--amber,#e0a030);background:rgba(224,160,48,.12);border-radius:3px}
+.pv-jump{animation:pvJump 1.6s ease}
+@keyframes pvJump{0%,40%{box-shadow:0 0 0 3px var(--amber,#e0a030);border-color:var(--amber,#e0a030)}100%{box-shadow:0 0 0 0 transparent}}
 .pvrow{display:flex;gap:14px;align-items:flex-start;justify-content:safe center;width:100%}
 .pvpage{box-shadow:0 6px 18px rgba(0,0,0,.28);background:#fff;display:block;border-radius:2px;-webkit-user-drag:none;user-select:none;flex-shrink:0;min-width:0}
 .previewpane img#previewimg{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);background:#fff;margin:0 auto;display:block;-webkit-user-drag:none;user-select:none}
@@ -15223,7 +15305,7 @@ function renderPreviewPages(){
     wrap.classList.add('single');
     previewFitIndex=Math.max(1,Math.min(previewPages,previewFitIndex));
     const fw=computeFitPageWidth();
-    wrap.innerHTML='<div class=pvrow><img class=pvpage style="width:'+fw+'px" src="'+previewPageUrl(previewFitIndex)+'"></div>';
+    wrap.innerHTML='<div class=pvrow><img class=pvpage data-p="'+previewFitIndex+'" style="width:'+fw+'px" src="'+previewPageUrl(previewFitIndex)+'"></div>';
     updatePvButtons();
     return}
   wrap.classList.add(effectivePreviewMode());
@@ -15232,7 +15314,7 @@ function renderPreviewPages(){
   let html='';
   for(let i=1;i<=previewPages;i+=perRow){
     html+='<div class=pvrow>';
-    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<img class=pvpage style="width:'+w+'px" src="'+previewPageUrl(p)+'">';
+    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<img class=pvpage data-p="'+p+'" style="width:'+w+'px" src="'+previewPageUrl(p)+'">';
     html+='</div>'}
   wrap.innerHTML=html;
   updatePvButtons()}
@@ -15317,6 +15399,7 @@ function showPreviewPages(n,draftId,fileRel){
   img.classList.add('hide');img.src='';
   previewPages=n;previewCacheBust=Date.now();
   previewFileRel=fileRel||'';previewDraftId=previewFileRel?'':(draftId||'');
+  previewClickMap=null;pvHideHover();
   if(previewFitIndex>n)previewFitIndex=Math.max(1,n);
   if(previewModeAuto)previewMode=n>1?'double':'single';
   empty.classList.add('hide');
@@ -15392,13 +15475,139 @@ async function runPreviewNow(){
     return}
   if(mySeq!==previewSeq)return;  // superseded by a newer request — never apply a stale response
   if(pages)pages.classList.remove('pv-loading');
-  if(!r.error){showPreviewPages(r.pages||1,r.draft_id);return}
+  if(!r.error){showPreviewPages(r.pages||1,r.draft_id);previewClickMap=r.click_map||null;return}
   // The backend genuinely failed (not a network drop — that's the catch
   // above) — this used to fall through silently here, leaving whatever
   // was already showing (often the "Rendering live preview…" empty
   // state) on screen forever with zero feedback, indistinguishable from
   // the render actually being stuck. Show the real error instead.
   showPreviewError(r.error)}
+// ---------------------------------------------------------------- clickable live preview
+// Click any text (or photo) on the live preview to jump to the box on the
+// left that holds it. The server sends a click map with every live render
+// (see _preview_click_map in app.py): each word's box on the page plus
+// which line it belongs to, and which payload key each photo came from.
+// Text is matched back to a form field by content — the whole clicked line
+// first, then the most words in common — so it works for every tool
+// without each template having to tag its fields. Calculated text (totals,
+// amount in words, dates reformatted) has no single box and is ignored.
+let previewClickMap=null;
+const PV_CAT_PHOTO_SLOTS={main_photo:'main',lifestyle_photo:'lifestyle',dimension_diagram:'diagram',extra_photo_1:'extra1',extra_photo_2:'extra2',extra_photo_3:'extra3'};
+function pvNorm(s){
+  return (s||'').replace(/<[^>]*>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&')
+    .replace(/(\d),(?=\d{3}\b)/g,'$1')
+    .replace(/(\d)\.(\d*?)0+(?!\d)/g,(m,a,b)=>a+(b?'.'+b:''))  // 350.00 on the page == 350 typed in the box
+    .toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim()}
+function pvHit(img,e){
+  const map=previewClickMap,p=+img.dataset.p;
+  if(!map||!map[p-1])return null;
+  const r=img.getBoundingClientRect();
+  const fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
+  const pg=map[p-1], pad=0.003;
+  for(const w of pg.words){
+    if(fx>=w[0]-pad&&fx<=w[2]+pad&&fy>=w[1]-pad&&fy<=w[3]+pad){
+      const line=pg.words.filter(o=>o[5]===w[5]);
+      const box=[Math.min(...line.map(o=>o[0])),Math.min(...line.map(o=>o[1])),Math.max(...line.map(o=>o[2])),Math.max(...line.map(o=>o[3]))];
+      return {kind:'text',word:w[4],line:line.map(o=>o[4]).join(' '),box,rect:r}}}
+  let best=null;
+  for(const m of pg.imgs){
+    if(fx>=m[0]&&fx<=m[2]&&fy>=m[1]&&fy<=m[3]){
+      const area=(m[2]-m[0])*(m[3]-m[1]);
+      if(!best||area<best.area)best={kind:'img',path:m[4],box:m.slice(0,4),area,rect:r}}}
+  return best}
+function pvFieldText(el){
+  if(el.classList.contains('richbox')||el.isContentEditable)return el.innerText||'';
+  if(el.tagName==='SELECT')return el.selectedOptions[0]?el.selectedOptions[0].text:'';
+  return el.value||''}
+function pvCandidates(){
+  const root=document.querySelector('#buildwrap .left');if(!root)return[];
+  return [...root.querySelectorAll('input,textarea,select,.richbox,[contenteditable=true]')].filter(el=>{
+    if(el.tagName==='INPUT'&&/^(checkbox|radio|file|hidden|color|range|button|submit)$/i.test(el.type))return false;
+    if(el.closest('.hide'))return false;
+    if(el.getClientRects().length)return true;
+    return !!el.closest('.collapsed')})}  // inside a collapsed section — reopened on jump
+function pvFindField(hit){
+  const line=pvNorm(hit.line), word=pvNorm(hit.word);
+  if(!word)return null;
+  const lineToks=line.split(' ').filter(Boolean);
+  let best=null;
+  for(const el of pvCandidates()){
+    const txt=pvNorm(pvFieldText(el));if(!txt)continue;
+    const toks=new Set(txt.split(' '));
+    const wordToks=word.split(' ');
+    if(!wordToks.every(t=>toks.has(t)))continue;
+    let score;
+    if((' '+txt+' ').includes(' '+line+' '))score=1000+lineToks.length;
+    else score=lineToks.filter(t=>toks.has(t)).length*10;
+    score-=Math.min(9,toks.size/50);  // tie-break: the more specific (shorter) field wins
+    if(!best||score>best.score)best={el,score}}
+  return best&&best.el}
+function pvFlash(el){
+  el.classList.remove('pv-jump');void el.offsetWidth;el.classList.add('pv-jump');
+  setTimeout(()=>el.classList.remove('pv-jump'),1600)}
+// Clicking the preview blurs whatever box had focus, and some boxes'
+// blur handlers re-render their whole list a moment later (e.g. an item
+// description's photo/datasheet lookup calls renderItems()), which would
+// swap out the box we just focused. Remember where it was and refocus its
+// replacement if that happens.
+function pvJumpToField(el,word){
+  const idx=pvCandidates().indexOf(el);
+  const sel=el.id?'#'+CSS.escape(el.id):(el.dataset.i!=null&&el.dataset.k?'[data-i="'+el.dataset.i+'"][data-k="'+el.dataset.k+'"]':null);
+  pvFocusField(el,word);
+  [350,900,1800].forEach(ms=>setTimeout(()=>{
+    if(el.isConnected)return;
+    const again=(sel&&document.querySelector('#buildwrap .left '+sel))||pvCandidates()[idx];
+    if(again){el=again;pvFocusField(again,word,true)}},ms))}
+function pvFocusField(el,word,quiet){
+  el.closest('.collapsed')&&el.closest('.collapsed').classList.remove('collapsed');
+  if(!quiet)el.scrollIntoView({behavior:'smooth',block:'center'});
+  try{el.focus({preventScroll:true})}catch(e){el.focus()}
+  // Put the caret on the clicked word when it's a plain text box
+  if(word&&(el.tagName==='TEXTAREA'||(el.tagName==='INPUT'&&/^(text|search|)$/i.test(el.type)))){
+    const i=el.value.toLowerCase().indexOf(word.toLowerCase());
+    if(i>=0)try{el.setSelectionRange(i,i+word.length)}catch(e){}}
+  if(!quiet)pvFlash(el)}
+function pvJumpToPhoto(path){
+  if(TYPE==='CAT'&&PV_CAT_PHOTO_SLOTS[path]){
+    const slot=PV_CAT_PHOTO_SLOTS[path];
+    if(CAT_IMG[slot]&&CAT_IMG[slot].src){openPhotoAdjust(slot);return true}
+    return false}
+  const m=/^items\.(\d+)\./.exec(path);
+  if(m){
+    // the preview payload only sends items that have a description (see
+    // runPreviewNow), so map its index back to the real row index
+    const real=items.map((x,i)=>x.description?i:-1).filter(i=>i>=0)[+m[1]];
+    const card=real!=null&&document.querySelector('#itemslist .itemcard[data-i="'+real+'"]');
+    if(card){card.scrollIntoView({behavior:'smooth',block:'center'});pvFlash(card);return true}}
+  return false}
+function pvShowHover(hit){
+  let o=$('pvhover');
+  if(!o){o=document.createElement('div');o.id='pvhover';document.body.appendChild(o)}
+  const r=hit.rect,b=hit.box,pad=2;
+  o.style.left=(r.left+b[0]*r.width-pad)+'px';o.style.top=(r.top+b[1]*r.height-pad)+'px';
+  o.style.width=((b[2]-b[0])*r.width+pad*2)+'px';o.style.height=((b[3]-b[1])*r.height+pad*2)+'px';
+  o.style.display='block'}
+function pvHideHover(){const o=$('pvhover');if(o)o.style.display='none'}
+(function(){
+  const wrap=$('previewpages'),box=$('previewbox');if(!wrap||!box)return;
+  let downX=0,downY=0;
+  wrap.addEventListener('mousedown',e=>{downX=e.clientX;downY=e.clientY});
+  wrap.addEventListener('mousemove',e=>{
+    const img=e.target.closest&&e.target.closest('img.pvpage');
+    if(!img||box.classList.contains('pan-ready')||box.classList.contains('panning')){pvHideHover();wrap.style.cursor='';return}
+    const hit=pvHit(img,e);
+    if(hit&&(hit.kind==='img'||pvFindField(hit))){pvShowHover(hit);wrap.style.cursor='pointer'}
+    else{pvHideHover();wrap.style.cursor=''}});
+  wrap.addEventListener('mouseleave',()=>{pvHideHover();wrap.style.cursor=''});
+  box.addEventListener('scroll',pvHideHover,{passive:true});
+  wrap.addEventListener('click',e=>{
+    if(Math.abs(e.clientX-downX)>4||Math.abs(e.clientY-downY)>4)return;  // a drag, not a click
+    if(box.classList.contains('pan-ready'))return;
+    const img=e.target.closest&&e.target.closest('img.pvpage');if(!img)return;
+    const hit=pvHit(img,e);if(!hit)return;
+    if(hit.kind==='img'){pvJumpToPhoto(hit.path);return}
+    const el=pvFindField(hit);
+    if(el)pvJumpToField(el,hit.word)})})();
 function showPreviewError(msg){
   const img=$('previewimg'),empty=$('previewempty'),pages=$('previewpages');
   previewImgToken++;
