@@ -1984,3 +1984,22 @@ login/logout history filterable by user. Data comes from `activity.py`.
   beside the label.
 - Note: editing an EXP into a different filename drops the old
   `.meta.json`, so the status (like `generated_by`) does not follow a rename.
+
+## Faster live preview (big photos, double load, Fit to one page)
+
+A colleague saw 7s+ per preview change in the Datasheet Generator. The cause
+was the photos, not the PC: every preview sent each photo at full size and
+Chromium decoded/embedded all of them again on every render. Measured with 4
+photos: ~8s (4.6 MB JPEGs), ~30-95s (PNG product shots), ~0.9s after the fix.
+
+- `app.py` `_shrink_photos_for_preview`: `/api/preview-draft` swaps every
+  embedded photo over ~300 KB for a copy at most 1400px on its long edge
+  (EXIF rotation baked in, aspect kept, cached by sha1). Preview only —
+  Generate still renders the originals.
+- `html_engine._render_html_to_pdf`: the datasheet's viewport-resize +
+  second `set_content()` now only happens when the reused page's viewport
+  is actually the wrong size (it used to reload every datasheet twice).
+- `html_engine._fit_datasheet_to_one_page`: starts from the last zoom that
+  fit (`_fit_hint`), so a preview usually settles in 2-3 renders instead of
+  ~7. Same final zoom as the cold binary search (verified).
+- Preview debounce 700ms → 450ms.

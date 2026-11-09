@@ -610,7 +610,15 @@ def _render_html_to_pdf(html, out_path):
                 }
                 return {w: Math.ceil(toPx(dp.pageWidth)), h: Math.ceil(toPx(dp.pageHeight))};
             }""")
-            if page_px and page_px.get("w") and page_px.get("h"):
+            # The page object is reused across renders (see _get_page), so
+            # after the first datasheet its viewport is already the right
+            # size — and the measurements just taken are already the
+            # trustworthy ones. Only resize + reload when it actually
+            # changed; reloading unconditionally doubled the cost of every
+            # datasheet preview (decoding every photo twice).
+            vp = page.viewport_size or {}
+            if (page_px and page_px.get("w") and page_px.get("h")
+                    and (vp.get("width"), vp.get("height")) != (page_px["w"], page_px["h"])):
                 page.set_viewport_size({"width": page_px["w"], "height": page_px["h"]})
                 page.set_content(html, wait_until="load")
         # Was wait_until="networkidle" on both set_content() calls above —
@@ -1630,25 +1638,49 @@ def _pdf_page_count(path):
     with fitz.open(path) as doc:
         return doc.page_count
 
+# Last zoom (in %) that fit, reused as the first guess on the next call.
+# Consecutive previews of the same datasheet almost always land on the same
+# or a neighbouring zoom, so starting there usually settles in 2-3 renders
+# instead of the ~7 a cold 70..100 binary search costs. Only a starting
+# guess: the result is the same largest-fitting zoom either way.
+_fit_hint = {"z": None}
+
 def _fit_datasheet_to_one_page(context, out_path):
     if _pdf_page_count(out_path) <= 1:
         return out_path
-    def fits(z):
-        render_pdf("sololuce_datasheet.html", dict(context, fit_zoom=z), out_path)
+    state = {"last": None}
+    def fits(zp):
+        state["last"] = zp
+        render_pdf("sololuce_datasheet.html", dict(context, fit_zoom=zp / 100), out_path)
         return _pdf_page_count(out_path) <= 1
-    if not fits(FIT_MIN_ZOOM):
-        return render_pdf("sololuce_datasheet.html", context, out_path)
-    # Binary search for the largest zoom (to 0.01) that still fits.
-    lo, hi, last = int(FIT_MIN_ZOOM * 100), 100, int(FIT_MIN_ZOOM * 100)
-    while hi - lo > 1:
-        last = (lo + hi) // 2
-        if fits(last / 100):
-            lo = last
+    zmin = int(round(FIT_MIN_ZOOM * 100))
+    lo, hi = None, 100  # lo: largest zoom known to fit; hi: smallest known not to
+    hint = _fit_hint["z"]
+    if hint is not None and zmin <= hint < 100:
+        if fits(hint):
+            lo = hint
+            if hint + 1 < hi:
+                if fits(hint + 1):
+                    lo = hint + 1
+                else:
+                    hi = hint + 1
         else:
-            hi = last
+            hi = hint
+    if lo is None:
+        if hi <= zmin or not fits(zmin):
+            return render_pdf("sololuce_datasheet.html", context, out_path)
+        lo = zmin
+    # Binary search for the largest zoom (to 0.01) that still fits.
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid
     # The last probe may have been a miss; re-render the best fit if so.
-    if last != lo:
-        fits(lo / 100)
+    if state["last"] != lo:
+        fits(lo)
+    _fit_hint["z"] = lo
     return out_path
 
 # ----------------------------------------------------------------------------

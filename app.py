@@ -5458,6 +5458,74 @@ def _cleanup_stale_drafts():
     except OSError:
         pass
 
+# Live preview speed: photos arrive as full-size data URIs (phone photos of
+# 4-5 MB, PNG product shots of 15-20 MB), and Chromium has to decode and
+# embed every one of them again on EVERY preview render. Measured with 4
+# photos on a Datasheet: ~8s per render for 4.6 MB JPEGs, ~95s for 19 MB
+# PNGs, ~0.8s once shrunk to preview size — that, not the PC, is what made
+# the preview take 7s+ for some users and not others. The preview is
+# rasterized at 170 dpi (an A4 page is ~1400px wide), so no photo slot can
+# ever show more than PREVIEW_PHOTO_MAX_PX. Preview only: Generate still
+# renders the untouched original. Aspect ratio is preserved, so pan/zoom/
+# mask/auto-size (all relative to the photo's own shape) look identical.
+PREVIEW_PHOTO_MAX_PX = 1400
+PREVIEW_PHOTO_MIN_CHARS = 400_000  # ~300 KB — smaller photos aren't worth touching
+_preview_photo_cache = {}  # sha1(original data URI) -> shrunk data URI
+_preview_photo_lock = threading.Lock()
+_DATA_IMG_RE = re.compile(r"^data:image/(jpeg|jpg|png|webp|bmp);base64,", re.I)
+
+def _shrink_photo_for_preview(uri):
+    if len(uri) < PREVIEW_PHOTO_MIN_CHARS or not _DATA_IMG_RE.match(uri):
+        return uri
+    import hashlib
+    key = hashlib.sha1(uri.encode("ascii", "ignore")).hexdigest()
+    with _preview_photo_lock:
+        hit = _preview_photo_cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1])))
+        im.load()
+        if max(im.size) <= PREVIEW_PHOTO_MAX_PX and not uri[:20].lower().startswith(("data:image/png", "data:image/bmp")):
+            out = uri  # already small enough and already compressed
+        else:
+            # Chromium honours a phone photo's EXIF rotation; re-encoding
+            # drops the EXIF, so bake the rotation in first or the preview
+            # would show the photo sideways while Generate shows it upright.
+            from PIL import ImageOps
+            im = ImageOps.exif_transpose(im)
+            im.thumbnail((PREVIEW_PHOTO_MAX_PX, PREVIEW_PHOTO_MAX_PX), Image.LANCZOS)
+            buf = io.BytesIO()
+            has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+            if has_alpha:
+                im.save(buf, "PNG")
+                mime = "png"
+            else:
+                im.convert("RGB").save(buf, "JPEG", quality=88)
+                mime = "jpeg"
+            out = f"data:image/{mime};base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+            if len(out) >= len(uri):
+                out = uri
+    except Exception:
+        out = uri  # unreadable by Pillow — let Chromium deal with the original, as before
+    with _preview_photo_lock:
+        if len(_preview_photo_cache) >= 48:
+            _preview_photo_cache.pop(next(iter(_preview_photo_cache)))
+        _preview_photo_cache[key] = out
+    return out
+
+def _shrink_photos_for_preview(value):
+    """Walks a preview payload and swaps every large embedded photo for its
+    preview-sized copy (see _shrink_photo_for_preview)."""
+    if isinstance(value, str):
+        return _shrink_photo_for_preview(value) if value.startswith("data:image/") else value
+    if isinstance(value, dict):
+        return {k: _shrink_photos_for_preview(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_shrink_photos_for_preview(v) for v in value]
+    return value
+
 @app.post("/api/preview-draft")
 def api_preview_draft():
     """Render the Build form's current (unsaved) state as a live preview —
@@ -5473,7 +5541,7 @@ def api_preview_draft():
     dtype = data.get("doc_type", "QTN2").upper()
     if dtype not in engine.FILLERS and dtype not in engine.HTML_DOC_TYPES:
         return jsonify({"error": "Unknown type."}), 400
-    draft = dict(data)
+    draft = _shrink_photos_for_preview(dict(data))
     draft["number"] = data.get("number") or "0000"
     draft["date"] = data.get("date") or datetime.date.today().isoformat()
     draft["rev"] = data.get("rev") or "0"
@@ -15269,7 +15337,7 @@ function showPreviewPages(n,draftId,fileRel){
 // matches the latest bump is ever allowed to touch the screen — any older
 // one is silently dropped, whatever order the responses actually arrive in.
 let previewTimer=null, previewSeq=0, previewInFlight=false, previewPending=false;
-function schedulePreview(){clearTimeout(previewTimer);previewTimer=setTimeout(runPreview,700)}
+function schedulePreview(){clearTimeout(previewTimer);previewTimer=setTimeout(runPreview,450)}
 function fieldVal(el){return el.classList.contains('richbox')?richText(el):el.value}
 function setFieldVal(el,v){if(el.classList.contains('richbox'))el.innerHTML=v??'';else el.value=v??el.value}
 // Real bug, found live while verifying multi-document tabs: opening
