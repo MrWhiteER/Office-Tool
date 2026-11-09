@@ -2023,3 +2023,6 @@ that photo's Adjust panel; clicking a quotation item photo jumps to its item.
   clickable. Pan tool / Space-drag still pans instead of clicking.
 - If a blur handler re-renders the list right after the jump (item
   descriptions do), the replacement box is refocused.
+- The hover outline (`.pvhl`) sits inside each page's `.pvpagewrap` and is
+  sized in % of the page, so zoom/Fit/resizer/window resize can't leave it
+  stretched or misplaced (it used to be a fixed-position box measured once).

@@ -6433,7 +6433,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
 .pvpages{display:flex;flex-direction:column;gap:14px;align-items:center;transition:opacity .15s ease}
 .pvpages.hide{display:none}
 .pvpages.pv-loading{opacity:.45}
-#pvhover{position:fixed;display:none;pointer-events:none;z-index:400;border:1.5px solid var(--amber,#e0a030);background:rgba(224,160,48,.12);border-radius:3px}
+.pvpagewrap{position:relative;flex-shrink:0;min-width:0;line-height:0}
+.pvhl{position:absolute;pointer-events:none;box-sizing:border-box;border:1.5px solid var(--amber,#e0a030);background:rgba(224,160,48,.12);border-radius:3px}
 .pv-jump{animation:pvJump 1.6s ease}
 @keyframes pvJump{0%,40%{box-shadow:0 0 0 3px var(--amber,#e0a030);border-color:var(--amber,#e0a030)}100%{box-shadow:0 0 0 0 transparent}}
 .pvrow{display:flex;gap:14px;align-items:flex-start;justify-content:safe center;width:100%}
@@ -15305,7 +15306,7 @@ function renderPreviewPages(){
     wrap.classList.add('single');
     previewFitIndex=Math.max(1,Math.min(previewPages,previewFitIndex));
     const fw=computeFitPageWidth();
-    wrap.innerHTML='<div class=pvrow><img class=pvpage data-p="'+previewFitIndex+'" style="width:'+fw+'px" src="'+previewPageUrl(previewFitIndex)+'"></div>';
+    wrap.innerHTML='<div class=pvrow><div class=pvpagewrap><img class=pvpage data-p="'+previewFitIndex+'" style="width:'+fw+'px" src="'+previewPageUrl(previewFitIndex)+'"></div></div>';
     updatePvButtons();
     return}
   wrap.classList.add(effectivePreviewMode());
@@ -15314,7 +15315,7 @@ function renderPreviewPages(){
   let html='';
   for(let i=1;i<=previewPages;i+=perRow){
     html+='<div class=pvrow>';
-    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<img class=pvpage data-p="'+p+'" style="width:'+w+'px" src="'+previewPageUrl(p)+'">';
+    for(let p=i;p<Math.min(i+perRow,previewPages+1);p++)html+='<div class=pvpagewrap><img class=pvpage data-p="'+p+'" style="width:'+w+'px" src="'+previewPageUrl(p)+'"></div>';
     html+='</div>'}
   wrap.innerHTML=html;
   updatePvButtons()}
@@ -15580,14 +15581,19 @@ function pvJumpToPhoto(path){
     const card=real!=null&&document.querySelector('#itemslist .itemcard[data-i="'+real+'"]');
     if(card){card.scrollIntoView({behavior:'smooth',block:'center'});pvFlash(card);return true}}
   return false}
-function pvShowHover(hit){
-  let o=$('pvhover');
-  if(!o){o=document.createElement('div');o.id='pvhover';document.body.appendChild(o)}
-  const r=hit.rect,b=hit.box,pad=2;
-  o.style.left=(r.left+b[0]*r.width-pad)+'px';o.style.top=(r.top+b[1]*r.height-pad)+'px';
-  o.style.width=((b[2]-b[0])*r.width+pad*2)+'px';o.style.height=((b[3]-b[1])*r.height+pad*2)+'px';
-  o.style.display='block'}
-function pvHideHover(){const o=$('pvhover');if(o)o.style.display='none'}
+// The outline lives INSIDE the page's own wrapper and is placed in % of
+// the page, not in screen pixels — so zooming, Fit, Single/Double, the
+// resizer, a window resize or a page image finishing loading can never
+// leave it stretched or sitting in the wrong spot (the old version measured
+// the page once on mousemove and pinned a fixed-position box there).
+function pvShowHover(hit,img){
+  const host=img.parentElement;if(!host||!host.classList.contains('pvpagewrap'))return;
+  let o=host.querySelector('.pvhl');
+  if(!o){pvHideHover();o=document.createElement('div');o.className='pvhl';host.appendChild(o)}
+  const b=hit.box,px=0.0025,py=px*210/297;  // ~2px of padding, same on both axes of an A4 page
+  o.style.left=((b[0]-px)*100)+'%';o.style.top=((b[1]-py)*100)+'%';
+  o.style.width=((b[2]-b[0]+2*px)*100)+'%';o.style.height=((b[3]-b[1]+2*py)*100)+'%'}
+function pvHideHover(){document.querySelectorAll('#previewpages .pvhl').forEach(o=>o.remove())}
 (function(){
   const wrap=$('previewpages'),box=$('previewbox');if(!wrap||!box)return;
   let downX=0,downY=0;
@@ -15596,7 +15602,7 @@ function pvHideHover(){const o=$('pvhover');if(o)o.style.display='none'}
     const img=e.target.closest&&e.target.closest('img.pvpage');
     if(!img||box.classList.contains('pan-ready')||box.classList.contains('panning')){pvHideHover();wrap.style.cursor='';return}
     const hit=pvHit(img,e);
-    if(hit&&(hit.kind==='img'||pvFindField(hit))){pvShowHover(hit);wrap.style.cursor='pointer'}
+    if(hit&&(hit.kind==='img'||pvFindField(hit))){pvShowHover(hit,img);wrap.style.cursor='pointer'}
     else{pvHideHover();wrap.style.cursor=''}});
   wrap.addEventListener('mouseleave',()=>{pvHideHover();wrap.style.cursor=''});
   box.addEventListener('scroll',pvHideHover,{passive:true});
