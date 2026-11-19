@@ -1202,6 +1202,31 @@ def _finish_label_layout(label):
     return {"label_lines": lines, "label_font": font}
 
 
+_DIM_RE = re.compile(r"\d+(?:\.\d+)?(?:\s*[x\u00d7*X]\s*\d+(?:\.\d+)?)+")
+_SIZE_STD_LABELS = ("size(\u00f8\u00d7h)", "size(l\u00d7w\u00d7h)", "size")
+
+
+def size_header_for(label, values):
+    """The Size column's header follows what was typed: a size with 3
+    numbers (85*85*53 mm) is L×W×H, one with 2 (Ø120×60) is Ø×H. Only the
+    standard Size labels are switched, a custom-typed header is kept. Mixed
+    rows get "Ø×H / L×W×H"."""
+    if _norm_spec_label(label) not in _SIZE_STD_LABELS:
+        return label
+    kinds = set()
+    for v in values or []:
+        counts = [len(re.findall(r"\d+(?:\.\d+)?", m)) for m in _DIM_RE.findall(str(v or ""))]
+        if counts:
+            kinds.add("lwh" if max(counts) >= 3 else "dh")
+    if kinds == {"lwh"}:
+        return "Size (L\u00d7W\u00d7H)"
+    if kinds == {"dh"}:
+        return "Size (\u00d8\u00d7H)"
+    if kinds:
+        return "Size (\u00d8\u00d7H / L\u00d7W\u00d7H)"
+    return label
+
+
 def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
     """Shared by render_datasheet_pdf (below) and the /api/cat-ordering-widths
     route (app.py) that feeds the sidebar's draggable column-width widget —
@@ -1232,7 +1257,7 @@ def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
     hiding real content) baked into every DATA cell (never the header
     row), pulling short rows UP to a shared "standard" height without
     ever compressing a genuinely-tall row's own content."""
-    labels = [c.get("label", "") for c in raw_cols]
+    labels = [size_header_for(c.get("label", ""), c.get("values")) for c in raw_cols]
     col_values = [c.get("values") or [] for c in raw_cols]
     # CCT and Beam Angle print as ONE shared cell spanning every data row,
     # not one value per row like every other column — per explicit
@@ -1355,7 +1380,10 @@ def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
         if isinstance(manual, (int, float)) and manual > 0:
             col_weights.append(manual)
             continue
-        standard = (default_weights or {}).get((label or "").strip())
+        orig_label = raw_cols[c_idx].get("label", "") if c_idx < len(raw_cols) else label
+        standard = (default_weights or {}).get((orig_label or "").strip())
+        if standard is None:
+            standard = (default_weights or {}).get((label or "").strip())
         if isinstance(standard, (int, float)) and standard > 0:
             col_weights.append(standard)
             continue

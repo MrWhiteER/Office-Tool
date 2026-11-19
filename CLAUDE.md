@@ -2108,3 +2108,9 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   A line over ~11 characters shrinks its font (down to 5px) instead of
   wrapping; the swatch cell widens to fit (`min-width:28px`, nowrap lines).
   `CAT_LAYOUT_VERSION` 4 re-renders existing datasheets with this.
+- Size column header follows the typed values (`html_engine.size_header_for`,
+  JS mirror `catOrdHeaderOf`): 3 numbers (85*85*53 mm) → "Size (L×W×H)",
+  2 numbers → "Size (Ø×H)", rows of both kinds → "Size (Ø×H / L×W×H)".
+  Only the standard Size labels switch; a custom header is left alone. The
+  saved label is unchanged (display only), and saved standard widths are
+  still looked up by the saved label. `CAT_LAYOUT_VERSION` 5.

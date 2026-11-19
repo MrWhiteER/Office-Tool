@@ -13172,6 +13172,21 @@ async function rememberCatSizeOption(fullSpec){
   const r=await fetch('/api/cat-size-index-add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:fullSpec})}).then(r=>r.json());
   if(r.sizes)CAT_SIZE_INDEX=r.sizes}
 function isCatOrdSizeColumn(label){return normSpecLabel(label).startsWith('size')}
+// Mirrors html_engine.size_header_for: the standard Size header follows
+// what was typed (3 numbers = L×W×H, 2 = Ø×H, mixed = both).
+function catOrdHeaderOf(c){
+  const label=c.label||'';
+  const n=(label||'').trim().toLowerCase().replace(/\s+/g,'');
+  if(!['size(ø×h)','size(l×w×h)','size'].includes(n))return label;
+  const kinds=new Set();
+  (c.values||[]).forEach(v=>{
+    const ms=String(v||'').match(/\d+(?:\.\d+)?(?:\s*[x×*X]\s*\d+(?:\.\d+)?)+/g)||[];
+    if(!ms.length)return;
+    const mx=Math.max(...ms.map(m=>(m.match(/\d+(?:\.\d+)?/g)||[]).length));
+    kinds.add(mx>=3?'lwh':'dh')});
+  if(kinds.size===1)return kinds.has('lwh')?'Size (L×W×H)':'Size (Ø×H)';
+  if(kinds.size>1)return 'Size (Ø×H / L×W×H)';
+  return label}
 function findCatOrdSizeCol(){return CAT_ORD_COLS.find(c=>isCatOrdSizeColumn(c.label))}
 function sizeFullSpecOf(val){
   const nl=(val||'').indexOf('\n');
@@ -14283,7 +14298,7 @@ function renderCatOrdTable(){
     if(isCatOrdSharedColumn(c.label)||(c.label||'').trim()==='Finish Options')return '';
     const isSpecial=CAT_ORD_SPECIAL_LABELS.includes((c.label||'').trim());
     return '<div style="display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--line)">'+
-      '<div style="flex:0 0 120px;font-size:11px;color:var(--muted);padding-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(c.label||'(untitled)')+'</div>'+
+      '<div style="flex:0 0 120px;font-size:11px;color:var(--muted);padding-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(catOrdHeaderOf(c)||'(untitled)')+'</div>'+
       '<div style="flex:1;min-width:0">'+catOrdValueInput(ci,vi,c.values[vi]||'',isSpecial,false,c.label,1)+'</div>'+
     '</div>'}).join('');
   $('cat-ord-table').innerHTML=fieldsHtml+sharedHtml+navHtml+rowsHtml+
@@ -14365,8 +14380,8 @@ function renderCatOrdWidthEditor(fromAutoFetch){
   const n=CAT_ORD_COLS.length;
   wrap.innerHTML='<div id=cat-ord-widths-row style="display:flex;min-width:'+(n*46)+'px;border-radius:6px;overflow:hidden;border:1px solid #c4551e">'+
     CAT_ORD_COLS.map((c,i)=>
-      '<div class=catordwbox style="flex:0 0 '+(weights[i]/total*100)+'%;min-width:0;box-sizing:border-box;background:#ec6b2f;color:#fff;font-size:9.5px;font-weight:700;padding:6px 7px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;'+(i<n-1?'border-right:1px solid rgba(255,255,255,.35);':'')+'" title="'+escHtml(c.label||'(untitled)')+'">'+
-        escHtml(c.label||'(untitled)')+
+      '<div class=catordwbox style="flex:0 0 '+(weights[i]/total*100)+'%;min-width:0;box-sizing:border-box;background:#ec6b2f;color:#fff;font-size:9.5px;font-weight:700;padding:6px 7px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;'+(i<n-1?'border-right:1px solid rgba(255,255,255,.35);':'')+'" title="'+escHtml(catOrdHeaderOf(c)||'(untitled)')+'">'+
+        escHtml(catOrdHeaderOf(c)||'(untitled)')+
         (i<n-1?'<div onmousedown="catOrdWidthDragStart(event,'+i+')" style="position:absolute;top:0;right:-4px;width:8px;height:100%;cursor:ew-resize;z-index:2"></div>':'')+
       '</div>').join('')+
   '</div>';
@@ -18574,7 +18589,7 @@ threading.Thread(target=_accounts_sync_loop, daemon=True).start()
 # other PC then just downloads the new PDFs through the normal 30s sync.
 # The originals are copied to DATA_BASE/_datasheet_backups/<time>/ on that
 # PC first (outside cloud_documents, so the backup itself never syncs).
-CAT_LAYOUT_VERSION = 4   # 2: Finish Options/Options grouped like CCT; 3: no fully blank rows; 4: finish labels max 2 lines (2026-11-19)
+CAT_LAYOUT_VERSION = 5   # 2: Finish Options/Options grouped like CCT; 3: no fully blank rows; 4: finish labels max 2 lines; 5: Size header follows L×W×H vs Ø×H (2026-11-19)
 CAT_LAYOUT_MARKER_KEY = "system/cat_layout_version.json"
 CAT_LAYOUT_CLAIM_SECS = 45 * 60
 
