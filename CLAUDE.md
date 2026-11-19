@@ -2140,3 +2140,7 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   "Same for every row" and printed as one merged cell, like CCT/Beam Angle/
   Finish Options/Options (`isCatOrdSharedColumn`, `merge_col_idxs`).
   `CAT_LAYOUT_VERSION` 8.
+- The empty area under the last ordering-table row now takes the next
+  row's alternating colour (`filler_bg`: shaded when the last row is white,
+  white when it's shaded), per Edy's marked-up SLMAR screenshot.
+  `CAT_LAYOUT_VERSION` 9.

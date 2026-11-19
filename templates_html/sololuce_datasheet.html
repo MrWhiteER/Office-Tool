@@ -1272,8 +1272,9 @@
       {% endfor %}
       {% endfor %}
       {% if ordering_table.merged and n_rows %}
+      {% set filler_bg = '#f7f5f2' if n_rows is even else '#ffffff' %}
       {% for cell in ordering_table.rows[-1] %}
-      <div style="background:#ffffff;min-width:0;"></div>
+      <div style="background:{{ filler_bg }};min-width:0;"></div>
       {% endfor %}
       {% endif %}
     </div>
