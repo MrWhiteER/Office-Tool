@@ -11514,10 +11514,17 @@ function ralDatalistLabel(r){return 'RAL '+r.code+' '+r.name}
 const CAT_FINISH_QUICK=['Black','White','Grey'];
 function isFinishSelected(label){return CAT_FINISH.some(f=>f.label===label)}
 function toggleCatFinish(label){
-  const c=CAT_FINISH_PRESETS.find(p=>p.label===label);if(!c)return;
-  if(isFinishSelected(label))CAT_FINISH=CAT_FINISH.filter(f=>f.label!==label);
-  else CAT_FINISH.push({label:c.label,hex:c.hex});
+  // Unselecting must work even for a color that isn't in the saved list
+  // any more (removed from More Colors, or it came in with an imported/
+  // older datasheet) — otherwise it stays printed on the sheet with no
+  // way to see or untick it. That was the stray "Nickel Black" report.
+  if(isFinishSelected(label)){CAT_FINISH=CAT_FINISH.filter(f=>f.label!==label)}
+  else{
+    const c=CAT_FINISH_PRESETS.find(p=>p.label===label);if(!c)return;
+    CAT_FINISH.push({label:c.label,hex:c.hex})}
   renderCatFinish();renderCatFinishMenu();renderCatOrdTable();schedulePreview()}
+function finishColorOf(label){
+  return (CAT_FINISH.find(f=>f.label===label)||CAT_FINISH_PRESETS.find(p=>p.label===label)||{}).hex||'#ffffff'}
 function finishChipHtml(c){
   const on=isFinishSelected(c.label);
   return '<div onclick="toggleCatFinish(\''+c.label.replace(/'/g,"\\'")+'\')" style="display:flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid '+(on?'#1f6feb':'#d6dbe1')+';border-radius:6px;cursor:pointer;font-size:12.5px;background:'+(on?'#eef4ff':'#fff')+'">'+
@@ -11525,11 +11532,15 @@ function finishChipHtml(c){
     escHtml(c.label)+(on?' ✓':'')+
   '</div>'}
 function renderCatFinish(){
+  // Hotbar: the 3 quick colors, then every OTHER color that's currently
+  // picked (in the order picked), so everything printed on the sheet is
+  // visible — and untickable — right here without opening More Colors.
   const quick=CAT_FINISH_QUICK.map(label=>CAT_FINISH_PRESETS.find(c=>c.label===label)).filter(Boolean);
-  const extraCount=CAT_FINISH_PRESETS.length-quick.length;
+  const picked=CAT_FINISH.filter(f=>!CAT_FINISH_QUICK.includes(f.label)).map(f=>({label:f.label,hex:finishColorOf(f.label)}));
+  const extraCount=CAT_FINISH_PRESETS.filter(c=>!CAT_FINISH_QUICK.includes(c.label)).length;
   $('cat-finish-rows').innerHTML=
     '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">'+
-      quick.map(finishChipHtml).join('')+
+      quick.concat(picked).map(finishChipHtml).join('')+
       '<button type=button class=btn style="font-size:12.5px;padding:6px 11px" onclick="openCatFinishMenu(event)">More Colors'+(extraCount>0?' ('+extraCount+')':'')+' ▾</button>'+
     '</div>'}
 // "More Colors" reuses the app's shared #filemenu popup (same one used by
@@ -11579,7 +11590,14 @@ function renderCatFinishMenu(){
     setTimeout(()=>{const inp=$('cat-finish-ral-search');if(inp)inp.focus()},0);
     return}
   const extra=CAT_FINISH_PRESETS.filter(c=>!CAT_FINISH_QUICK.includes(c.label));
-  const rows=extra.map(c=>{
+  // picked colors that aren't in the saved list still show (without a
+  // remove-from-list bin) so they can be unticked here too
+  const orphans=CAT_FINISH.filter(f=>!CAT_FINISH_QUICK.includes(f.label)&&!CAT_FINISH_PRESETS.some(p=>p.label===f.label));
+  const rows=orphans.map(c=>
+    '<div class=fmi onclick="event.stopPropagation();toggleCatFinish(\''+c.label.replace(/'/g,"\\'")+'\')">'+
+      '<span style="width:14px;height:14px;border:1px solid #00000030;border-radius:3px;background:'+(c.hex||'#fff')+';display:inline-block;flex-shrink:0"></span>'+
+      '<span style="flex:1">'+escHtml(c.label)+' ✓</span>'+
+    '</div>').join('')+extra.map(c=>{
     const on=isFinishSelected(c.label);
     return '<div class=fmi onclick="event.stopPropagation();toggleCatFinish(\''+c.label.replace(/'/g,"\\'")+'\')">'+
       '<span style="width:14px;height:14px;border:1px solid #00000030;border-radius:3px;background:'+c.hex+';display:inline-block;flex-shrink:0"></span>'+
@@ -14179,6 +14197,9 @@ function renderCatOrdTable(){
     Array.from({length:n},(_,i)=>
       '<div class="dragrow ordvarpill'+(i===vi?' on':'')+'" draggable="'+(n>1)+'" ondragstart="dragRowStart(event,{kind:\'variant\',vi:'+i+'})" ondragover="dragColOver(event)" ondragleave="dragColLeave(event)" ondrop="ordVariantDrop(event,'+i+')" ondragend="dragRowEnd(event)" onclick="setCatOrdCurrentVariant('+i+')" title="'+escHtml(catOrdVariantLabel(i))+'">'+
         (n>1?'<span class=draghandle title="Drag to reorder">⠿</span>':'')+(i+1)+
+        // the row's own wattage next to its number, so it's obvious which
+        // slot a tab edits without clicking through them
+        (catOrdVariantIdentity(i).pow?'<span style="font-weight:500;opacity:.75;margin-left:4px">'+escHtml(catOrdVariantIdentity(i).pow)+'</span>':'')+
       '</div>').join('')+
   '</div>';
   const navHtml=variantTabsHtml+'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px">'+

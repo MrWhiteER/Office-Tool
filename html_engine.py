@@ -1228,7 +1228,8 @@ def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
     # only these two get this treatment, every other column (including
     # ones that might happen to repeat the same value on every row too)
     # keeps printing one-per-row exactly as before, per explicit scope.
-    merge_col_idxs = {i for i, lbl in enumerate(labels) if _norm_spec_label(lbl) in ("cct", "beamangle")}
+    merge_col_idxs = {i for i, lbl in enumerate(labels)
+                      if _norm_spec_label(lbl) in ("cct", "beamangle", "finishoptions", "options")}
     # Cut Out is a plain dimension spec, not a code+description pair like
     # CCT/Controls/Size/Finish Options — bolding its one and only line never
     # had anything to visually contrast against, so it's excluded here
@@ -1239,7 +1240,12 @@ def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
     # a code+description pair, so bolding only the first one read as an
     # arbitrary distinction between two equally-important numbers.
     bold_flags = [c.get("label", "").strip() not in ("Cut Out", "Lumen") for c in raw_cols]
-    max_rows = max((len(v) for v in col_values), default=0)
+    # Row count comes from the per-row columns only — a merged column
+    # (CCT/Beam Angle/Finish Options/Options) prints all its values in one
+    # shared cell, so its value count must not add empty rows below the
+    # real variants (9 finish colours used to stretch a 6-row table to 9).
+    row_cols = [v for i, v in enumerate(col_values) if i not in merge_col_idxs]
+    max_rows = max((len(v) for v in (row_cols or col_values)), default=0)
     rows = []
     for i in range(max_rows):
         row = []

@@ -2026,3 +2026,15 @@ that photo's Adjust panel; clicking a quotation item photo jumps to its item.
 - The hover outline (`.pvhl`) sits inside each page's `.pvpagewrap` and is
   sized in % of the page, so zoom/Fit/resizer/window resize can't leave it
   stretched or misplaced (it used to be a fixed-position box measured once).
+
+## Datasheet: finish-color hotbar, grouped Finish Options/Options, wattage on row tabs (2026-11-19)
+
+- Finish Colors hotbar (`renderCatFinish`) shows Black/White/Grey plus every
+  other picked color, so everything printed is visible and untickable there.
+  `toggleCatFinish` now unticks a picked color even if it's no longer in the
+  saved list (`CAT_FINISH_PRESETS`) — that's how a hidden "Nickel Black"
+  kept printing with no way to remove it. More Colors lists such colors too.
+- `build_ordering_table` merges Finish Options and Options into one shared
+  cell spanning every row, like CCT/Beam Angle. Row count now comes from the
+  non-merged columns only, so a long merged list no longer adds empty rows.
+- The ordering-table row tabs show each row's wattage after its number.
