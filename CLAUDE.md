@@ -2102,3 +2102,9 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   14.6MB downloaded, ~3.5s, staging byte-identical to a full v1.1.102 extract;
   a corrupted/missing installed file is re-downloaded; an install missing most
   files falls back to the full download.
+- Finish Colors captions on the datasheet PDF (`_finish_label_layout` in
+  html_engine.py): at most 2 lines, split between words into the most even
+  pair, never mid-word ("Champagne Gold" used to print Champ/agne/Gold).
+  A line over ~11 characters shrinks its font (down to 5px) instead of
+  wrapping; the swatch cell widens to fit (`min-width:28px`, nowrap lines).
+  `CAT_LAYOUT_VERSION` 4 re-renders existing datasheets with this.

@@ -1178,6 +1178,30 @@ def _ord_row_min_height_pt(rows):
     standard_lines = Counter(row_line_counts).most_common(1)[0][0]
     return standard_lines * _ORD_LINE_HEIGHT_PT
 
+def _finish_label_layout(label):
+    """Finish Colors caption under each swatch: at most 2 lines, never broken
+    inside a word ("Champagne Gold" used to wrap as Champ/agne/Gold). Words
+    are split into the two most even lines; a line longer than ~11 chars
+    gets a smaller font instead of wrapping again, so any future name still
+    fits in 2 lines."""
+    words = str(label or "").split()
+    if not words:
+        return {"label_lines": [], "label_font": 7}
+    if len(words) == 1:
+        lines = words
+    else:
+        best = None
+        for i in range(1, len(words)):
+            a, b = " ".join(words[:i]), " ".join(words[i:])
+            score = max(len(a), len(b))
+            if best is None or score < best[0]:
+                best = (score, [a, b])
+        lines = best[1]
+    longest = max(len(l) for l in lines)
+    font = 7 if longest <= 11 else max(5, round(7 * 11 / longest, 2))
+    return {"label_lines": lines, "label_font": font}
+
+
 def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
     """Shared by render_datasheet_pdf (below) and the /api/cat-ordering-widths
     route (app.py) that feeds the sidebar's draggable column-width widget —
@@ -1543,7 +1567,9 @@ def render_datasheet_pdf(data, out_path, brand=None):
                 if _norm_spec_label(s.get("label", "")) == "luminareefficacy" else s.get("value", ""),
         } for s in (data.get("specs") or [])],
         "note": _bold_by_request(data.get("note", "")),
-        "finish_colors": [{"hex": c.get("hex", "#ffffff"), "label": c.get("label", "")} for c in (data.get("finish_colors") or [])],
+        "finish_colors": [dict({"hex": c.get("hex", "#ffffff"), "label": c.get("label", "")},
+                               **_finish_label_layout(c.get("label", "")))
+                          for c in (data.get("finish_colors") or [])],
         "ordering_code_example": data.get("ordering_code_example", ""),
         "ordering_table": ordering_table,
         # The 3 free zones of the 2x2 "Dimension Diagram" grid (bottom-right
