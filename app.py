@@ -18568,7 +18568,7 @@ threading.Thread(target=_accounts_sync_loop, daemon=True).start()
 # other PC then just downloads the new PDFs through the normal 30s sync.
 # The originals are copied to DATA_BASE/_datasheet_backups/<time>/ on that
 # PC first (outside cloud_documents, so the backup itself never syncs).
-CAT_LAYOUT_VERSION = 2   # 2: Finish Options/Options grouped like CCT (2026-11-19)
+CAT_LAYOUT_VERSION = 3   # 2: Finish Options/Options grouped like CCT; 3: no fully blank rows (2026-11-19)
 CAT_LAYOUT_MARKER_KEY = "system/cat_layout_version.json"
 CAT_LAYOUT_CLAIM_SECS = 45 * 60
 
