@@ -2136,3 +2136,7 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   with no column lines, so the last row reads as a closed box instead of
   running on down beside a tall CCT/Finish list (SLMAR 16W report).
   `CAT_LAYOUT_VERSION` 7.
+- Controls is now a shared column too (2026-11-19): entered once under
+  "Same for every row" and printed as one merged cell, like CCT/Beam Angle/
+  Finish Options/Options (`isCatOrdSharedColumn`, `merge_col_idxs`).
+  `CAT_LAYOUT_VERSION` 8.

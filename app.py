@@ -12744,7 +12744,7 @@ const CAT_ORD_SPECIAL_LABELS=['Finish Options','Lumen'];
 // (Edy, 2026-11-19). Their values array is just that list, independent of
 // the row count, the same way Finish Options already is.
 function isCatOrdSharedColumn(label){
-  return isCatOrdCctColumn(label)||isCatOrdBeamAngleColumn(label)||isCatOrdOptionsColumn(label)}
+  return isCatOrdCctColumn(label)||isCatOrdBeamAngleColumn(label)||isCatOrdControlsColumn(label)||isCatOrdOptionsColumn(label)}
 function catOrdLockstepCols(){
   return CAT_ORD_COLS.filter(c=>!CAT_ORD_SPECIAL_LABELS.includes((c.label||'').trim())&&!isCatOrdSharedColumn(c.label))}
 // A shared list keeps no blank gaps (left over from when these were
@@ -14291,7 +14291,7 @@ function renderCatOrdTable(){
     '<button type=button class="dspill" onclick="completeCatOrdVariant()">'+escHtml(catOrdVariantLabel(vi))+' Complete →</button>'+
   '</div>';
   tidyCatOrdSharedCols();
-  // "Same for every row": CCT / Beam Angle / Options typed once as a list,
+  // "Same for every row": CCT / Beam Angle / Controls / Options typed once as a list,
   // plus Finish Options (computed from Finish Colors, shown read-only here
   // with a shortcut to edit the colors). None of these are per-row.
   const sharedCols=CAT_ORD_COLS.map((c,ci)=>({c,ci})).filter(({c})=>isCatOrdSharedColumn(c.label)||(c.label||'').trim()==='Finish Options');
@@ -18609,7 +18609,7 @@ threading.Thread(target=_accounts_sync_loop, daemon=True).start()
 # other PC then just downloads the new PDFs through the normal 30s sync.
 # The originals are copied to DATA_BASE/_datasheet_backups/<time>/ on that
 # PC first (outside cloud_documents, so the backup itself never syncs).
-CAT_LAYOUT_VERSION = 7   # 2: Finish Options/Options grouped like CCT; 3: no fully blank rows; 4: finish labels max 2 lines; 5: Size header follows L×W×H vs Ø×H; 6: rows not stretched by shared cells; 7: last row closed with a bottom line (2026-11-19)
+CAT_LAYOUT_VERSION = 8   # 2: Finish Options/Options grouped like CCT; 3: no fully blank rows; 4: finish labels max 2 lines; 5: Size header follows L×W×H vs Ø×H; 6: rows not stretched by shared cells; 7: last row closed with a bottom line; 8: Controls is a shared merged cell (2026-11-19)
 CAT_LAYOUT_MARKER_KEY = "system/cat_layout_version.json"
 CAT_LAYOUT_CLAIM_SECS = 45 * 60
 

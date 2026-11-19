@@ -1278,7 +1278,7 @@ def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
     # ones that might happen to repeat the same value on every row too)
     # keeps printing one-per-row exactly as before, per explicit scope.
     merge_col_idxs = {i for i, lbl in enumerate(labels)
-                      if _norm_spec_label(lbl) in ("cct", "beamangle", "finishoptions", "options")}
+                      if _norm_spec_label(lbl) in ("cct", "beamangle", "controls", "finishoptions", "options")}
     # Cut Out is a plain dimension spec, not a code+description pair like
     # CCT/Controls/Size/Finish Options — bolding its one and only line never
     # had anything to visually contrast against, so it's excluded here
