@@ -8067,6 +8067,13 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
            left unpublished (accounts.has_pending_changes()). -->
       <button class="btn hide" id=users-publish-btn style="width:100%;margin-top:8px" onclick="publishAccounts(this)">Publish Older Unsaved Changes to Cloud</button>
     </div></div>
+    <!-- Re-render every saved Sololuce Datasheet with the current layout —
+         see rerender_all_datasheets() in app.py. Also runs once by itself
+         whenever CAT_LAYOUT_VERSION is bumped. -->
+    <div class=card><div class=ch>Sololuce Datasheets</div><div class=cb>
+      <p class=muted style="font-size:12px;margin:0 0 8px">Rebuild every generated datasheet with the latest layout, using each one's saved details. The old PDFs are kept as a backup on this PC.</p>
+      <button class=btn style="width:100%" onclick="rerenderAllDatasheets(this)">Update All Datasheets to the Latest Layout</button>
+    </div></div>
     <!-- Login/logout history + who's using the app right now, across every
          PC on this cloud connection — see activity.py. -->
     <div class=card id=act-card><div class=ch>User Activity</div><div class=cb>
@@ -15635,6 +15642,14 @@ function pvHideHover(){document.querySelectorAll('#previewpages .pvhl').forEach(
     if(hit.kind==='img'){pvJumpToPhoto(hit.path);return}
     const el=pvFindField(hit);
     if(el)pvJumpToField(el,hit.word)})})();
+async function rerenderAllDatasheets(btn){
+  const restore=startBtnLoading(btn,'Updating datasheets…');
+  try{
+    const r=await fetch('/api/cat-rerender-all',{method:'POST'}).then(r=>r.json());
+    if(r.error){toast(r.error);return}
+    toast('Updated '+r.count+' datasheet'+(r.count===1?'':'s')+(r.failed&&r.failed.length?' — '+r.failed.length+' failed':''));
+  }catch(e){toast('Could not update the datasheets.')}
+  finally{restore()}}
 function showPreviewError(msg){
   const img=$('previewimg'),empty=$('previewempty'),pages=$('previewpages');
   previewImgToken++;
@@ -18480,6 +18495,102 @@ def _accounts_sync_loop():
             pass
 threading.Thread(target=_accounts_sync_loop, daemon=True).start()
 
+# ---------------------------------------------------------------- re-render every datasheet
+# When the datasheet LAYOUT changes (template / build_ordering_table), every
+# already-generated Sololuce Datasheet should pick it up without anyone
+# re-opening and re-generating each one by hand (Edy, 2026-11-19: "I don't
+# want to go over each catalogue and generate it again"). Each datasheet's
+# JSON sidecar is its full generation payload, so re-rendering it from that
+# reproduces the document with only the layout changed.
+#
+# Bump CAT_LAYOUT_VERSION whenever a layout change should reach existing
+# datasheets. The first PC to start the new version (after its normal
+# startup cloud sync) claims the job in R2 and re-renders everything; every
+# other PC then just downloads the new PDFs through the normal 30s sync.
+# The originals are copied to DATA_BASE/_datasheet_backups/<time>/ on that
+# PC first (outside cloud_documents, so the backup itself never syncs).
+CAT_LAYOUT_VERSION = 2   # 2: Finish Options/Options grouped like CCT (2026-11-19)
+CAT_LAYOUT_MARKER_KEY = "system/cat_layout_version.json"
+CAT_LAYOUT_CLAIM_SECS = 45 * 60
+
+def rerender_all_datasheets(backup=True):
+    folder = folder_for("CAT", brand="SOLOLUCE")
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = os.path.join(engine.DATA_BASE, "_datasheet_backups", stamp)
+    widths = load_cfg().get("cat_ordering_default_widths", {})
+    badge_library = load_cfg().get("cat_badge_library", [])
+    done, failed = [], []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith("_")]
+        for name in sorted(files):
+            if not name.lower().endswith(".pdf"):
+                continue
+            pdf_path = os.path.join(root, name)
+            data = engine.read_sidecar(pdf_path)
+            if not data:
+                continue  # no saved payload to rebuild from — left untouched
+            try:
+                if backup:
+                    os.makedirs(backup_dir, exist_ok=True)
+                    shutil.copy2(pdf_path, os.path.join(backup_dir, name))
+                render_data = dict(data)
+                render_data["cat_ordering_default_widths"] = widths
+                html_engine.RENDERERS["CAT"](render_data, pdf_path, brand="SOLOLUCE")
+                engine.save_markdown(pdf_path, "CAT", data, brand="SOLOLUCE", badge_library=badge_library)
+                if not _backup_doc_to_cloud(pdf_path, None, "SOLOLUCE", "CAT", ""):
+                    _queue_pending_cloud_upload(pdf_path, None, "SOLOLUCE", "CAT", "")
+                done.append(name)
+            except Exception as e:
+                traceback.print_exc()
+                failed.append({"file": name, "error": str(e)})
+    return {"done": done, "failed": failed, "backup_dir": backup_dir if (backup and done) else ""}
+
+def _read_cat_layout_marker():
+    try:
+        raw, _ct = photo_store.get_bytes(CAT_LAYOUT_MARKER_KEY)
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
+
+def _write_cat_layout_marker(obj):
+    photo_store.put_bytes(CAT_LAYOUT_MARKER_KEY, json.dumps(obj).encode("utf-8"),
+                          content_type="application/json", allow_bundled_write=True)
+
+def maybe_migrate_datasheet_layout():
+    """One-time, cloud-coordinated re-render — see the block comment above.
+    Quietly does nothing when offline / R2 isn't configured."""
+    if not photo_store.is_configured():
+        return
+    marker = _read_cat_layout_marker()
+    if int(marker.get("version") or 1) >= CAT_LAYOUT_VERSION:
+        return
+    claim = marker.get("claim") or {}
+    if (claim.get("target") == CAT_LAYOUT_VERSION
+            and time.time() - float(claim.get("at") or 0) < CAT_LAYOUT_CLAIM_SECS):
+        return  # another PC is doing it right now
+    me = os.environ.get("COMPUTERNAME", "") or "unknown"
+    try:
+        _write_cat_layout_marker(dict(marker, claim={"target": CAT_LAYOUT_VERSION, "pc": me, "at": time.time()}))
+    except Exception:
+        return  # can't claim it, so don't do it
+    res = rerender_all_datasheets()
+    try:
+        _write_cat_layout_marker({"version": CAT_LAYOUT_VERSION, "pc": me, "done_at": time.time(),
+                                  "count": len(res["done"]), "failed": res["failed"][:50]})
+    except Exception:
+        pass
+    print(f"[datasheets] re-rendered {len(res['done'])} datasheet(s) to layout v{CAT_LAYOUT_VERSION}; "
+          f"{len(res['failed'])} failed; originals in {res['backup_dir']}")
+
+@app.post("/api/cat-rerender-all")
+def api_cat_rerender_all():
+    """Admin Tools button: re-render every saved datasheet with the current
+    layout right now (same job the automatic one-time migration runs)."""
+    if session.get("role") != "admin":
+        return jsonify({"error": "Admin access required."}), 403
+    res = rerender_all_datasheets()
+    return jsonify({"ok": True, "count": len(res["done"]), "failed": res["failed"], "backup_dir": res["backup_dir"]})
+
 # Keep the local document cache (CLOUD_DOCS_BASE, see folder_for()'s own
 # comment) caught up with whatever every OTHER PC has generated — an
 # initial pull right at startup (so All Docs is correct the first time it
@@ -18489,11 +18600,18 @@ threading.Thread(target=_accounts_sync_loop, daemon=True).start()
 # full bucket listings every few seconds. Best-effort: sync_down_documents
 # already swallows "not configured"/offline on its own.
 def _documents_sync_loop():
+    migrated = False
     while True:
         try:
-            photo_store.sync_down_documents(CLOUD_DOCS_BASE)
+            r = photo_store.sync_down_documents(CLOUD_DOCS_BASE)
+            # once per app start, right after the first successful pull (so
+            # every datasheet from every PC is present locally) — see
+            # maybe_migrate_datasheet_layout
+            if not migrated and r.get("ok"):
+                migrated = True
+                maybe_migrate_datasheet_layout()
         except Exception:
-            pass
+            traceback.print_exc()
         time.sleep(30)
 threading.Thread(target=_documents_sync_loop, daemon=True).start()
 

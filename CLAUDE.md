@@ -2038,3 +2038,13 @@ that photo's Adjust panel; clicking a quotation item photo jumps to its item.
   cell spanning every row, like CCT/Beam Angle. Row count now comes from the
   non-merged columns only, so a long merged list no longer adds empty rows.
 - The ordering-table row tabs show each row's wattage after its number.
+- **Re-render every datasheet** (`rerender_all_datasheets`, app.py): rebuilds
+  each CAT PDF in place from its JSON sidecar with the current layout,
+  re-uploads it to R2, and keeps the old PDFs in
+  `DATA_BASE/_datasheet_backups/<time>/` on that PC. Runs once by itself when
+  `CAT_LAYOUT_VERSION` is bumped: the first PC to start the new version
+  claims `system/cat_layout_version.json` in R2 after its first document
+  sync and does the job; other PCs pick up the new PDFs via the normal sync
+  (size-based). Also an Admin Tools button ("Update All Datasheets…",
+  `POST /api/cat-rerender-all`). Bump `CAT_LAYOUT_VERSION` for any future
+  layout change that existing datasheets should get.
