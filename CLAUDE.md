@@ -2114,3 +2114,11 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   Only the standard Size labels switch; a custom header is left alone. The
   saved label is unchanged (display only), and saved standard widths are
   still looked up by the saved label. `CAT_LAYOUT_VERSION` 5.
+- Ordering table rows were stretched by the shared cells: a CCT/Finish
+  Options list taller than the rows it spans had its extra height spread
+  over those rows (CSS Grid). The grid now has a trailing `1fr` filler row
+  that the shared cells also span (`grid-template-rows: auto repeat(N,
+  auto) 1fr`); a spanning item's extra height goes to a flexible track
+  first, so real rows keep their own height. Filler cells continue the
+  last row's background; with no overflow the filler row is 0 tall.
+  `CAT_LAYOUT_VERSION` 6.

@@ -1164,7 +1164,14 @@
          columns in the first place; before that fix this was deliberately
          header-only so a too-narrow auto-computed column wouldn't
          silently reflow existing data. -->
-    <div style="display:grid;grid-template-columns:{{ ordering_table.col_template }};">
+    <!-- Shared cells (CCT/Beam Angle/Finish Options/Options) span every data
+         row PLUS one trailing 1fr filler row. A spanning cell that is taller
+         than the rows it covers gives its extra height to a flexible (fr)
+         track if it spans one, so the filler row takes it and each real row
+         stays as tall as its own content. Without it the rows were stretched
+         to fit e.g. a 4-entry CCT list next to 2 short rows. -->
+    {% set n_rows = ordering_table.rows|length %}
+    <div style="display:grid;grid-template-columns:{{ ordering_table.col_template }};{% if ordering_table.merged and n_rows %}grid-template-rows:auto repeat({{ n_rows }}, auto) 1fr;{% endif %}">
       {% for label in ordering_table.labels %}
       <div style="background:#ec6b2f;padding:5.5px 6.2px;color:#fff;font-weight:700;font-size:11px;white-space:normal;word-break:normal;line-height:1.25;min-width:0;">{{ label.text }}</div>
       {% endfor %}
@@ -1191,7 +1198,7 @@
            same top edge every data row's own first line already sits at,
            rather than floating vertically centered in the middle of the
            whole spanned area. -->
-      <div style="grid-column:{{ m.col }};grid-row:2 / span {{ ordering_table.rows|length }};background:#fbfaf8;font-size:9px;padding:6px 6.2px;min-width:0;display:flex;flex-direction:column;justify-content:flex-start;gap:5px;{% if m.col < ordering_table.labels|length %}border-right:1px solid #f0ece6;{% endif %}">
+      <div style="grid-column:{{ m.col }};grid-row:2 / span {{ n_rows + 1 }};background:#fbfaf8;font-size:9px;padding:6px 6.2px;min-width:0;display:flex;flex-direction:column;justify-content:flex-start;gap:5px;{% if m.col < ordering_table.labels|length %}border-right:1px solid #f0ece6;{% endif %}">
         {% for opt in m.options %}
         <div>
           <div style="font-weight:700;white-space:normal;word-break:normal;line-height:1.3;">{{ opt.first|safe }}</div>
@@ -1264,6 +1271,12 @@
       </div>
       {% endfor %}
       {% endfor %}
+      {% if ordering_table.merged and n_rows %}
+      {% set last_bg = '#f7f5f2' if (n_rows - 1) is even else '#ffffff' %}
+      {% for cell in ordering_table.rows[-1] %}
+      <div style="background:{{ last_bg }};min-width:0;{% if cell.col_index < ordering_table.labels|length - 1 %}border-right:1px solid #f0ece6;{% endif %}"></div>
+      {% endfor %}
+      {% endif %}
     </div>
   </div>
   {% endif %}
