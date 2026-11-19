@@ -12712,8 +12712,43 @@ function moveCatOrdField(ci,dir){
 // recomputeCatSpecialOrdColumns below), which keep their own independent
 // length driven by Finish Colors' count / Power's count respectively.
 const CAT_ORD_SPECIAL_LABELS=['Finish Options','Lumen'];
+// CCT, Beam Angle and Options print as ONE shared cell for every row (see
+// build_ordering_table's merge_col_idxs in html_engine.py), so they aren't
+// per-row data at all: they're edited once, as a plain list, in the
+// "Same for every row" section of the Crafting table instead of row by row
+// (Edy, 2026-11-19). Their values array is just that list, independent of
+// the row count, the same way Finish Options already is.
+function isCatOrdSharedColumn(label){
+  return isCatOrdCctColumn(label)||isCatOrdBeamAngleColumn(label)||isCatOrdOptionsColumn(label)}
 function catOrdLockstepCols(){
-  return CAT_ORD_COLS.filter(c=>!CAT_ORD_SPECIAL_LABELS.includes((c.label||'').trim()))}
+  return CAT_ORD_COLS.filter(c=>!CAT_ORD_SPECIAL_LABELS.includes((c.label||'').trim())&&!isCatOrdSharedColumn(c.label))}
+// A shared list keeps no blank gaps (left over from when these were
+// per-row columns) — except a trailing blank, which is a value the user
+// just added with "+ Add" and hasn't filled in yet.
+function tidyCatOrdSharedCols(){
+  CAT_ORD_COLS.filter(c=>isCatOrdSharedColumn(c.label)).forEach(c=>{
+    const vals=c.values||[];
+    const seen=new Set();
+    const kept=vals.filter((v,i)=>{
+      const k=(v||'').trim().toLowerCase();
+      if(!k)return i===vals.length-1;
+      if(seen.has(k))return false;
+      seen.add(k);return true});
+    c.values=kept.length?kept:['']})}
+function addCatOrdSharedValue(ci){
+  const c=CAT_ORD_COLS[ci];if(!c)return;
+  if(!c.values.length||(c.values[c.values.length-1]||'').trim())c.values.push('');
+  renderCatOrdTable()}
+function removeCatOrdValue(ci,vi){
+  const c=CAT_ORD_COLS[ci];if(!c)return;
+  c.values.splice(vi,1);
+  if(!c.values.length)c.values.push('');
+  recomputeOrderingCodeExample();renderCatOrdTable();schedulePreview()}
+function moveCatOrdValue(ci,vi,dir){
+  const c=CAT_ORD_COLS[ci];if(!c)return;
+  const j=vi+dir;if(j<0||j>=c.values.length)return;
+  [c.values[vi],c.values[j]]=[c.values[j],c.values[vi]];
+  recomputeOrderingCodeExample();renderCatOrdTable();schedulePreview()}
 function catOrdVariantCount(){
   const cols=catOrdLockstepCols();
   return cols.length?Math.max(...cols.map(c=>c.values.length)):1}
@@ -12778,7 +12813,7 @@ function autoFillModelNoDown(){
   for(let vi=0;vi<n;vi++){
     if((modelCol.values[vi]||'').trim())continue;
     if(CAT_ORD_MODELNO_EXPLICIT_EMPTY.has(ci+':'+vi))continue;
-    const hasInfo=CAT_ORD_COLS.some(c=>c!==modelCol&&(c.values[vi]||'').trim());
+    const hasInfo=catOrdLockstepCols().some(c=>c!==modelCol&&(c.values[vi]||'').trim());
     if(!hasInfo)continue;
     for(let j=vi-1;j>=0;j--){
       if((modelCol.values[j]||'').trim()){modelCol.values[vi]=modelCol.values[j];break}
@@ -14215,13 +14250,37 @@ function renderCatOrdTable(){
     catOrdSortHtml()+
     '<button type=button class="dspill" onclick="completeCatOrdVariant()">'+escHtml(catOrdVariantLabel(vi))+' Complete →</button>'+
   '</div>';
+  tidyCatOrdSharedCols();
+  // "Same for every row": CCT / Beam Angle / Options typed once as a list,
+  // plus Finish Options (computed from Finish Colors, shown read-only here
+  // with a shortcut to edit the colors). None of these are per-row.
+  const sharedCols=CAT_ORD_COLS.map((c,ci)=>({c,ci})).filter(({c})=>isCatOrdSharedColumn(c.label)||(c.label||'').trim()==='Finish Options');
+  const sharedHtml=sharedCols.length?(
+    '<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:12px">'+
+      '<div style="font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Same for every row</div>'+
+      sharedCols.map(({c,ci})=>{
+        const isFinish=(c.label||'').trim()==='Finish Options';
+        const vals=c.values.length?c.values:[''];
+        const list=isFinish
+          ?'<div style="display:flex;flex-wrap:wrap;gap:4px">'+(CAT_FINISH.length?vals.map(v=>catOrdValueInput(ci,0,v,true,false,c.label,1)).join(''):'<span class=muted style="font-size:11px">No finish colors picked yet</span>')+'</div>'+
+            '<button type=button class=btn style="font-size:11px;padding:4px 9px;margin-top:4px" onclick="openCatFinishMenu(event)">Edit Finish Colors ▾</button>'
+          :'<div style="display:flex;flex-direction:column;gap:4px">'+
+              vals.map((v,i)=>catOrdValueInput(ci,i,v||'',false,vals.length>1||!!(v||'').trim(),c.label,vals.length)).join('')+
+            '</div>'+
+            '<button type=button class="dspill" style="margin-top:4px" onclick="addCatOrdSharedValue('+ci+')">+ Add '+escHtml(c.label||'value')+'</button>';
+        return '<div style="display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--line)">'+
+          '<div style="flex:0 0 120px;font-size:11px;color:var(--muted);padding-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(c.label||'(untitled)')+'</div>'+
+          '<div style="flex:1;min-width:0">'+list+'</div>'+
+        '</div>'}).join('')+
+    '</div>'):'';
   const rowsHtml=CAT_ORD_COLS.map((c,ci)=>{
+    if(isCatOrdSharedColumn(c.label)||(c.label||'').trim()==='Finish Options')return '';
     const isSpecial=CAT_ORD_SPECIAL_LABELS.includes((c.label||'').trim());
     return '<div style="display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--line)">'+
       '<div style="flex:0 0 120px;font-size:11px;color:var(--muted);padding-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(c.label||'(untitled)')+'</div>'+
       '<div style="flex:1;min-width:0">'+catOrdValueInput(ci,vi,c.values[vi]||'',isSpecial,false,c.label,1)+'</div>'+
     '</div>'}).join('');
-  $('cat-ord-table').innerHTML=fieldsHtml+navHtml+rowsHtml+
+  $('cat-ord-table').innerHTML=fieldsHtml+sharedHtml+navHtml+rowsHtml+
     '<div style="margin-top:10px">'+
       '<button type=button class=btn onclick="addCatOrdVariantAndFocus()">+ Add Variant</button>'+
     '</div>';

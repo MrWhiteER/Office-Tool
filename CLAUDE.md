@@ -2048,3 +2048,19 @@ that photo's Adjust panel; clicking a quotation item photo jumps to its item.
   (size-based). Also an Admin Tools button ("Update All Datasheets…",
   `POST /api/cat-rerender-all`). Bump `CAT_LAYOUT_VERSION` for any future
   layout change that existing datasheets should get.
+
+## Crafting table: CCT / Beam Angle / Finish Options / Options entered once (2026-11-19)
+
+- These four print as one merged cell for every row, so they're no longer
+  edited per row. A **Same for every row** box above the row tabs lists
+  each one's values (`+ Add CCT`, ▲▼ reorder, × remove). Finish Options is
+  read-only there with an "Edit Finish Colors ▾" shortcut.
+- `isCatOrdSharedColumn()` (CCT, Beam Angle, Options) is excluded from
+  `catOrdLockstepCols()`, so these lists don't drive the row count and are
+  untouched by add/remove/sort/drag of rows. Their `values` array is just
+  the list; saved data shape is unchanged.
+- `tidyCatOrdSharedCols()` (run on every render) drops blanks (except a
+  trailing one just added) and duplicates, which also cleans up older
+  datasheets that stored the same CCT on every row.
+- `removeCatOrdValue`/`moveCatOrdValue` were referenced by
+  `catOrdValueRowWrap` but never defined; they exist now.
