@@ -2131,3 +2131,8 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   saved datasheet is opened. `render_datasheet` in html_engine.py does the
   same fallback at print time for datasheets saved before this. A left zone
   that already has its own photo is never replaced.
+- The last ordering-table row now has its own bottom line when the table has
+  shared (merged) cells, and the empty filler area under it is plain white
+  with no column lines, so the last row reads as a closed box instead of
+  running on down beside a tall CCT/Finish list (SLMAR 16W report).
+  `CAT_LAYOUT_VERSION` 7.

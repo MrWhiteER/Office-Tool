@@ -1225,7 +1225,7 @@
            build_ordering_table), so "last item in this shortened list"
            and "last column in the table" are no longer always the same
            cell. -->
-      <div style="background:{{ row_bg }};font-size:9px;padding:3px 6.2px;min-width:0;{% if ordering_table.row_min_height_pt %}min-height:{{ '%.2f'|format(ordering_table.row_min_height_pt) }}pt;{% endif %}{% if not row_last %}border-bottom:1px solid #f0ece6;{% endif %}{% if cell.col_index < ordering_table.labels|length - 1 %}border-right:1px solid #f0ece6;{% endif %}">
+      <div style="background:{{ row_bg }};font-size:9px;padding:3px 6.2px;min-width:0;{% if ordering_table.row_min_height_pt %}min-height:{{ '%.2f'|format(ordering_table.row_min_height_pt) }}pt;{% endif %}{% if not row_last %}border-bottom:1px solid #f0ece6;{% elif ordering_table.merged %}border-bottom:1px solid #e3ddd4;{% endif %}{% if cell.col_index < ordering_table.labels|length - 1 %}border-right:1px solid #f0ece6;{% endif %}">
         <!-- A column like Cut Out/Lumen has no bold code of its own (see
              build_ordering_table's bold_flags) — its one value used to sit
              on the cell's FIRST line, one line higher than the grey value
@@ -1272,9 +1272,8 @@
       {% endfor %}
       {% endfor %}
       {% if ordering_table.merged and n_rows %}
-      {% set last_bg = '#f7f5f2' if (n_rows - 1) is even else '#ffffff' %}
       {% for cell in ordering_table.rows[-1] %}
-      <div style="background:{{ last_bg }};min-width:0;{% if cell.col_index < ordering_table.labels|length - 1 %}border-right:1px solid #f0ece6;{% endif %}"></div>
+      <div style="background:#ffffff;min-width:0;"></div>
       {% endfor %}
       {% endif %}
     </div>
