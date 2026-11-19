@@ -7287,7 +7287,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
                  letting the label itself break onto a 2nd line — see the
                  .f/.g2 min-width:0/minmax(0,1fr) fix (that class's own
                  comment) for the other half of this bug. -->
-            <label class=dvcheck style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);gap:3px;margin-top:4px;white-space:normal" title="Combine Top Left and Top Right into one wide zone, using Top Left's own photo — for a panoramic shot too wide/short to fit either square zone alone"><input type=checkbox id=cat-img-extra1-merged onchange="CAT_IMG.extra1.merged=this.checked;renderCatImages();schedulePreview()">Merge with Top Right (wide)</label>
+            <label class=dvcheck style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);gap:3px;margin-top:4px;white-space:normal" title="Combine Top Left and Top Right into one wide zone, using Top Left's own photo — for a panoramic shot too wide/short to fit either square zone alone"><input type=checkbox id=cat-img-extra1-merged onchange="setCatImgMerged('extra1',this.checked)">Merge with Top Right (wide)</label>
             <!-- Optional, only meaningful once Merge above is on and a
                  photo's been added — explicit request: instead of the
                  merged box always claiming its default height, size it to
@@ -7343,7 +7343,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
                  using its own photo/zoom/pan/mask as the combined wide
                  zone's content, Bottom Right's own upload simply
                  unused while this is on. -->
-            <label class=dvcheck style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);gap:3px;margin-top:4px;white-space:normal" title="Combine Bottom Left and Bottom Right into one wide zone, using Bottom Left's own photo — for a panoramic shot too wide/short to fit either square zone alone"><input type=checkbox id=cat-img-extra3-merged onchange="CAT_IMG.extra3.merged=this.checked;renderCatImages();schedulePreview()">Merge with Bottom Right (wide)</label>
+            <label class=dvcheck style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);gap:3px;margin-top:4px;white-space:normal" title="Combine Bottom Left and Bottom Right into one wide zone, using Bottom Left's own photo — for a panoramic shot too wide/short to fit either square zone alone"><input type=checkbox id=cat-img-extra3-merged onchange="setCatImgMerged('extra3',this.checked)">Merge with Bottom Right (wide)</label>
           </div>
           <div class=f>
             <label style="margin:0 0 4px;display:flex;align-items:center">Bottom Right<button type=button class=btn onclick="event.stopPropagation();openZoneSettings('diagram',this)" title="Placeholder & caption options" style="width:16px;height:16px;padding:0;border-radius:50%;font-size:9px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:5px">⚙</button></label>
@@ -12202,6 +12202,25 @@ function catImgTitle(slot){
   // migrating.
   if(slot==='diagram')return 'Bottom Right';
   return CAT_IMG[slot].label||CAT_IMG_EXTRA_POSITION[slot]||('Extra Zone '+slot.slice(-1))}
+// Merge prints only the LEFT zone's photo (extra1/extra3), wide. A photo that
+// only sits in the right zone (Top Right = extra2, Bottom Right = diagram)
+// used to vanish on merge — its picker is hidden and the PDF never uses it.
+// So when the left zone is empty, the right zone's photo (with its
+// zoom/pan/mask and caption) moves over into the left one; unmerging leaves
+// it on the left. A left zone that already has its own photo is untouched.
+const CAT_IMG_MERGE_PARTNER={extra1:'extra2',extra3:'diagram'};
+function catMoveMergePhoto(left){
+  const L=CAT_IMG[left],R=CAT_IMG[CAT_IMG_MERGE_PARTNER[left]];
+  if(!L||!R||!L.merged||L.src||!R.src)return false;
+  ['src','zoom','x','y','mask','maskAnchorX','maskAnchorY'].forEach(k=>{if(R[k]!==undefined)L[k]=R[k]});
+  if(!L.label&&R.label){L.label=R.label;R.label=''}
+  const right=CAT_IMG_MERGE_PARTNER[left];
+  CAT_IMG[right]=catImgDefaultForSlot(right,{label:R.label,show:!!R.show,placeholder:R.placeholder});
+  return true}
+function setCatImgMerged(left,on){
+  CAT_IMG[left].merged=!!on;
+  catMoveMergePhoto(left);
+  renderCatImages();schedulePreview()}
 let PHOTO_ADJUST_SLOT=null;
 function openPhotoAdjust(slot){
   if(!CAT_IMG[slot].src)return;
@@ -16025,6 +16044,7 @@ function populateCatForm(data){
     extra2:{src:data.extra_photo_2||'',zoom:data.extra_photo_2_zoom||1,x:data.extra_photo_2_x??50,y:data.extra_photo_2_y??50,mask:data.extra_photo_2_mask??100,maskAnchorX:data.extra_photo_2_mask_anchor_x??100,maskAnchorY:data.extra_photo_2_mask_anchor_y??100,label:data.extra_photo_2_label||'',show:!!data.extra_photo_2_show,placeholder:data.extra_photo_2_placeholder??true},
     extra3:{src:data.extra_photo_3||'',zoom:data.extra_photo_3_zoom||1,x:data.extra_photo_3_x??50,y:data.extra_photo_3_y??50,mask:data.extra_photo_3_mask??100,maskAnchorX:data.extra_photo_3_mask_anchor_x??100,maskAnchorY:data.extra_photo_3_mask_anchor_y??100,label:data.extra_photo_3_label||'',merged:!!data.extra_photo_3_merged,placeholder:data.extra_photo_3_placeholder??true}
   };
+  catMoveMergePhoto('extra1');catMoveMergePhoto('extra3');
   renderCatBadges();renderCatSpecs();renderCatFinish();renderCatOrdTable();renderCatImages()}
 function populateExpForm(data){
   // Mirrors collectExpData()'s shape — its own function rather than folding

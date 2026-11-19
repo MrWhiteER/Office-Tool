@@ -1680,6 +1680,19 @@ def render_datasheet_pdf(data, out_path, brand=None):
     # Dimension Diagram always show), so merging here only ever changes
     # what's INSIDE the row, never whether it renders at all.
     context["extra_bottom_merged"] = bool(data.get("extra_photo_3_merged"))
+    # A merged zone prints the LEFT photo only. If the left zone is empty but
+    # the right one (Top Right / Bottom Right) has a photo, print that one
+    # wide instead of an empty box. The editor moves it over on tick; this
+    # covers datasheets saved before that.
+    for _merged, _left, _right in (("extra_top_merged", "extra_photo_1", "extra_photo_2"),
+                                   ("extra_bottom_merged", "extra_photo_3", "dimension_diagram")):
+        if context[_merged] and not context[_left] and context[_right]:
+            for _suf in ("", "_zoom", "_x", "_y", "_mask", "_mask_anchor_x", "_mask_anchor_y"):
+                context[_left + _suf] = context[_right + _suf]
+            if not context.get(_left + "_label") and context.get(_right + "_label"):
+                context[_left + "_label"] = context[_right + "_label"]
+    if context["extra_top_merged"] and context["extra_photo_1"]:
+        context["extra_top_row_active"] = True
     context.setdefault("logo_src", _brand_logo_data_uri(brand))
     out = render_pdf("sololuce_datasheet.html", context, out_path)
     if data.get("fit_one_page"):

@@ -2122,3 +2122,12 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   first, so real rows keep their own height. Filler cells continue the
   last row's background; with no overflow the filler row is 0 tall.
   `CAT_LAYOUT_VERSION` 6.
+- Merge with Top/Bottom Right (2026-11-19): a merged zone prints only the
+  left photo (extra1 / extra3), so a photo sitting only in Top Right
+  (extra2) or Bottom Right (diagram) used to disappear on merge, both in
+  the left boxes and in the PDF. `setCatImgMerged()` / `catMoveMergePhoto()`
+  now move the right zone's photo (zoom/pan/mask, and caption if the left
+  has none) into the empty left zone when Merge is ticked, and also when a
+  saved datasheet is opened. `render_datasheet` in html_engine.py does the
+  same fallback at print time for datasheets saved before this. A left zone
+  that already has its own photo is never replaced.
