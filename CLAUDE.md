@@ -2070,3 +2070,35 @@ that photo's Adjust panel; clicking a quotation item photo jumps to its item.
   existing datasheets once more. The v2 run on 2026-11-19 took ~3 min for 30
   datasheets on PC-EDGAR (name order), so a datasheet opened before the job
   reached it still showed the old layout.
+
+## Updates download only the changed files (delta updates, 2026-11-19)
+
+Why updates were slow: every release's `OfficeTool-Payload.zip` is the whole
+PyInstaller build (~125MB, ~3,900 files), and the in-app updater downloaded
+and unpacked all of it every time. A normal release changes only a few files:
+v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
+`_internal/VERSION`), 14.6MB of the 125MB.
+
+- `update_checker._try_delta_stage` runs first in `download_and_stage_payload`.
+  It reads only the zip's central directory (the last 4MB, via HTTP Range),
+  compares each file's size + CRC32 with the installed copy in
+  `engine.DATA_BASE`, downloads only the byte ranges of changed files (8MB
+  pieces, nearby ranges merged), and builds `_update_staging` from hard links
+  (copy fallback) of unchanged installed files plus the new ones. The staging
+  folder is identical to a full extract, so `_swap_and_relaunch` and its
+  rollback are unchanged. No build.bat or release changes.
+- Falls back to the old full download when not frozen, when more than 60% of
+  the zip changed (e.g. a dependency upgrade), when the server ignores Range,
+  or on any error. Which path ran is logged in `last_inapp_update.log`.
+- GitHub's release CDN rejects suffix ranges (`bytes=-N` → 501), so the total
+  size comes from a `bytes=0-0` request first.
+- `Compress-Archive` writes backslash paths into the zip; member names are
+  normalised to `/`.
+- New progress phase `checking` (overlay text "Checking which files
+  changed…") before `downloading`.
+- Only installs that already run this code get delta updates: the first
+  release that contains it is still downloaded in full by older installs.
+- Verified in the cloud against the real v1.1.101 install → v1.1.102 payload:
+  14.6MB downloaded, ~3.5s, staging byte-identical to a full v1.1.102 extract;
+  a corrupted/missing installed file is re-downloaded; an install missing most
+  files falls back to the full download.

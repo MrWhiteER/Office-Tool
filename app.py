@@ -8928,7 +8928,13 @@ function showUpdateOverlay(){$('update-overlay').classList.add('show')}
 function hideUpdateOverlay(){$('update-overlay').classList.remove('show')}
 function updateOverlayProgress(status,done,total){
   const fill=$('update-overlay-fill'),text=$('update-overlay-text');
-  if(status==='downloading'){
+  if(status==='checking'){
+    // Delta update: comparing the new release's file list with this install
+    // (update_checker._try_delta_stage) before downloading only what changed.
+    const pct=total?Math.round(done/total*100):0;
+    fill.style.width=pct+'%';
+    text.textContent='Checking which files changed…'
+  }else if(status==='downloading'){
     const pct=total?Math.round(done/total*100):0;
     fill.style.width=pct+'%';
     text.textContent=total?('Downloading update — '+pct+'% ('+fmtMB(done)+' / '+fmtMB(total)+')'):'Downloading update…'

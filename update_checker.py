@@ -352,6 +352,254 @@ def _download_resumable(url, dest, on_progress=None):
     return dest
 
 
+# ---- Delta updates: download only the files that actually changed -------
+# Why updates used to be slow: every release ships the WHOLE app as one
+# ~125MB OfficeTool-Payload.zip (Python runtime, Playwright's driver,
+# PyMuPDF, botocore, numpy, static fonts/images...), and the updater
+# downloaded and unpacked all ~3,900 files every time, even though a normal
+# release only changes a handful of them. Measured on v1.1.101 -> v1.1.102:
+# 3 of 3,898 files differed (OfficeTool.exe, base_library.zip, VERSION),
+# 14.6MB of the 125MB zip.
+#
+# No build or release changes are needed for this: a zip's own central
+# directory (the index at the end of the file) already lists every file's
+# size and CRC32. GitHub release downloads support HTTP Range requests (the
+# resumable full download above already relies on that), so the updater
+# reads just that index, compares it with the files already installed,
+# fetches only the byte ranges of changed files, and builds the staging
+# folder from hard links (or copies) of the unchanged installed files plus
+# the freshly downloaded ones. The staging folder ends up identical to a
+# full extract, so _swap_and_relaunch() and its rollback are unchanged.
+# Anything unexpected (no Range support, a dev run, too much changed, any
+# error) falls back to the full download, so this can only make an update
+# faster, never break one.
+
+_DELTA_MAX_SHARE = 0.6          # more than this share of the zip changed -> just get the whole zip
+_DELTA_MERGE_GAP = 256 * 1024   # join nearby byte ranges into one request
+_DELTA_TAIL_BYTES = 4 * 1024 * 1024
+
+
+class _MissingRange(Exception):
+    pass
+
+
+class _SparseRemoteZip(object):
+    """Read-only, seekable file object over the parts of a remote zip that
+    have been downloaded so far (the central directory at the end, plus the
+    byte ranges of changed files). Reading anywhere else raises
+    _MissingRange, which can only mean a bug in the range maths; the caller
+    then falls back to the full download."""
+
+    def __init__(self, total):
+        self.total = total
+        self.chunks = []  # [(start, bytes)]
+        self.pos = 0
+
+    def add(self, start, data):
+        self.chunks.append((start, data))
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, offset, whence=0):
+        if whence == 0:
+            self.pos = offset
+        elif whence == 1:
+            self.pos += offset
+        else:
+            self.pos = self.total + offset
+        return self.pos
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = self.total - self.pos
+        n = max(0, min(n, self.total - self.pos))
+        out = []
+        while n > 0:
+            for start, data in self.chunks:
+                if start <= self.pos < start + len(data):
+                    piece = data[self.pos - start:self.pos - start + n]
+                    out.append(piece)
+                    self.pos += len(piece)
+                    n -= len(piece)
+                    break
+            else:
+                raise _MissingRange("byte {} of the update was not downloaded".format(self.pos))
+        return b"".join(out)
+
+    def close(self):
+        pass
+
+
+def _http_range(url, start, end, timeout=60):
+    """Bytes start..end (inclusive) of url. Raises unless the server really
+    answered with that range (206), so a server that ignores Range can never
+    be mistaken for the requested bytes."""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "OfficeTool-UpdateChecker",
+        "Range": "bytes={}-{}".format(start, end),
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        status = getattr(resp, "status", None) or resp.getcode()
+        if status != 206:
+            raise RuntimeError("server ignored the Range request (HTTP {})".format(status))
+        content_range = resp.headers.get("Content-Range", "") or ""
+        data = resp.read()
+    if len(data) != end - start + 1:
+        raise RuntimeError("short range read ({} of {} bytes)".format(len(data), end - start + 1))
+    return data, content_range
+
+
+def _remote_size(url):
+    _, content_range = _http_range(url, 0, 0)
+    m = re.search(r"/(\d+)\s*$", content_range)
+    if not m:
+        raise RuntimeError("no Content-Range total from server")
+    return int(m.group(1))
+
+
+def _local_file_matches(path, size, crc):
+    try:
+        if os.path.getsize(path) != size:
+            return False
+        import zlib
+        value = 0
+        with open(path, "rb") as f:
+            while True:
+                block = f.read(1024 * 1024)
+                if not block:
+                    break
+                value = zlib.crc32(block, value)
+        return (value & 0xFFFFFFFF) == crc
+    except OSError:
+        return False
+
+
+def _link_or_copy(src, dst):
+    """Hard link when possible (instant, no extra disk space; safe because
+    the swap only ever renames/replaces whole files, never writes into one),
+    a normal copy otherwise."""
+    import shutil
+    try:
+        os.link(src, dst)
+    except Exception:
+        shutil.copy2(src, dst)
+
+
+def _try_delta_stage(download_url, install_dir, staging_dir, on_progress=None):
+    """Builds staging_dir from the installed files plus only the changed
+    files of the remote payload zip. Returns True when staging_dir is ready,
+    or False when a delta isn't worth it / isn't possible here (the caller
+    then does the normal full download). May also raise; the caller treats
+    that as False too."""
+    import sys
+    import shutil
+    import zipfile
+
+    if not getattr(sys, "frozen", False):
+        return False
+    if not os.path.isfile(os.path.join(install_dir, "OfficeTool.exe")):
+        return False
+
+    if on_progress:
+        on_progress("checking", 0, 0)
+
+    total = _remote_size(download_url)
+    src = _SparseRemoteZip(total)
+    tail_start = max(0, total - _DELTA_TAIL_BYTES)
+    tail, _ = _http_range(download_url, tail_start, total - 1)
+    src.add(tail_start, tail)
+    zf = zipfile.ZipFile(src)  # reads only the central directory, all inside `tail`
+    members = zf.infolist()
+    # Compress-Archive (build.bat) writes backslash paths; Python on Windows
+    # already turns them into "/", this just makes sure of it.
+    for m in members:
+        m.filename = m.filename.replace("\\", "/")
+    files = [m for m in members if not m.is_dir()]
+
+    # Compare every file in the new release with what's installed now.
+    changed = []
+    for i, m in enumerate(files, 1):
+        name = m.filename
+        local = os.path.join(install_dir, *name.split("/"))
+        if not _local_file_matches(local, m.file_size, m.CRC):
+            changed.append(m)
+        if on_progress and i % 50 == 0:
+            on_progress("checking", i, len(files))
+
+    # Each file's bytes in the zip run from its local header up to the next
+    # file's header (or the central directory).
+    starts = sorted(set([m.header_offset for m in members] + [zf.start_dir]))
+    next_start = {a: b for a, b in zip(starts, starts[1:])}
+    spans = sorted((m.header_offset, next_start.get(m.header_offset, zf.start_dir) - 1)
+                   for m in changed)
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1] + 1 + _DELTA_MERGE_GAP:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    need = [(a, b) for a, b in merged if not (a >= tail_start)]
+    to_get = sum(b - a + 1 for a, b in need)
+    if to_get > total * _DELTA_MAX_SHARE:
+        return False
+
+    done = 0
+    if on_progress:
+        on_progress("downloading", 0, to_get)
+    for a, b in need:
+        # Pieces of at most 8MB so the progress bar moves and a dropped
+        # connection only costs one piece.
+        pos = a
+        while pos <= b:
+            end = min(b, pos + 8 * 1024 * 1024 - 1)
+            data, _ = _http_range(download_url, pos, end)
+            src.add(pos, data)
+            done += len(data)
+            pos = end + 1
+            if on_progress:
+                on_progress("downloading", done, to_get)
+
+    if os.path.isdir(staging_dir):
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    changed_names = set(m.filename for m in changed)
+    for i, m in enumerate(members, 1):
+        name = m.filename
+        parts = [p for p in name.split("/") if p not in ("", ".", "..")]
+        if not parts:
+            continue
+        dest = os.path.join(staging_dir, *parts)
+        if m.is_dir():
+            os.makedirs(dest, exist_ok=True)
+        elif m.filename in changed_names:
+            zf.extract(m, staging_dir)  # CRC is checked while reading
+        else:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            _link_or_copy(os.path.join(install_dir, *parts), dest)
+        if on_progress and (i % 50 == 0 or i == len(members)):
+            on_progress("extracting", i, len(members))
+
+    if not os.path.isfile(os.path.join(staging_dir, "OfficeTool.exe")):
+        raise RuntimeError("delta staging is missing OfficeTool.exe")
+    return True
+
+
+def _log_update(msg):
+    try:
+        with open(os.path.join(engine.DATA_BASE, "last_inapp_update.log"), "a", encoding="utf-8") as f:
+            f.write("{}  {}\n".format(time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
 _MIN_VALID_PAYLOAD_BYTES = 10 * 1024 * 1024  # a real payload zip is tens of MB+; anything smaller is a bad/partial download
 
 
@@ -378,6 +626,16 @@ def download_and_stage_payload(download_url, target_version=None, on_progress=No
     reusable on retry instead of costing the user another 80MB+ fetch.
     """
     os.makedirs(UPDATE_CACHE_DIR, exist_ok=True)
+
+    # Fast path: only the files that changed (see _try_delta_stage above).
+    try:
+        if _try_delta_stage(download_url, engine.DATA_BASE, UPDATE_STAGING_DIR, on_progress=on_progress):
+            _log_update("delta update staged (only changed files downloaded)")
+            return UPDATE_STAGING_DIR
+        _log_update("delta update not used, downloading the full payload")
+    except Exception as e:
+        _log_update("delta update failed ({}), downloading the full payload".format(e))
+
     zip_path = _cached_payload_path(target_version) if target_version else \
         os.path.join(UPDATE_CACHE_DIR, "OfficeTool-Payload-latest.zip")
 
@@ -570,7 +828,8 @@ def _swap_and_relaunch(staging_dir):
 # (this app only ever runs one update at a time) polled via
 # /api/apply-update-progress while start_inapp_update_async() does the
 # real work on a background thread. status cycles through:
-#   "downloading" -> "extracting" -> "installing" -> (process exits)
+#   ["checking" ->] "downloading" -> "extracting" -> "installing" -> (process exits)
+# ("checking" only for a delta update, see _try_delta_stage.)
 # "installing" is the signal to the frontend that the window is about to
 # vanish and reappear on its own — see actuallyInstallUpdate()'s poll
 # loop for how it turns that into "hold on, restarting..." instead of
