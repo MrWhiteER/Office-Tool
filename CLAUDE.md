@@ -2064,3 +2064,9 @@ that photo's Adjust panel; clicking a quotation item photo jumps to its item.
   datasheets that stored the same CCT on every row.
 - `removeCatOrdValue`/`moveCatOrdValue` were referenced by
   `catOrdValueRowWrap` but never defined; they exist now.
+- `build_ordering_table` skips a row whose every per-row cell is blank (or
+  just "—"), e.g. LOTTA's leftover 8th row from when finishes were one per
+  row. `CAT_LAYOUT_VERSION` bumped to 3 so the next release re-renders
+  existing datasheets once more. The v2 run on 2026-11-19 took ~3 min for 30
+  datasheets on PC-EDGAR (name order), so a datasheet opened before the job
+  reached it still showed the old layout.

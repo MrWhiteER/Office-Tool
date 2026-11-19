@@ -1274,6 +1274,10 @@ def build_ordering_table(raw_cols, default_weights=None, align_rows=False):
         # a second page. Computed once per row (not per cell) since it's a
         # row-wide question — does ANY cell here need the second line — not
         # a per-cell one.
+        # A row with nothing in any per-row cell is a leftover blank variant
+        # (e.g. from when finish colours were one per row) — don't print it.
+        if all(not "".join([c["first"]] + c["rest"]).strip(" -\u2014") for c in row):
+            continue
         row_needs_second_line = any(c["bold"] and c["rest"] for c in row)
         for cell in row:
             if not cell["bold"]:
