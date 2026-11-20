@@ -1674,6 +1674,18 @@ def render_datasheet_pdf(data, out_path, brand=None):
         context["extra_top_autosize_h"] = int(data.get("extra_photo_1_autosize_h") or 0)
     except (TypeError, ValueError):
         context["extra_top_autosize_h"] = 0
+    # Photo rows split (Edy, 2026-11-20): 0 = standard layout (top row
+    # grows first, capped at 220px), the editor's checkbox off. 15-50 = the
+    # top row (Top Left/Right)
+    # gets that % of the photo area's height and the bottom row
+    # (Bottom Left/Right) the rest, so short accessory strips on top leave
+    # room for a bigger picture below. Wins over the merged top row's
+    # auto-size when set.
+    try:
+        split = int(float(data.get("photo_rows_split") or 0))
+    except (TypeError, ValueError):
+        split = 0
+    context["photo_rows_split"] = max(15, min(50, split)) if split else 0
     # Same merge, same reasoning, one row down — Bottom Left (extra_photo_3)
     # + Dimension Diagram this time. Unlike the top row, this bottom row is
     # never skipped/collapsed regardless of merge state (Bottom Left +

@@ -7350,6 +7350,17 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);b
             <div id=cat-img-diagram></div>
           </div>
         </div>
+        <!-- Photo rows split (photo_rows_split, html_engine.py): give the
+             bottom row more height when the top row only holds short
+             strips (reflectors/accessories). -->
+        <div class=f style="margin-top:8px">
+          <label class=dvcheck style="gap:6px;white-space:normal" title="When ticked, making the bottom row bigger makes Top Left/Top Right smaller by the same amount. When off, the photo areas keep their standard sizes."><input type=checkbox id=cat-photo-rows-linked onchange="onCatPhotoRowsChange()">Bigger bottom photos (shrinks Top Left/Right)</label>
+          <div id=cat-photo-rows-sliderwrap class=hide style="display:none;align-items:center;gap:8px;margin-top:6px">
+            <span style="font-size:11px;color:var(--muted);white-space:nowrap">Bottom row</span>
+            <input type=range id=cat-photo-rows-bottom min=50 max=85 step=5 value=70 oninput="onCatPhotoRowsChange()" style="flex:1">
+            <span id=cat-photo-rows-label style="font-size:11px;font-weight:600;white-space:nowrap;min-width:110px">Top 30% / Bottom 70%</span>
+          </div>
+        </div>
         </div>
       </div>
 
@@ -10463,6 +10474,7 @@ function resetCatForm(){
   $('cat-producttype').value='';
   renderCatSeriesField('');
   $('cat-fit-one-page').checked=false;
+  setCatPhotoRows(0,70);
   $('cat-family-enabled').checked=false;
   $('cat-family-details').classList.add('hide');
   renderCatFamilyField('');
@@ -14619,6 +14631,23 @@ async function saveCatOrdWidthsAsStandard(){
   if(r.error){alert(r.error);return}
   toast('Saved as the standard column widths — new datasheets start from this')}
 
+// Photo rows split (Edy, 2026-11-20): checkbox off = standard sizes
+// (photo_rows_split 0); on = the slider sets the bottom row's share and
+// the top row gets the rest (photo_rows_split = top %).
+function catPhotoRowsSplit(){
+  const on=$('cat-photo-rows-linked')&&$('cat-photo-rows-linked').checked;
+  return on?100-(parseInt($('cat-photo-rows-bottom').value,10)||70):0}
+function onCatPhotoRowsChange(skipPreview){
+  const on=$('cat-photo-rows-linked').checked;
+  const b=parseInt($('cat-photo-rows-bottom').value,10)||70;
+  $('cat-photo-rows-sliderwrap').classList.toggle('hide',!on);
+  $('cat-photo-rows-sliderwrap').style.display=on?'flex':'none';
+  $('cat-photo-rows-label').textContent='Top '+(100-b)+'% / Bottom '+b+'%';
+  if(!skipPreview)schedulePreview()}
+function setCatPhotoRows(split,bottom){
+  $('cat-photo-rows-linked').checked=!!split;
+  $('cat-photo-rows-bottom').value=String(split?100-split:(bottom||70));
+  onCatPhotoRowsChange(true)}
 function collectCatData(){
   // Recomputed here (not just on blur) so Generate/the live preview always
   // reflects the current Power/Luminare Efficacy/Finish Colors even if the
@@ -14669,6 +14698,8 @@ function collectCatData(){
     ordering_columns:CAT_ORD_COLS.map(c=>({label:c.label,values:c.values,width:c.width||undefined})),
     ordering_align_rows:!!CAT_ORD_ALIGN_ROWS,
     fit_one_page:!!($('cat-fit-one-page')&&$('cat-fit-one-page').checked),
+    photo_rows_split:catPhotoRowsSplit(),
+    photo_rows_bottom:parseInt($('cat-photo-rows-bottom').value,10)||70,
   }}
 
 // ---------------------------------------------------------------- Import from PDF (Sololuce Datasheets only)
@@ -16095,6 +16126,7 @@ function populateCatForm(data){
   $('cat-producttype').value=data.product_type||'';
   if(data.page_number)$('cat-pagenum').value=data.page_number;else loadCatNextPage();
   $('cat-fit-one-page').checked=!!data.fit_one_page;
+  setCatPhotoRows(Math.max(15,Math.min(50,parseInt(data.photo_rows_split,10)||0))*(data.photo_rows_split?1:0),parseInt(data.photo_rows_bottom,10)||70);
   $('cat-description').value=data.description||'';
   CAT_DESC_STYLE=data.description_style?{...CAT_DESC_STYLE_DEFAULT,...data.description_style}:{...CAT_DESC_STYLE_DEFAULT};
   applyCatDescStyle();
@@ -18690,7 +18722,7 @@ threading.Thread(target=_accounts_sync_loop, daemon=True).start()
 # other PC then just downloads the new PDFs through the normal 30s sync.
 # The originals are copied to DATA_BASE/_datasheet_backups/<time>/ on that
 # PC first (outside cloud_documents, so the backup itself never syncs).
-CAT_LAYOUT_VERSION = 9   # 2: Finish Options/Options grouped like CCT; 3: no fully blank rows; 4: finish labels max 2 lines; 5: Size header follows L×W×H vs Ø×H; 6: rows not stretched by shared cells; 7: last row closed with a bottom line; 8: Controls is a shared merged cell; 9: area under last row takes the next row colour (2026-11-19)
+CAT_LAYOUT_VERSION = 10  # 2: Finish Options/Options grouped like CCT; 3: no fully blank rows; 4: finish labels max 2 lines; 5: Size header follows L×W×H vs Ø×H; 6: rows not stretched by shared cells; 7: last row closed with a bottom line; 8: Controls is a shared merged cell; 9: area under last row takes the next row colour (2026-11-19); 10: optional Bigger bottom photos row split (2026-11-20)
 CAT_LAYOUT_MARKER_KEY = "system/cat_layout_version.json"
 CAT_LAYOUT_CLAIM_SECS = 45 * 60
 

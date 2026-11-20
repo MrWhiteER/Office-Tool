@@ -963,7 +963,7 @@
              sort out, since the unmerged branch renders TWO photos in this
              same row; querying "the merged photo" only makes sense once
              extra_top_merged has actually collapsed it down to one. -->
-        <div id=rspt-top-row data-autosize="{{ '1' if (extra_top_autosize and extra_top_merged) else '' }}" data-autosize-h="{{ extra_top_autosize_h if (extra_top_autosize_h and extra_top_merged) else '' }}" style="flex-grow:9999;flex-shrink:1;flex-basis:106px;max-height:220px;min-height:0;display:flex;gap:8px;">
+        <div id=rspt-top-row data-autosize="{{ '1' if (extra_top_autosize and extra_top_merged and not photo_rows_split) else '' }}" data-autosize-h="{{ extra_top_autosize_h if (extra_top_autosize_h and extra_top_merged and not photo_rows_split) else '' }}" style="{% if photo_rows_split %}flex:{{ photo_rows_split }} 1 0px;{% else %}flex-grow:9999;flex-shrink:1;flex-basis:106px;max-height:220px;{% endif %}min-height:0;display:flex;gap:8px;">
           {% if extra_top_merged %}
           <!-- Both text sources for this merged zone — the caption ABOVE
                the box (extra_photo_1_label) and the empty-state text
@@ -1037,7 +1037,7 @@
              outer div regardless of merge state — the JS alignment fix
              below (window.__panReady's alignRsptBottomRow) needs it
              either way, merged single-cell row or not. -->
-        <div id=rspt-bottom-row style="flex-grow:1;flex-shrink:9999;flex-basis:159px;min-height:0;display:flex;gap:8px;">
+        <div id=rspt-bottom-row style="{% if photo_rows_split %}flex:{{ 100 - photo_rows_split }} 1 0px;{% else %}flex-grow:1;flex-shrink:9999;flex-basis:159px;{% endif %}min-height:0;display:flex;gap:8px;">
           {% if extra_bottom_merged %}
           <!-- No automatic fallback text here either, same reversal as
                Top Left/Top Right's own merged case above (see that div's

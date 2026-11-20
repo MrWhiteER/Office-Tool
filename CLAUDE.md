@@ -2165,3 +2165,16 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   in Manage Lists; `catHistView`/`catSpecHistView` only filter them for
   display. Standard Fill still uses the full lists. No PDF change, so no
   `CAT_LAYOUT_VERSION` bump.
+
+## Datasheet: "Bigger bottom photos" row split (2026-11-20)
+
+- Photos section checkbox **Bigger bottom photos (shrinks Top Left/Right)**
+  (`#cat-photo-rows-linked`) plus a **Bottom row** slider (50-85%,
+  `#cat-photo-rows-bottom`). Saved as `photo_rows_split` (top row's %, 0 when
+  off) and `photo_rows_bottom` (slider position, kept while off).
+- `html_engine` clamps the split to 15-50. When set, `#rspt-top-row` /
+  `#rspt-bottom-row` use `flex:<top> 1 0` / `flex:<100-top> 1 0` instead of
+  the standard rules (top row grows first, max 220px), and the merged top
+  row's auto-size is ignored. Off renders pixel-identical to before. Made
+  for ORMA TRIM: thin reflector/accessory strips on top left the wide
+  dimension drawing small in a short bottom box. `CAT_LAYOUT_VERSION` 10.
