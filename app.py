@@ -10470,6 +10470,7 @@ function resetCatForm(){
   CAT_BADGES=CAT_STANDARD_BADGE_KEYS.map(key=>({key}));
   CAT_SPECS=CAT_DEFAULT_SPEC_LABELS.map(label=>({label,values:['']}));
   CAT_FINISH=[];CAT_COL_SEQ=0;CAT_ORD_COL_CLIPBOARD=null;CAT_ORD_CURRENT_VARIANT=0;CAT_ORD_ALIGN_ROWS=false;
+  CAT_INPUT_HISTORY={};
   CAT_ORD_COLS=CAT_DEFAULT_ORD_LABELS.map(label=>({key:'col'+(CAT_COL_SEQ++),label,values:['']}));
   // catImgDefaultForSlot: Dimension Diagram gets its own default zoom/pan
   // here (see that function's own comment) — every other slot the plain
@@ -10849,6 +10850,73 @@ let CAT_IMG={main:catImgDefaultForSlot('main'),lifestyle:catImgDefaultForSlot('l
 // as one coherent product variant — lockstep just makes the input form
 // guarantee that instead of leaving it to coincidence.
 let CAT_ORD_COLS=[];
+// Per-datasheet input history (Edy, 2026-11-20): the Ordering Table and
+// Technical Specifications dropdowns used to list every value ever typed on
+// ANY datasheet (dozens of sizes from other products). Now each dropdown
+// shows only the built-in presets plus what was entered on THIS datasheet.
+// CAT_INPUT_HISTORY {kind: [normalized values]} is saved with the datasheet
+// (input_history) and grows from whatever its boxes hold (catHistCollect,
+// run on every render), so a value replaced later stays pickable here. The
+// catalogue-wide lists in config.json still grow as before (Settings >
+// Manage Lists), they're just filtered here.
+let CAT_INPUT_HISTORY={};
+const CAT_HIST_SEEDS={
+  cct:['2700','3000','3500','4000','5000','6000','6500'],
+  controls:['DALI','0-10V','Phase Dim','Non-Dimmable'],
+  voltage:['12V DC','24V DC','48V DC','100-240V','110-120V','220-240V','380-415V'],
+  power:Array.from({length:40},(_,i)=>(i+1)+'W'),
+  beamangle:['15°','24°','36°','38°','45°','60°','90°','100°','120°'],
+};
+const CAT_SPEC_HIST_SEEDS={
+  lightsource:['COB','SMD'],powerfactor:['>0.9'],
+  iprating:['IP20','IP44','IP54','IP65','IP66','IP67','IP68'],
+  bodymaterial:['Die Cast','Aluminium','GRP','Polycarbonate','Stainless Steel'],
+  diffuser:['Polycarbonate','Tempered Glass','Acrylic','Aluminium','PMMA Opal'],
+  mountingtype:['Surface Mounted','Recessed','Suspended','Wall Mounted','Track Mounted','Pole Mounted','Ground Recessed','Pendant'],
+  ambienttemperature:['± 5 °C','± 10 °C','± 20 °C','± 25 °C'],
+  luminareefficacy:['100 lm/W','110 lm/W','120 lm/W','130 lm/W','150 lm/W'],
+  lifespan:['30,000 Hrs','50,000 Hrs','70,000 Hrs'],
+};
+const CAT_HIST_KINDS=['cct','controls','voltage','power','beamangle','modelno','options','cutout','size'];
+// Normalizes a preset/option string the same way that column's own cell
+// builder compares it with a cell value.
+function catHistNormOpt(kind,o){
+  o=String(o||'').trim();
+  if(kind==='cct')return o.replace(/\s*K$/i,'').trim();
+  if(kind==='voltage')return voltageShortCode(o);
+  if(kind==='size')return stripCatOrdSizeMm(o);
+  if(kind==='power'||kind==='beamangle'||kind==='cutout')return o.replace(/\s+/g,'');
+  return o}
+// Same, from a stored cell value (two-line "code\nfull" values included).
+function catHistNormVal(kind,v){
+  v=String(v||'');
+  if(kind==='cct')return catHistNormOpt(kind,cctFullSpecOf(v));
+  if(kind==='controls')return controlsFullSpecOf(v).trim();
+  if(kind==='voltage'){const f=voltageFullSpecOf(v).trim();return f?voltageShortCode(f):''}
+  if(kind==='size')return stripCatOrdSizeMm(sizeFullSpecOf(v));
+  return catHistNormOpt(kind,v)}
+function catHistKindOfCol(c){
+  for(const k of CAT_HIST_KINDS){const d=CAT_STANDARD_FILL_DEFS[k];if(d&&d.match(c))return k}
+  return null}
+function catHistAdd(kind,norm){
+  if(!norm||norm==='—')return;
+  const a=CAT_INPUT_HISTORY[kind]||(CAT_INPUT_HISTORY[kind]=[]);
+  if(!a.includes(norm))a.push(norm)}
+function catHistCollect(){
+  (CAT_ORD_COLS||[]).forEach(c=>{
+    const k=catHistKindOfCol(c);if(!k)return;
+    (c.values||[]).forEach(v=>catHistAdd(k,catHistNormVal(k,v)))});
+  (CAT_SPECS||[]).forEach(s=>{
+    const key=normSpecLabel(s.label);if(!key)return;
+    (s.values||[]).forEach(v=>catHistAdd('spec:'+key,String(v||'').trim()))})}
+function catHistView(kind,list){
+  const seeds=(CAT_HIST_SEEDS[kind]||[]).map(o=>catHistNormOpt(kind,o));
+  const hist=CAT_INPUT_HISTORY[kind]||[];
+  return (list||[]).filter(o=>{const n=catHistNormOpt(kind,o);return seeds.includes(n)||hist.includes(n)})}
+function catSpecHistView(key,list){
+  const seeds=CAT_SPEC_HIST_SEEDS[key]||[];
+  const hist=CAT_INPUT_HISTORY['spec:'+key]||[];
+  return (list||[]).filter(o=>seeds.includes(o)||hist.includes(o))}
 let CAT_COL_SEQ=0;
 // Ordering Table field clipboard — separately named from the existing
 // document-level CLIPBOARD/CTXROW/fmCopy/fmCut/fmPaste (used for whole
@@ -11300,7 +11368,7 @@ let CAT_SPEC_VALUE_CUSTOM=new Set();
 function catSpecValueCellHtml(i,vi,s){
   const key=normSpecLabel(s.label);
   if(key==='power')return catSpecPowerCellHtml(i,vi,s);
-  const known=CAT_SPEC_VALUES[key]||[];
+  const known=catSpecHistView(key,CAT_SPEC_VALUES[key]||[]);
   const v=s.values[vi]||'';
   const ckey=i+':'+vi;
   const customMode=!known.length||CAT_SPEC_VALUE_CUSTOM.has(ckey)||(v&&!known.includes(v));
@@ -11335,7 +11403,7 @@ let CAT_SPEC_POWER_CUSTOM=new Set();
 function catSpecPowerCellHtml(i,vi,s){
   const v=s.values[vi]||'';
   const normV=catOrdPowerNorm(v);
-  const options=catPowerOptionsOrdered();
+  const options=catHistView('power',catPowerOptionsOrdered());
   const ckey=i+':'+vi;
   const customMode=CAT_SPEC_POWER_CUSTOM.has(ckey)||(v&&!options.some(o=>catOrdPowerNorm(o)===normV));
   if(customMode)
@@ -11473,6 +11541,7 @@ function specValueDrop(e,i,targetVi){
   if(normSpecLabel(s.label)==='power')syncOrderingPowerFromSpec(v);
   renderCatSpecs();schedulePreview()}
 function renderCatSpecs(){
+  catHistCollect();
   $('cat-specs-rows').innerHTML=CAT_SPECS.map((s,i)=>
     '<div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px">'+
       '<input style="flex:1" list=catspeclabels placeholder="Label, e.g. Power" value="'+escHtml(s.label||'')+'" oninput="CAT_SPECS['+i+'].label=this.value;recomputeCatAutoBadges();renderCatBadges();schedulePreview()" onblur="rememberCatSpecLabel(this.value);renderCatSpecs();schedulePreview()">'+
@@ -13245,15 +13314,16 @@ let CAT_ORD_SIZE_CUSTOM=new Set();
 // this PRODUCT's own, decided by recomputeCatOrdSizeDNumbers above, not a
 // property of the size itself worth advertising in a cross-product list).
 function catOrdSizeCellHtml(ci,vi,val,canRemove,total){
+  const SZ=catHistView('size',CAT_SIZE_INDEX);
   const raw=stripCatOrdSizeMm(sizeFullSpecOf(val));
   const key=ci+':'+vi;
-  const customMode=!CAT_SIZE_INDEX.length||CAT_ORD_SIZE_CUSTOM.has(key)||(raw&&!CAT_SIZE_INDEX.some(o=>stripCatOrdSizeMm(o)===raw));
+  const customMode=!SZ.length||CAT_ORD_SIZE_CUSTOM.has(key)||(raw&&!SZ.some(o=>stripCatOrdSizeMm(o)===raw));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. 120×60" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdSizeBlur('+ci+','+vi+',this)">'+escHtml(raw)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_SIZE_INDEX.map(o=>{
+    SZ.map(o=>{
       const or=stripCatOrdSizeMm(o);
       return '<option value="'+escHtml(o)+'"'+(or===raw?' selected':'')+'>'+escHtml(or)+'</option>'}).join('')+
     '<option value="__empty__">Empty</option>'+
@@ -13328,16 +13398,17 @@ function cctShortCode(fullSpec){
   const m=(fullSpec||'').match(/(\d+)/);
   return m?String(Math.round(parseInt(m[1],10)/100)):''}
 function catOrdCctCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('cct',CAT_ORD_CCT_OPTIONS);
   const full=cctFullSpecOf(val).trim();
   const digits=full.replace(/\s*K$/i,'').trim();
   const key=ci+':'+vi;
-  const customMode=CAT_ORD_CCT_CUSTOM.has(key)||(full&&!CAT_ORD_CCT_OPTIONS.includes(digits));
+  const customMode=CAT_ORD_CCT_CUSTOM.has(key)||(full&&!HV.includes(digits));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. 3450K" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdCctCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_ORD_CCT_OPTIONS.map(o=>'<option value="'+o+' K"'+(digits===o?' selected':'')+'>'+o+' K</option>').join('')+
+    HV.map(o=>'<option value="'+o+' K"'+(digits===o?' selected':'')+'>'+o+' K</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -13412,15 +13483,16 @@ function controlsShortCode(full){
   if(known[full])return known[full];
   return (full||'').split(/\s+/).map(w=>w[0]||'').join('').toUpperCase().slice(0,4)||'?'}
 function catOrdControlsCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('controls',CAT_ORD_CONTROLS_OPTIONS);
   const full=controlsFullSpecOf(val).trim();
   const key=ci+':'+vi;
-  const customMode=CAT_ORD_CONTROLS_CUSTOM.has(key)||(full&&!CAT_ORD_CONTROLS_OPTIONS.includes(full));
+  const customMode=CAT_ORD_CONTROLS_CUSTOM.has(key)||(full&&!HV.includes(full));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. Push Dim" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdControlsCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_ORD_CONTROLS_OPTIONS.map(o=>'<option value="'+escHtml(o)+'"'+(full===o?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
+    HV.map(o=>'<option value="'+escHtml(o)+'"'+(full===o?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -13490,6 +13562,7 @@ function voltageFullSpecOf(val){
 function voltageShortCode(full){
   return (full||'').replace(/\s*(V\s*DC|V\s*AC|VDC|VAC|DC|AC|V)\s*$/i,'').trim()||'?'}
 function catOrdVoltageCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('voltage',CAT_ORD_VOLTAGE_OPTIONS);
   const full=voltageFullSpecOf(val).trim();
   const key=ci+':'+vi;
   // Compared via voltageShortCode (strips a trailing unit token) rather than
@@ -13497,13 +13570,13 @@ function catOrdVoltageCellHtml(ci,vi,val,canRemove,total){
   // existed is missing the "V"/"DC" unit entirely (e.g. "220-240" instead of
   // "220-240V"), and would otherwise never match its own preset.
   const normFull=voltageShortCode(full);
-  const customMode=CAT_ORD_VOLTAGE_CUSTOM.has(key)||(full&&!CAT_ORD_VOLTAGE_OPTIONS.some(o=>voltageShortCode(o)===normFull));
+  const customMode=CAT_ORD_VOLTAGE_CUSTOM.has(key)||(full&&!HV.some(o=>voltageShortCode(o)===normFull));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. 36V DC" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdVoltageCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_ORD_VOLTAGE_OPTIONS.map(o=>'<option value="'+escHtml(o)+'"'+(voltageShortCode(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
+    HV.map(o=>'<option value="'+escHtml(o)+'"'+(voltageShortCode(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -13582,16 +13655,17 @@ function isCatOrdPowerColumn(label){return normSpecLabel(label)==='power'}
 // falling into custom mode over an invisible-character mismatch.
 function catOrdPowerNorm(s){return (s||'').replace(/\s+/g,'')}
 function catOrdPowerCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('power',CAT_ORD_POWER_OPTIONS);
   const full=(val||'').trim();
   const normFull=catOrdPowerNorm(full);
   const key=ci+':'+vi;
-  const customMode=CAT_ORD_POWER_CUSTOM.has(key)||(full&&!CAT_ORD_POWER_OPTIONS.some(o=>catOrdPowerNorm(o)===normFull));
+  const customMode=CAT_ORD_POWER_CUSTOM.has(key)||(full&&!HV.some(o=>catOrdPowerNorm(o)===normFull));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. 15W" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdPowerCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    catPowerOptionsOrdered().map(o=>'<option value="'+escHtml(o)+'"'+(catOrdPowerNorm(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
+    catHistView('power',catPowerOptionsOrdered()).map(o=>'<option value="'+escHtml(o)+'"'+(catOrdPowerNorm(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -13682,16 +13756,17 @@ function isCatOrdBeamAngleColumn(label){return normSpecLabel(label)==='beamangle
 // dropdown column in this file already owns its compare function.
 function catOrdBeamAngleNorm(s){return (s||'').replace(/\s+/g,'')}
 function catOrdBeamAngleCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('beamangle',CAT_ORD_BEAMANGLE_OPTIONS);
   const full=(val||'').trim();
   const normFull=catOrdBeamAngleNorm(full);
   const key=ci+':'+vi;
-  const customMode=CAT_ORD_BEAMANGLE_CUSTOM.has(key)||(full&&!CAT_ORD_BEAMANGLE_OPTIONS.some(o=>catOrdBeamAngleNorm(o)===normFull));
+  const customMode=CAT_ORD_BEAMANGLE_CUSTOM.has(key)||(full&&!HV.some(o=>catOrdBeamAngleNorm(o)===normFull));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. 100°" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdBeamAngleCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_ORD_BEAMANGLE_OPTIONS.map(o=>'<option value="'+escHtml(o)+'"'+(catOrdBeamAngleNorm(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
+    HV.map(o=>'<option value="'+escHtml(o)+'"'+(catOrdBeamAngleNorm(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -13748,15 +13823,16 @@ async function rememberCatModelNoOption(value){
 let CAT_ORD_MODELNO_CUSTOM=new Set();
 function isCatOrdModelNoColumn(label){return normSpecLabel(label)==='modelno.'}
 function catOrdModelNoCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('modelno',CAT_ORD_MODELNO_OPTIONS);
   const full=(val||'').trim();
   const key=ci+':'+vi;
-  const customMode=!CAT_ORD_MODELNO_OPTIONS.length||CAT_ORD_MODELNO_CUSTOM.has(key)||(full&&!CAT_ORD_MODELNO_OPTIONS.includes(full));
+  const customMode=!HV.length||CAT_ORD_MODELNO_CUSTOM.has(key)||(full&&!HV.includes(full));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. SLAUR" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdModelNoCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_ORD_MODELNO_OPTIONS.map(o=>'<option value="'+escHtml(o)+'"'+(o===full?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
+    HV.map(o=>'<option value="'+escHtml(o)+'"'+(o===full?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -13811,15 +13887,16 @@ async function rememberCatOptionsOption(value){
 let CAT_ORD_OPTIONS_CUSTOM=new Set();
 function isCatOrdOptionsColumn(label){return normSpecLabel(label)==='options'}
 function catOrdOptionsCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('options',CAT_ORD_OPTIONS_OPTIONS);
   const full=(val||'').trim();
   const key=ci+':'+vi;
-  const customMode=!CAT_ORD_OPTIONS_OPTIONS.length||CAT_ORD_OPTIONS_CUSTOM.has(key)||(full&&!CAT_ORD_OPTIONS_OPTIONS.includes(full));
+  const customMode=!HV.length||CAT_ORD_OPTIONS_CUSTOM.has(key)||(full&&!HV.includes(full));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. Emergency Kit" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdOptionsCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_ORD_OPTIONS_OPTIONS.map(o=>'<option value="'+escHtml(o)+'"'+(o===full?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
+    HV.map(o=>'<option value="'+escHtml(o)+'"'+(o===full?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -13867,16 +13944,17 @@ let CAT_ORD_CUTOUT_CUSTOM=new Set();
 function isCatOrdCutOutColumn(label){return normSpecLabel(label)==='cutout'}
 function catOrdCutOutNorm(s){return (s||'').replace(/\s+/g,'')}
 function catOrdCutOutCellHtml(ci,vi,val,canRemove,total){
+  const HV=catHistView('cutout',CAT_ORD_CUTOUT_OPTIONS);
   const full=(val||'').trim();
   const normFull=catOrdCutOutNorm(full);
   const key=ci+':'+vi;
-  const customMode=!CAT_ORD_CUTOUT_OPTIONS.length||CAT_ORD_CUTOUT_CUSTOM.has(key)||(full&&!CAT_ORD_CUTOUT_OPTIONS.some(o=>catOrdCutOutNorm(o)===normFull));
+  const customMode=!HV.length||CAT_ORD_CUTOUT_CUSTOM.has(key)||(full&&!HV.some(o=>catOrdCutOutNorm(o)===normFull));
   if(customMode)
     return catOrdValueRowWrap(ci,vi,total,
       '<textarea rows=1 style="width:110px;font-size:11px;resize:vertical;box-sizing:border-box" placeholder="e.g. 150mm" oninput="onCatOrdValueInput('+ci+','+vi+',this.value)" onblur="onCatOrdCutOutCustomBlur('+ci+','+vi+',this)">'+escHtml(full)+'</textarea>',
       canRemove);
   const opts='<option value="">— Select —</option>'+
-    CAT_ORD_CUTOUT_OPTIONS.map(o=>'<option value="'+escHtml(o)+'"'+(catOrdCutOutNorm(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
+    HV.map(o=>'<option value="'+escHtml(o)+'"'+(catOrdCutOutNorm(o)===normFull?' selected':'')+'>'+escHtml(o)+'</option>').join('')+
     '<option value="__empty__">Empty</option>'+
     '<option value="__custom__">Custom…</option>';
   return catOrdValueRowWrap(ci,vi,total,
@@ -14227,6 +14305,7 @@ function catOrdFieldIconKey(c){
 // moveCatOrdVariant/removeCatOrdVariant).
 function renderCatOrdTable(){
   normalizeCatOrdLockstep();
+  catHistCollect();
   recomputeCatSpecialOrdColumns();
   autoFillModelNoDown();
   recomputeOrderingCodeExample();
@@ -14557,6 +14636,7 @@ function collectCatData(){
   // immediate action via removeCatFamilyMember).
   const family=($('cat-family-enabled')&&$('cat-family-enabled').checked)?catFamilyCurrentValue():'';
   return {
+    input_history:JSON.parse(JSON.stringify(CAT_INPUT_HISTORY)),
     company:productName, project:series,
     product_name:productName, series, family,
     product_type:$('cat-producttype').value,
@@ -16025,6 +16105,7 @@ function populateCatForm(data){
     ?data.specs.map(s=>({label:s.label,values:(s.value||'').split('\n')}))
     :CAT_DEFAULT_SPEC_LABELS.map(label=>({label,values:['']}));
   CAT_FINISH=data.finish_colors||[];
+  CAT_INPUT_HISTORY=(data.input_history&&typeof data.input_history==='object')?JSON.parse(JSON.stringify(data.input_history)):{};
   CAT_COL_SEQ=0;CAT_ORD_COL_CLIPBOARD=null;CAT_ORD_CURRENT_VARIANT=0;CAT_ORD_ALIGN_ROWS=!!data.ordering_align_rows;
   CAT_ORD_COLS=(data.ordering_columns&&data.ordering_columns.length)
     ?data.ordering_columns.map(c=>({key:'col'+(CAT_COL_SEQ++),label:c.label,values:(c.values&&c.values.length)?c.values:[''],width:(typeof c.width==='number'&&c.width>0)?c.width:null}))

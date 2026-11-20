@@ -2144,3 +2144,24 @@ v1.1.101 → v1.1.102 changed 3 (`OfficeTool.exe`, `_internal/base_library.zip`,
   row's alternating colour (`filler_bg`: shaded when the last row is white,
   white when it's shaded), per Edy's marked-up SLMAR screenshot.
   `CAT_LAYOUT_VERSION` 9.
+
+## Datasheet dropdowns: input history per product (2026-11-20)
+
+- The Ordering Table (Size, Model No., Power, CCT, Beam Angle, Input
+  Voltage, Controls, Cut Out, Options) and Technical Specifications value
+  dropdowns used to list every value ever typed on any datasheet (Edy's
+  Size dropdown had dozens of other products' sizes). Each dropdown now
+  shows only the built-in presets plus values entered on THIS datasheet.
+- `CAT_INPUT_HISTORY` (`{kind: [normalized values]}`, spec values under
+  `spec:<label key>`) is saved with the datasheet as `input_history`,
+  restored by `populateCatForm`, cleared by `resetCatForm`. It grows from
+  whatever the boxes hold (`catHistCollect`, run at the start of
+  `renderCatOrdTable`/`renderCatSpecs`), so a value replaced later stays
+  pickable on that product. Older datasheets start from their current
+  values.
+- Built-in presets are mirrored in JS (`CAT_HIST_SEEDS`,
+  `CAT_SPEC_HIST_SEEDS`; keep them in step with `load_cfg`'s defaults).
+  The catalogue-wide lists in config.json still grow and are still managed
+  in Manage Lists; `catHistView`/`catSpecHistView` only filter them for
+  display. Standard Fill still uses the full lists. No PDF change, so no
+  `CAT_LAYOUT_VERSION` bump.
